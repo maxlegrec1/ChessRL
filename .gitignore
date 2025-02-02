@@ -1,0 +1,5 @@
+data_stockfish/
+stockfish/
+wandb/
+stockfish*
+*.pt
