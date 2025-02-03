@@ -18,15 +18,10 @@ class ChessGRPOTrainer:
         """Generate a sequence using the current policy."""
         sequences = []
         old_probs = []
-        for _ in range(self.G):
-            sequence, prob = self.model.generate_sequence(board_tensor)
-            #print(sequence.shape,prob.shape)
-            sequences.append(sequence)
-            old_probs.append(prob)
-        sequences = torch.stack(sequences)
-        old_probs = torch.stack(old_probs)
-        #print(sequences.shape,old_probs.shape)
-        return sequences, old_probs
+        board_expand = board_tensor.unsqueeze(0).expand(self.G,-1,-1,-1,-1).contiguous()
+        board_expand = board_expand.view(self.G*board_expand.shape[1],board_expand.shape[2],board_expand.shape[3],board_expand.shape[4])
+        sequences,old_probs = self.model.generate_sequence(board_expand)
+        return sequences.view(self.G,-1,sequences.shape[1]),old_probs.view(self.G,-1,old_probs.shape[1],old_probs.shape[2]),board_expand
 
     def compute_rewards(self, sequences, target_moves):
         """Calculate format and move rewards."""
@@ -119,7 +114,7 @@ class ChessGRPOTrainer:
         # Compute loss
         clipped_ratios = torch.clamp(ratios, 1 - self.epsilon, 1 + self.epsilon)
         policy_loss = -(torch.min(ratios * advantages, clipped_ratios * advantages)).mean()
-        loss = policy_loss / (self.G * 192) + self.beta * kl_divergence.mean()
+        loss = policy_loss / (self.G * 192)  + self.beta * kl_divergence.mean()
         return loss, kl_divergence
 
 
@@ -128,28 +123,20 @@ class ChessGRPOTrainer:
     def train_step(self, batch):
         """Process one batch of board positions and target moves."""
         board_tokens_batch, target_moves_batch = batch
-        sequences, old_probs = self.generate_sequence(board_tokens_batch)
+        sequences, old_probs,board_tokens_batch = self.generate_sequence(board_tokens_batch)
         rewards, format_reward, move_rewards  = self.compute_rewards(sequences, target_moves_batch)
         #print(rewards,rewards.shape)
-        advantages = rewards - rewards.mean(dim=0) / (rewards.std(dim=0) + 1)
+        advantages = rewards - rewards.mean(dim=0) / (rewards.std(dim=0) + 0.1)
         #print(rewards.std(dim=0))
         #print(advantages.max(),advantages.min())
-        new_logits = []
-        ref_logits = []
-        for i in range(self.G):
-            has_seen_end = torch.zeros((sequences.shape[2],),device="cuda")
-            sequence = sequences[i]
-            #empty_tensor = torch.empty((sequences.shape[1], 0), dtype=torch.long, device="cuda")
-            loss = 0
-            #print(sequence.shape)
-            logits, _ , _ = self.model((board_tokens_batch,sequence),compute_loss=True)
-            with torch.no_grad():
-                re_logits, _ , _ = self.ref_model((board_tokens_batch,sequence),compute_loss=True)
-            new_logits.append(logits)
-            ref_logits.append(re_logits)
-        new_logits = torch.stack(new_logits)
-        ref_logits = torch.stack(ref_logits)
+        batched = sequences.view(-1,sequences.shape[2])
+        new_logits, _ , _ = self.model((board_tokens_batch,batched),compute_loss=True)
+        new_logits = new_logits.view(self.G,-1,new_logits.shape[1],new_logits.shape[2])
+        with torch.no_grad():
+            ref_logits, _ , _ = self.ref_model((board_tokens_batch,batched),compute_loss=True)
+        ref_logits = ref_logits.view(self.G,-1,ref_logits.shape[1],ref_logits.shape[2])
 
+        #print(new_logits.shape,ref_logits.shape,advantages.shape,sequences.shape)
         loss,kl = self.compute_loss(new_logits, ref_logits, advantages,sequences)
         self.optimizer.zero_grad()
         loss.backward()
