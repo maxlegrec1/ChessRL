@@ -7,7 +7,7 @@ import random
 stockfish_binary = "stockfish/stockfish-ubuntu-x86-64-avx2"
 stockfish = Stockfish(path = stockfish_binary, depth = 15)
 
-stockfish.update_engine_parameters({"MultiPV":5, "Threads" : 2 })
+stockfish.update_engine_parameters({"MultiPV":1, "Threads" : 2 })
 
 gen = dir_iterator(dir_path,return_fen = True)
 

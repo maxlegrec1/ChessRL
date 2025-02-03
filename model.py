@@ -335,7 +335,7 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
     @torch.no_grad()
-    def generate_sequence(self, board, T = 10):
+    def generate_sequence(self, board, T = 1):
 
         position = self.FenEncoder(board)
         sequences = []

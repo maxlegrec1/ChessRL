@@ -6,7 +6,7 @@ from data.vocab import policy_index
 
 
 class ChessGRPOTrainer:
-    def __init__(self, model, ref_model, optimizer, epsilon=0.2, beta=0.000, G=5):
+    def __init__(self, model, ref_model, optimizer, epsilon=0.2, beta=0.01, G=32):
         self.model = model  # Current policy (π_θ)
         self.ref_model = ref_model  # Reference model (π_ref)
         self.optimizer = optimizer
@@ -171,13 +171,15 @@ if __name__ == "__main__":
     dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
     gen = dir_iterator(dir_path)
     #load weights 
-    #model.load_state_dict(torch.load("checkpoint_step_15000.pt"))
-    #reference.load_state_dict(torch.load("checkpoint_step_15000.pt"))
+    model.load_state_dict(torch.load("checkpoint_step_fine_tune_701.pt"))
+    reference.load_state_dict(torch.load("checkpoint_step_fine_tune_701.pt"))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
     # Initialize trainer
     trainer = ChessGRPOTrainer(model, reference, optimizer)
     
+    import copy
+
     start_think_index = policy_index.index("<thinking>")
     end_think_index = policy_index.index("</thinking>")
     end_variation_index = policy_index.index("end_variation")
@@ -186,6 +188,9 @@ if __name__ == "__main__":
     num_steps = 5000
     for _ in range(num_steps):
         batch = next(gen)
+        #print(batch)
         loss = trainer.train_step(batch)
+        if _ % 200 == 0:
+            trainer.ref_model = copy.deepcopy(trainer.model)
         #print(loss.item())
  

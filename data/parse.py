@@ -7,7 +7,7 @@ from data.fen_encoder import fen_to_tensor,FenEncoder
 from data.vocab import policy_index
 
 #batch_size = 400 #pretrain
-batch_size = 32 #grpo
+batch_size = 5 #grpo
 min_length = 20
 num_moves = 10
 block_size = 256
@@ -44,11 +44,11 @@ def get_batch(pgn_path, return_fen = False):
                 fen_array = []
                 moves_array = []
 
-def dir_iterator(dir_path,return_fen = True):
+def dir_iterator(dir_path,return_fen = False):
     for pgn in os.listdir(dir_path):
         print(pgn)
         pgn_path = os.path.join(dir_path,pgn)
-        gen = get_batch(pgn_path,return_fen = True)
+        gen = get_batch(pgn_path,return_fen = return_fen)
         while True:
             try:
                 yield next(gen)
@@ -65,10 +65,22 @@ def encode_moves(moves_array):
     moves = []
     #print(moves_array)
     for move in moves_array:
-        if move.uci()[-1]!='n':
+        if move.uci() in policy_index:
             move_id = policy_index.index(move.uci())
         else:
             move_id = policy_index.index(move.uci()[:-1])
+        moves.append(move_id)
+    return torch.from_numpy(np.array(moves))
+
+
+def encode_moves_bis(moves_array):
+    moves = []
+    #print(moves_array)
+    for move in moves_array:
+        if move in policy_index:
+            move_id = policy_index.index(move)
+        else:
+            move_id = policy_index.index(move[:-1])
         moves.append(move_id)
     return torch.from_numpy(np.array(moves))
 
