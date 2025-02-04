@@ -57,6 +57,6 @@ for i in progress_bar:
         checkpoint_path = f"checkpoint_step_fine_tune_{i+1}.pt"
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Model checkpoint saved at step {i+1}")
-    if i == 700:
+    if i == 1100:
         checkpoint_path = f"checkpoint_step_fine_tune_{i+1}.pt"
         torch.save(model.state_dict(), checkpoint_path)
