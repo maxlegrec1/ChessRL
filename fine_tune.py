@@ -6,12 +6,27 @@ import numpy as np
 from data.vocab import policy_index
 from data.parse import clip_and_batch,encode_fens,encode_moves_bis
 from tqdm import tqdm
-data_path = "data_stockfish"
+
 
 device = "cuda"
-def gen(path = "data_stockfish"):
-    for file in os.listdir(path):
-        file_path = os.path.join(path,file)
+
+files = []
+data_path = "data_stockfish"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+data_path = "data_antoine/data_stockfish"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "data_antoine/data_stockfish2"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+
+
+
+def gen():
+    for file_path in files:
         #print(file_path)
         f = open(file_path,"rb")
         data = pickle.load(f)
@@ -31,9 +46,9 @@ def gen(path = "data_stockfish"):
             variations += [first_move_played]
             variations += ["end"]
             batch_vars.append(encode_moves_bis(variations))
+
         batch_vars = clip_and_batch(batch_vars)
         batch_fens = encode_fens(fens)
-        #print(batch_fens,batch_vars)
         yield (batch_fens.to("cuda"),batch_vars.to("cuda"))
 
 
@@ -106,4 +121,3 @@ def compute_rewards(self, sequences, target_moves):
         rewards = format_rewards + 14*move_rewards
         return rewards, format_rewards, move_rewards
             
-gen(data_path)

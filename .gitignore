@@ -3,3 +3,6 @@ stockfish/
 wandb/
 stockfish*
 *.pt
+data_antoine/
+runs/
+*.pyc

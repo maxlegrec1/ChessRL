@@ -24,6 +24,7 @@ dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
 opt = torch.optim.Adam(model.parameters(), lr=1e-4)
 num_steps = 15000
 gen = gen()
+gradient_accumulation_steps = 16
 use_wandb = True
 if use_wandb:
     wandb.init(project="ChessRL-fine-tune")
@@ -35,11 +36,13 @@ for i in progress_bar:
     
     with autocast(device_type='cuda', dtype=torch.float16):  # Enable mixed precision
         out, loss, targets = model(inp, compute_loss=True)
-    
-    opt.zero_grad()
     scaler.scale(loss).backward()
-    scaler.step(opt)
-    scaler.update()
+    if (i + 1) % gradient_accumulation_steps == 0:
+        scaler.step(opt)
+        scaler.update()
+        opt.zero_grad()
+
+
     
     # Calculate accuracy (where argmax(out) == targets and targets != 1928)
     acc = (torch.argmax(out, dim=-1) == targets).float()
@@ -54,9 +57,6 @@ for i in progress_bar:
     
     # Save model checkpoint every 1000 steps
     if (i + 1) % 1000 == 0:
-        checkpoint_path = f"checkpoint_step_fine_tune_{i+1}.pt"
+        checkpoint_path = f"fine_tune/checkpoint_step_fine_tune_{i+1}.pt"
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Model checkpoint saved at step {i+1}")
-    if i == 1100:
-        checkpoint_path = f"checkpoint_step_fine_tune_{i+1}.pt"
-        torch.save(model.state_dict(), checkpoint_path)

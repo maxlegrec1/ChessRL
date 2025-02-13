@@ -10,11 +10,16 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 import inspect
 from dataclasses import dataclass
-
+from data.vocab import policy_index
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from data.fen_encoder import FenEncoder
+
+start_think_index = policy_index.index("<thinking>")
+end_think_index = policy_index.index("</thinking>")
+end_variation_index = policy_index.index("end_variation")
+end_index = policy_index.index("end")
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -343,8 +348,16 @@ class GPT(nn.Module):
         tok_emb = position
         device = position.device
         b,t,_ = position.shape #t = 64
+        #append think token as first 
+        idx_next = torch.full((tok_emb.shape[0],1),start_think_index,device = device)
+        end_think = torch.full((tok_emb.shape[0],1),end_think_index,device = device)
+        end = torch.full((tok_emb.shape[0],1),end_index,device = device)
+        num_zeros = torch.zeros((tok_emb.shape[0],1),device = device)
+        sequences.append(idx_next)
+        tok_emb = torch.cat((tok_emb,self.transformer.wte(idx_next)),dim=1)
+        t+=1 
         predicted_tokens = None
-        for _ in range(self.config.block_size-64):
+        for _ in range(self.config.block_size-64 -1):
             #print(tok_emb.shape)
             pos = torch.arange(0, t, dtype=torch.long, device=device)
             pos_emb = self.transformer.wpe(pos)
@@ -359,6 +372,13 @@ class GPT(nn.Module):
             logits = logits.view(b, -1)
             prob = F.softmax(logits/T, dim=-1)
             idx_next = torch.multinomial(prob, num_samples=1)
+            #if num_zeros == 5, changes idx to stop thinking
+            idx_next = torch.where(num_zeros == 5,end_think,idx_next)
+            num_zeros = torch.where(num_zeros == 5,6,num_zeros) #change 5s to 6 after changing idx
+            if len(sequences)>1: # if before last is </think>, place end token.
+                to_end = (sequences[-2]==end_think_index)
+                idx_next = torch.where(to_end,end,idx_next)
+            num_zeros = num_zeros + (idx_next== end_variation_index).float()
             sequences.append(idx_next)
             probs.append(prob.unsqueeze(1))
             t+=1

@@ -223,7 +223,7 @@ policy_index = [
     "f2e1q","f2e1r","f2e1b","f2f1q","f2f1r","f2f1b","f2g1q","f2g1r","f2g1b",
     "g2f1q","g2f1r","g2f1b","g2g1q","g2g1r","g2g1b","g2h1q","g2h1r","g2h1b",
     "h2g1q","h2g1r","h2g1b","h2h1q","h2h1r","h2h1b",#add special tokens
-    "<thinking>","</thinking>","end_variation","end"
+    "<thinking>","</thinking>","end_variation","end","caca"
 ]
 
 
