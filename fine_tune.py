@@ -49,7 +49,7 @@ def gen():
 
         batch_vars = clip_and_batch(batch_vars)
         batch_fens = encode_fens(fens)
-        yield (batch_fens.to("cuda"),batch_vars.to("cuda"))
+        yield (batch_fens.to("cuda"),batch_vars.to("cuda"),fens)
 
 
 def compute_rewards(self, sequences, target_moves):

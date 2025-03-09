@@ -57,7 +57,7 @@ class StockfishEvaluator:
 
 
 class ChessGRPOTrainer:
-    def __init__(self, model, ref_model, optimizer, epsilon=0.2, beta=0.001, G=16,grad_acc = 1, alpha = 0.0):
+    def __init__(self, model, ref_model, optimizer, epsilon=0.2, beta=0.001, G=1,grad_acc = 1, alpha = 0.0):
         self.model = model  # Current policy (π_θ)
         self.ref_model = ref_model  # Reference model (π_ref)
         self.optimizer = optimizer
@@ -137,7 +137,7 @@ class ChessGRPOTrainer:
 
         accs = accs / (sequences.shape[0]*sequences.shape[1])
         #rewards = format_rewards #+ 3 *  move_rewards + 0.2 * legal_rewards
-        rewards = format_rewards + move_rewards# + legal_rewards
+        rewards = format_rewards #+ move_rewards + legal_rewards
         return rewards, format_rewards, move_rewards,legal_rewards,accs
 
     def compute_move_reward(self,occurences,last_occurence,target_move):
@@ -268,57 +268,19 @@ class ChessGRPOTrainer:
         """Compute the loss as the ratio of π_θ(a|s) to π_θ_no_grad(a|s), minus KL(π_θ || π_ref)."""
         new_logits = new_logits[:,:,63:-1,:]
         ref_logits = ref_logits[:,:,63:-1,:]
-        #print(new_logits.shape,sequences.shape)
-        matches = (sequences == end_index)
-        #print(matches.device,sequences.device)
-        first_indices = torch.where(matches, torch.arange(sequences.shape[2],device = matches.device).expand_as(sequences), sequences.shape[2])
-        first_occurrence = first_indices.min(dim=-1).values
-        to_consider = first_occurrence != 192
-
-        logits_of_move_played = new_logits.gather(dim=2, index=(first_occurrence-1).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 1929))
-        logits_of_move_played = logits_of_move_played.squeeze(2)
-        #print(logits_of_move_played.shape)
-
-        arange = torch.arange(sequences.shape[2],device = matches.device).view(1, 1, -1)  # Shape (1, 1, 192)
-        mask = (arange <= first_occurrence.unsqueeze(-1)).float().unsqueeze(-1)  # Ones before k, zeros after
-        advantages = advantages.to("cuda").unsqueeze(-1).unsqueeze(-1)
-        '''
-        for i in range(2):
-            for j in range(4):
-                print(sequences[i][j])
-        print(advantages)
-        #print(advantages)
-        '''
-        new_log_probs = torch.nn.functional.log_softmax(new_logits, dim=-1)
-        ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
-        new_log_probs = new_log_probs.gather(dim=-1, index=sequences.unsqueeze(-1))
-        ref_log_probs = ref_log_probs.gather(dim=-1, index=sequences.unsqueeze(-1))
-        # Compute the KL divergence between the model and the reference model
-        per_token_kl = torch.exp(ref_log_probs - new_log_probs) - (ref_log_probs - new_log_probs) - 1
-
-        per_token_loss = torch.exp(new_log_probs - new_log_probs.detach()) * advantages
-        per_token_loss = -(per_token_loss - self.beta * per_token_kl)
-        loss = ((per_token_loss * mask).sum(dim=2) / mask.sum(dim=2)).mean()
-        mean_kl = ((per_token_kl * mask).sum(dim=2) / mask.sum(dim=2)).mean()
-
+        logits_of_move_played = new_logits[:,:,0,:]
         #kl between logits of move played and legal_mask
         legal_mask_logits = legal_mask + (1-legal_mask) * (-1000)
         legal_loss = F.kl_div(F.log_softmax(logits_of_move_played,dim=-1),F.softmax(legal_mask_logits,dim=-1),reduction = "none")
-        legal_loss = legal_loss.sum(dim=-1) * to_consider
-        legal_loss = legal_loss.sum() / to_consider.sum()
-        
-        loss += 0.1*legal_loss
-        print(first_occurrence,legal_loss)
+        legal_loss = legal_loss.sum(dim=-1)
+        legal_loss = legal_loss.mean()
+        loss = legal_loss
         legal_prob = F.softmax(logits_of_move_played,dim=-1)
         legal_prob = legal_prob * legal_mask
         legal_prob = legal_prob.sum(dim=-1)
-        legal_prob = legal_prob * to_consider
-        legal_prob = legal_prob.sum() / to_consider.sum()
-        #print(to_consider)
-        #print(legal_prob)
-        
-        
-        return loss, mean_kl,legal_prob
+        legal_prob = legal_prob.mean()
+
+        return loss,legal_prob
 
     def compute_legal_mask(self,fens):
         legal_mask = torch.zeros((len(fens),1929),dtype = torch.float32,device = "cuda")
@@ -340,8 +302,6 @@ class ChessGRPOTrainer:
         sequences, old_probs,board_tokens_batch = self.generate_sequence(board_tokens_batch)
         rewards, format_reward, move_rewards,legal_rewards,acc  = self.compute_rewards(sequences, target_moves_batch,fens)
         #print(rewards,rewards.shape)
-        max_reward= move_rewards.max(dim=0)[0].mean()
-        mean_reward = move_rewards.mean()
         advantages = (rewards - rewards.mean(dim=0) + self.alpha * (rewards.mean(dim=0)- rewards.mean())) / (rewards.std(dim=0) + 0.1)
 
         batched = sequences.view(-1,sequences.shape[2])
@@ -352,7 +312,8 @@ class ChessGRPOTrainer:
         ref_logits = ref_logits.view(self.G,-1,ref_logits.shape[1],ref_logits.shape[2])
 
         #print(new_logits.shape,ref_logits.shape,advantages.shape,sequences.shape)
-        loss,kl,legal_prob = self.compute_loss_bis(new_logits, ref_logits, advantages,sequences,legal_mask)
+        loss,legal_prob = self.compute_loss_bis(new_logits, ref_logits, advantages,sequences,legal_mask)
+        kl = torch.zeros(1)
         loss.backward()
         self.loss_t+= loss.item()
         self.kl_t += kl.mean().item()
@@ -365,11 +326,9 @@ class ChessGRPOTrainer:
         if (self.count+1)%self.grad_acc==0:
             self.optimizer.step()
             self.optimizer.zero_grad()
-            if wandb_log:
-                wandb.log({"loss":self.loss_t/self.grad_acc, "kl_divergence": self.kl_t/self.grad_acc,\
-                "rewards": self.rewards_t/self.grad_acc, "format_rewards":self.format_reward_t/self.grad_acc,\
-                "move_rewards": self.move_rewards_t/self.grad_acc,"legal_rewards": self.legal_rewards_t/self.grad_acc, "accuracy": self.acc_t / self.grad_acc, "legal_prob": self.legal_probs/self.grad_acc,\
-                "max_move_reward": max_reward.item(), "mean_move_reward": mean_reward.item()})
+            wandb.log({"loss":self.loss_t/self.grad_acc, "kl_divergence": self.kl_t/self.grad_acc,\
+             "rewards": self.rewards_t/self.grad_acc, "format_rewards":self.format_reward_t/self.grad_acc,\
+              "move_rewards": self.move_rewards_t/self.grad_acc,"legal_rewards": self.legal_rewards_t/self.grad_acc, "accuracy": self.acc_t / self.grad_acc, "legal_prob": self.legal_probs/self.grad_acc})
             '''
             self.writer.add_scalar("Loss", self.loss_t/self.grad_acc, self.count)
             self.writer.add_scalar("KL Divergence", self.kl_t/self.grad_acc, self.count)
@@ -399,15 +358,13 @@ if __name__ == "__main__":
     model = GPT(config).to("cuda")
     reference = GPT(config).to("cuda")
     import wandb
-    wandb_log = True
-    if wandb_log:
-        wandb.init(project="ChessRL-GRPO")
+    wandb.init(project="ChessRL-GRPO")
     from data.parse import dir_iterator
     dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
     gen = dir_iterator(dir_path,triple = True)
     #load weights 
-    #model.load_state_dict(torch.load("fine_tune/new_13000.pt"))
-    #reference.load_state_dict(torch.load("fine_tune/new_13000.pt"))
+    #model.load_state_dict(torch.load("fine_tune/checkpoint_step_fine_tune_10000.pt"))
+    #reference.load_state_dict(torch.load("fine_tune/checkpoint_step_fine_tune_10000.pt"))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
     # Initialize trainer
@@ -419,7 +376,6 @@ if __name__ == "__main__":
     end_think_index = policy_index.index("</thinking>")
     end_variation_index = policy_index.index("end_variation")
     end_index = policy_index.index("end")
-    
     # Train step
     num_steps = 100000
     for step in range(num_steps):
