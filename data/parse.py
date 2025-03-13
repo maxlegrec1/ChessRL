@@ -7,7 +7,7 @@ from data.fen_encoder import fen_to_tensor,FenEncoder
 from data.vocab import policy_index
 
 #batch_size = 400 #pretrain
-batch_size = 8  #grpo
+batch_size = 16  #grpo
 min_length = 20
 num_moves = 10
 block_size = 256
