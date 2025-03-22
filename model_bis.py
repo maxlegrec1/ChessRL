@@ -80,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
-
+        
 class MLP(nn.Module):
 
     def __init__(self, config):
@@ -220,6 +220,9 @@ class GPT(nn.Module):
         idx_next = torch.full((tok_emb.shape[0], 1), start_think_index, device=device)
         sequences.append(idx_next)
         tok_emb = torch.cat((tok_emb, self.transformer.wte(idx_next)), dim=1)
+        end_think = torch.full((tok_emb.shape[0],1),end_think_index,device = device)
+        end = torch.full((tok_emb.shape[0],1),end_index,device = device)
+        num_zeros = torch.zeros((tok_emb.shape[0],1),device = device)
         t += 1
         for _ in range(self.config.block_size - 64 - 1):
             pos = torch.arange(0, t, dtype=torch.long, device=device)
@@ -240,6 +243,41 @@ class GPT(nn.Module):
                 to_end = (sequences[-2]==end_think_index)
                 idx_next = torch.where(to_end,end,idx_next)
             num_zeros = num_zeros + (idx_next== end_variation_index).float()
+            sequences.append(idx_next)
+            probs.append(prob.unsqueeze(1))
+            t+=1
+            tok_emb = torch.cat((tok_emb,self.transformer.wte(idx_next)),dim=1)
+
+        sequences = torch.cat(sequences,dim=1)
+        probs = torch.cat(probs,dim=1)
+        
+        return sequences, probs
+    
+    @torch.no_grad()
+    def generate_sequence_raw(self, board, T=1):
+        position = self.FenEncoder(board)
+        sequences = []
+        probs = []
+        tok_emb = position
+        device = position.device
+        b, t, _ = position.shape  # t = 64
+        # Append think token
+        idx_next = torch.full((tok_emb.shape[0], 1), start_think_index, device=device)
+        sequences.append(idx_next)
+        tok_emb = torch.cat((tok_emb, self.transformer.wte(idx_next)), dim=1)
+        t += 1
+        for _ in range(self.config.block_size - 64 - 1):
+            pos = torch.arange(0, t, dtype=torch.long, device=device)
+            pos_emb = self.pe[pos]  # Using fixed positional encoding
+            x = self.transformer.drop(tok_emb + pos_emb)
+            for block in self.transformer.h:
+                x = block(x)
+            x = self.transformer.ln_f(x)
+            logits = self.lm_head(x[:, [-1], :])
+            #print(logits.shape)
+            logits = logits.view(b, -1)
+            prob = F.softmax(logits/T, dim=-1)
+            idx_next = torch.multinomial(prob, num_samples=1)
             sequences.append(idx_next)
             probs.append(prob.unsqueeze(1))
             t+=1

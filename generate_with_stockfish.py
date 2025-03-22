@@ -1,5 +1,5 @@
 
-dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
+dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/casual_pgn"
 from data.parse import dir_iterator
 from stockfish import Stockfish
 import numpy as np
@@ -9,7 +9,7 @@ stockfish = Stockfish(path = stockfish_binary, depth = 15)
 
 stockfish.update_engine_parameters({"MultiPV":1, "Threads" : 2 })
 
-gen = dir_iterator(dir_path,return_fen = True)
+gen = dir_iterator(dir_path,return_fen = True,batch_size = 32, all_elo = True)
 
 print(stockfish.is_fen_valid("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"))
 
@@ -48,15 +48,16 @@ def make_stockfish_play(k, fen):
         stockfish.make_moves_from_current_position([move])
     stockfish.set_fen_position(fen)
     return moves
-    
-import time
-from tqdm import tqdm
-import pickle
-for i in tqdm(range(10000)):
-    fens = next(gen) 
-    batch = {"fens" : fens, "var" : []}
-    for fen in tqdm(fens):
-        fen_variations = generate_variations(fen)
-        batch["var"].append(fen_variations)
-    
-    pickle.dump(batch, open(f"data_stockfish/{i}.pkl","wb"))
+
+if __name__ == "__main__":
+    import time
+    from tqdm import tqdm
+    import pickle
+    for i in tqdm(range(1000000)):
+        fens = next(gen) 
+        batch = {"fens" : fens, "var" : []}
+        for fen in tqdm(fens):
+            fen_variations = generate_variations(fen)
+            batch["var"].append(fen_variations)
+        
+        pickle.dump(batch, open(f"new_data/0{i}.pkl","wb"))

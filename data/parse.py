@@ -7,13 +7,13 @@ from data.fen_encoder import fen_to_tensor,FenEncoder
 from data.vocab import policy_index
 
 #batch_size = 400 #pretrain
-batch_size = 16  #grpo
+ #grpo
 min_length = 20
 num_moves = 10
 block_size = 256
 clip_length = block_size-64
 
-def get_batch(pgn_path, return_fen = False, triple = False):
+def get_batch(pgn_path, return_fen = False, triple = False,batch_size = 16,all_elo = False):
     with open(pgn_path, "r") as f:
         fen_array = []
         moves_array = []
@@ -22,6 +22,8 @@ def get_batch(pgn_path, return_fen = False, triple = False):
             if pgn.next()==None:
                 continue
             elo = min(int(pgn.headers["WhiteElo"]),int(pgn.headers["BlackElo"]))
+            if all_elo:
+                elo = 3000
             if elo <= 2200 or 'FEN' in pgn.headers.keys() or '960' in pgn.headers['Event'] or 'Odds' in pgn.headers['Event'] or 'house' in pgn.headers['Event']:
                 continue
             moves = [move for move in pgn.mainline_moves()]
@@ -46,11 +48,11 @@ def get_batch(pgn_path, return_fen = False, triple = False):
                 fen_array = []
                 moves_array = []
 
-def dir_iterator(dir_path,return_fen = False,triple = False):
+def dir_iterator(dir_path,return_fen = False,triple = False,batch_size = 16, all_elo = False):
     for pgn in os.listdir(dir_path):
         print(pgn)
         pgn_path = os.path.join(dir_path,pgn)
-        gen = get_batch(pgn_path,return_fen = return_fen, triple = triple)
+        gen = get_batch(pgn_path,return_fen = return_fen, triple = triple,batch_size = batch_size, all_elo = all_elo)
         while True:
             try:
                 yield next(gen)

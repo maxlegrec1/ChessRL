@@ -7,6 +7,7 @@ from data.vocab import policy_index
 import chess
 from torch.utils.tensorboard import SummaryWriter
 import time
+from test import calculate_metrics
 
 start_think_index = policy_index.index("<thinking>")
 end_think_index = policy_index.index("</thinking>")
@@ -16,12 +17,9 @@ end_index = policy_index.index("end")
 class StockfishEvaluator:
     def __init__(self, stockfish_path: str = "stockfish/stockfish-ubuntu-x86-64-avx2"):
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
-        self.occurences = {}
-        self.tot = 0
-        for move in policy_index:
-            self.occurences[move] = 0
+        self.hash_table = {}
     
-    def evaluate_move(self, fen: str, move: str,bypass_ratio = False) -> float:
+    def evaluate_move(self, fen: str, move: str,bypass_ratio = False, depth = 15,max_clip = 1000) -> float:
         """
         Evaluates a move using Stockfish and returns a reward based on the change in evaluation.
         
@@ -32,6 +30,9 @@ class StockfishEvaluator:
         Returns:
             float: A reward value where higher is better, lower is worse, and very low if illegal.
         """
+        hashed = hash(fen+move)
+        if hashed in self.hash_table:
+            return self.hash_table[hashed]
         board = chess.Board(fen)
         try:
             chess_move = chess.Move.from_uci(move)
@@ -39,23 +40,27 @@ class StockfishEvaluator:
             return -95.0
         if not chess.Move.from_uci(move) in board.legal_moves:
             return -90.0  # Very low reward for illegal moves
-        self.occurences[move] += 1
-        self.tot += 1
-        ratio = self.occurences[move] / self.tot
-        print(ratio)
-        ratio = min(0.2,ratio) #if ratio is bigger than 20% we cap it
-        ratio = ratio / 0.2 #normalize ratio between 0 and 1
-        info_before = self.engine.analyse(board, chess.engine.Limit(depth=15))
-        eval_before = info_before["score"].relative.score(mate_score=10000)
-        
+        if hash(fen) not in self.hash_table:
+            info_before = self.engine.analyse(board, chess.engine.Limit(depth=depth))
+            eval_before = info_before["score"].relative.score(mate_score=10000)
+            self.hash_table[hash(fen)] = eval_before
+        else:
+            eval_before = self.hash_table[hash(fen)]
+        #print("before",fen,eval_before)
         board.push(chess.Move.from_uci(move))
-        info_after = self.engine.analyse(board, chess.engine.Limit(depth=15))
+        info_after = self.engine.analyse(board, chess.engine.Limit(depth=depth))
         eval_after = info_after["score"].relative.score(mate_score=10000)
-        #print(eval_after,eval_before)
-        if bypass_ratio:
-            return max(-80,(-eval_after - eval_before) / 10)
-        return -80 * (ratio) + (1- ratio)* max(-80,(-eval_after - eval_before) / 10)  # Normalize score change
-    
+        #print("after",fen,move,eval_after)
+        eval_before = np.clip(eval_before,-max_clip,max_clip)
+        eval_after = np.clip(eval_after,-max_clip,max_clip)
+        value = max(-80,(-eval_after - eval_before) / 10)
+        self.hash_table[hashed] = value
+        self.before = eval_before
+        self.after = eval_after
+        return value
+    def reset_hash_table(self):
+        self.hash_table = {}
+
     def close(self):
         self.engine.quit()
 
@@ -183,6 +188,9 @@ class ChessGRPOTrainer:
                 format_rewards[i,j] = format_reward
                 move_rewards[i,j] = move_reward
                 legal_rewards[i,j] = legal_reward
+
+        #reset hash table values to avoid oom
+        self.stockfish.reset_hash_table()
 
         accs = accs / (sequences.shape[0] * sequences.shape[1])
         # Update response length metrics
@@ -335,6 +343,8 @@ class ChessGRPOTrainer:
         per_token_kl = (torch.exp(new_log_probs) * (new_log_probs - ref_log_probs)).sum(dim=-1).unsqueeze(-1)
         new_log_probs = new_log_probs.gather(dim=-1, index=sequences.unsqueeze(-1))
         ref_log_probs = ref_log_probs.gather(dim=-1, index=sequences.unsqueeze(-1))
+
+        self.avg_logp_diff = ((advantages > 0) * (new_log_probs - ref_log_probs) + (advantages < 0) * ( ref_log_probs -  new_log_probs)).mean() 
         # Compute the KL divergence between the model and the reference model
         #per_token_kl = torch.exp(ref_log_probs - new_log_probs) - (ref_log_probs - new_log_probs) - 1
 
@@ -422,7 +432,8 @@ class ChessGRPOTrainer:
                     "legal_prob": self.legal_probs / self.grad_acc,
                     "max_move_reward": max_reward.item(), 
                     "mean_move_reward": mean_reward.item(),
-                    "avg_response_length": avg_response_length
+                    "avg_response_length": avg_response_length,
+                    "avg_logp_diff" : self.avg_logp_diff.item()
                 })
             
             # Reset counters
@@ -450,6 +461,7 @@ if __name__ == "__main__":
         "epsilon": 0.2,
         "beta": 0.1,
         "G": 8,
+        "batch_size": 16,
         "grad_acc": 1,
         "alpha": 0.0,
         "epsilon_clip": 1e-5,
@@ -460,13 +472,16 @@ if __name__ == "__main__":
         "move_reward_weight": 1.0,
         "legal_reward_weight": 0.0,
         "legal_loss_weight": 0.0,
-        "model_update_frequency": 1000,
+        "model_update_frequency": 100000,
         "vocab_size": 1929,
         "block_size": 256,
         "dir_path": "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn",
         "num_training_steps": 100000,
         "model_save_steps": 1000,
-        "model_save_path": "GRPO.pt"
+        "model_save_path": "GRPO.pt",
+        "metrics_steps": 100,
+        "metrics_num_steps" : 100,
+        "refresh_engine_rate": 1000
     }
     
     # Initialize model config
@@ -486,7 +501,7 @@ if __name__ == "__main__":
     # Load dataset
     from data.parse import dir_iterator
     dir_path = config["dir_path"]
-    gen = dir_iterator(dir_path, triple=True)
+    gen = dir_iterator(dir_path, triple=True,batch_size = config['batch_size'])
     
     # Uncomment to load pretrained weights
     model.load_state_dict(torch.load("fine_tune/new_13000.pt"))
@@ -509,10 +524,17 @@ if __name__ == "__main__":
         if (step + 1) % (config["model_update_frequency"] * trainer.grad_acc) == 0:
             trainer.ref_model = copy.deepcopy(trainer.model)
             
-        if (step + 1) % 100 == 0:
+        if (step + 1) % config["refresh_engine_rate"] == 0:
             trainer.stockfish.close()
             trainer.stockfish = StockfishEvaluator(config["stockfish_path"])
 
 
         if (step +1) % config["model_save_steps"] == 0:
-            torch.save(model.state_dict(), config["model_save_path"])
+            torch.save(model.state_dict(), f"{step}_{config["model_save_path"]}")
+
+
+        if (step +1) % config["metrics_steps"] == 0 and wandb_log:
+
+            r = calculate_metrics([trainer.model,trainer.ref_model],gen,trainer,num_steps = config["metrics_num_steps"],name = step)
+
+            wandb.log({"model_metric": r[0], "ref_model_metric": r[1]})

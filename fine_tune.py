@@ -11,6 +11,8 @@ from tqdm import tqdm
 device = "cuda"
 
 files = []
+
+
 data_path = "data_stockfish"
 for file in os.listdir(data_path):
     files.append(os.path.join(data_path,file))
@@ -22,12 +24,14 @@ data_path = "data_antoine/data_stockfish2"
 for file in os.listdir(data_path):
     files.append(os.path.join(data_path,file))
 
-
+data_path = "new_data"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
 
 
 def gen():
     for file_path in files:
-        #print(file_path)
+        print(file_path)
         f = open(file_path,"rb")
         data = pickle.load(f)
         fens = data["fens"]
@@ -120,4 +124,29 @@ def compute_rewards(self, sequences, target_moves):
                 move_rewards[i,j] = move_reward
         rewards = format_rewards + 14*move_rewards
         return rewards, format_rewards, move_rewards
-            
+
+
+def gen2(multiple = 8):
+    sub_gen = gen()
+    while True:
+        batch_fens = []
+        batch_vars = []
+        fens = []
+        for _ in range(multiple):
+            b,v,f = next(sub_gen)
+            batch_fens.append(b)
+            batch_vars.append(v)
+            fens+=f
+        batch_fens = torch.cat(batch_fens,dim = 0)
+        batch_vars = torch.cat(batch_vars,dim = 0)
+        yield(batch_fens,batch_vars,fens)
+
+if __name__ == "__main__":
+
+    g = gen()
+
+    boards,moves,fens = next(g)
+    print(boards.shape)
+    print( moves[0])
+    moves_human = [policy_index[move] for move in  moves[0]]
+    print(fens[0], moves_human)

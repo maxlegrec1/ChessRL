@@ -19,7 +19,7 @@ class StockfishEvaluator:
         for move in policy_index:
             self.occurences[move] = 0
     
-    def evaluate_move(self, fen: str, move: str) -> float:
+    def evaluate_move(self, fen: str, move: str, depth = 15) -> float:
         """
         Evaluates a move using Stockfish and returns a reward based on the change in evaluation.
         
@@ -50,6 +50,8 @@ class StockfishEvaluator:
         info_after = self.engine.analyse(board, chess.engine.Limit(depth=15))
         eval_after = info_after["score"].relative.score(mate_score=10000)
         #print(eval_after,eval_before)
+        if bypass_ratio:
+            return max(-80,(-eval_after - eval_before) / 10)
         return -80 * (ratio) + (1- ratio)* max(-80,(-eval_after - eval_before) / 10)  # Normalize score change
     
     def close(self):

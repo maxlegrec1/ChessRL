@@ -1,6 +1,6 @@
 import torch
 from torch.amp import autocast, GradScaler
-from model import GPT, GPTConfig
+from model_bis import GPT, GPTConfig
 from data.parse import dir_iterator
 from tqdm import tqdm
 import wandb
@@ -18,7 +18,7 @@ scaler = GradScaler()  # Initialize GradScaler for mixed precision
 dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
 opt = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-gen = dir_iterator(dir_path,triple = True)
+gen = dir_iterator(dir_path,triple = True,batch_size = 400)
 
 def compute_legal_prob(out,fens,targets,limit_batch = 10):
     #compute legal prob
