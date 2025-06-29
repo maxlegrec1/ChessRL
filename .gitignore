@@ -6,3 +6,6 @@ stockfish*
 data_antoine/
 runs/
 *.pyc
+*.pgn
+*.parquet
+*.pkl
