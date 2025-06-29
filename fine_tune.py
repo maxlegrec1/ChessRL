@@ -3,8 +3,8 @@ import pickle
 import random
 import torch
 import numpy as np
-from data.vocab import policy_index
-from data.parse import clip_and_batch,encode_fens,encode_moves_bis
+from utils.vocab import policy_index
+from utils.parse import clip_and_batch,encode_fens,encode_moves_bis
 from tqdm import tqdm
 
 
@@ -13,29 +13,58 @@ device = "cuda"
 files = []
 
 
-data_path = "data_stockfish"
+data_path = "data/data_stockfish"
 for file in os.listdir(data_path):
     files.append(os.path.join(data_path,file))
-data_path = "data_antoine/data_stockfish"
-for file in os.listdir(data_path):
-    files.append(os.path.join(data_path,file))
-
-data_path = "data_antoine/data_stockfish2"
+data_path = "data/data_antoine/data_stockfish"
 for file in os.listdir(data_path):
     files.append(os.path.join(data_path,file))
 
-data_path = "new_data"
+data_path = "data/data_antoine/data_stockfish2"
 for file in os.listdir(data_path):
     files.append(os.path.join(data_path,file))
 
+data_path = "data/new_data"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "data/dce_data"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "new_data/"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+data_path = "endgame/"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "endgame_parallel/"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "endgame_parallel_weighted/"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+data_path = "endgame_parallel_zst/"
+for file in os.listdir(data_path):
+    files.append(os.path.join(data_path,file))
+
+print(len(files))
+random.shuffle(files)
 
 def gen():
     for file_path in files:
         print(file_path)
         f = open(file_path,"rb")
         data = pickle.load(f)
-        fens = data["fens"]
-        moves = data["var"]
+        if isinstance(data,dict):
+            fens = data["fens"]
+            moves = data["var"]
+        else: #instanct is list
+            fens = [d['fen'] for d in data]
+            moves = [d['variations'] for d in data]
         batch_vars = []
         #print(fens)
         for fen,vars in zip(fens,moves):
@@ -133,7 +162,10 @@ def gen2(multiple = 8):
         batch_vars = []
         fens = []
         for _ in range(multiple):
-            b,v,f = next(sub_gen)
+            try:
+                b,v,f = next(sub_gen)
+            except StopIteration:
+                return 
             batch_fens.append(b)
             batch_vars.append(v)
             fens+=f
@@ -146,7 +178,7 @@ if __name__ == "__main__":
     g = gen()
 
     boards,moves,fens = next(g)
-    print(boards.shape)
-    print( moves[0])
+    #print(boards.shape)
+    #print( moves[0])
     moves_human = [policy_index[move] for move in  moves[0]]
     print(fens[0], moves_human)

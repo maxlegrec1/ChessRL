@@ -1,6 +1,6 @@
 
 dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/casual_pgn"
-from data.parse import dir_iterator
+from utils.parse import dir_iterator
 from stockfish import Stockfish
 import numpy as np
 import random
@@ -53,6 +53,7 @@ if __name__ == "__main__":
     import time
     from tqdm import tqdm
     import pickle
+
     for i in tqdm(range(1000000)):
         fens = next(gen) 
         batch = {"fens" : fens, "var" : []}
@@ -60,4 +61,5 @@ if __name__ == "__main__":
             fen_variations = generate_variations(fen)
             batch["var"].append(fen_variations)
         
-        pickle.dump(batch, open(f"new_data/0{i}.pkl","wb"))
+        pickle.dump(batch, open(f"endgame/{i}.pkl","wb"))
+

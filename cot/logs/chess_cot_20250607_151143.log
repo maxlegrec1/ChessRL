@@ -1,0 +1,8 @@
+2025-06-07 15:11:43,936 - chess_cot_generation - INFO - Starting chess COT generation with performance optimizations
+2025-06-07 15:11:43,936 - chess_cot_generation - INFO - Configuration: Workers=8, Batch_Size=64, Top_K=5
+2025-06-07 15:11:45,516 - chess_cot_generation - INFO - Ray initialized with 8 workers
+2025-06-07 15:11:45,517 - chess_cot_generation - INFO - Creating Stockfish workers...
+2025-06-07 15:11:47,564 - chess_cot_generation - INFO - 8 Stockfish workers created
+2025-06-07 15:11:47,564 - chess_cot_generation - INFO - Initializing FEN generator from: /media/maxime/385e67e0-8703-4723-a0bc-af3a292fd030/stockfish_data/Leela_training
+2025-06-07 15:11:47,564 - chess_cot_generation - INFO - Using real dir_iterator
+2025-06-07 15:11:47,565 - chess_cot_generation - INFO - Starting processing loop for up to 1000000 batches

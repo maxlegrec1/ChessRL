@@ -61,8 +61,10 @@ if __name__ == "__main__":
     config.block_size = 256
     model = GPT(config).to("cuda")
     model.load_state_dict(torch.load("pretrain/follow_checkpoint_step_160000.pt"))
+    teacher = GPT(config).to("cuda")
+    teacher.load_state_dict(torch.load("pretrain/follow_checkpoint_step_160000.pt"))
     scaler = GradScaler()  # Initialize GradScaler for mixed precision
-
+    
     
     start_think_index = policy_index.index("<thinking>")
     end_think_index = policy_index.index("</thinking>")
@@ -72,7 +74,7 @@ if __name__ == "__main__":
 
     opt = torch.optim.Adam(model.parameters(), lr=6e-5)
     num_steps = 100000
-    gen = generator()
+    gen = generator(multiple = 4)
     gradient_accumulation_steps = 1
     use_wandb = True
     step_counter = 0
@@ -95,6 +97,23 @@ if __name__ == "__main__":
             print(inp[0].shape)
         with autocast(device_type='cuda', dtype=torch.float16,enabled = use_float16):  # Enable mixed precision
             out, loss, targets = model(inp, compute_loss=True)
+        
+            with torch.no_grad():
+                teacher_out, _, _ = teacher(inp, compute_loss=True)
+
+        #teacher loss
+        out_ = out[:,63:-1,:]
+        targets_ = targets[:,63:-1]
+        indexes_of_end = (targets_ == end_index).float().argmax(dim=1) - 1 #uses the fact that argmax returns the first occurence
+        out_ = out_[torch.arange(out_.shape[0]),indexes_of_end,:]
+        
+        teacher_out_= teacher_out[:,63,:] 
+        #print(out_.shape,teacher_out_.shape)
+        loss_teacher = torch.nn.functional.mse_loss(out_, teacher_out_)
+
+        loss += loss_teacher 
+
+
         scaler.scale(loss).backward()
         if (i + 1) % gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 100.0)
@@ -121,7 +140,7 @@ if __name__ == "__main__":
             #calculate accuracy of move played
             out_ = out[:,63:-1,:]
             targets_ = targets[:,63:-1]
-            indexes_of_end = (targets_ == end_index).float().argmax(dim=1) - 1 
+            indexes_of_end = (targets_ == end_index).float().argmax(dim=1) - 1 #uses the fact that argmax returns the first occurence
             out_ = out_[torch.arange(out_.shape[0]),indexes_of_end,:]
             targets_ = targets_[torch.arange(targets_.shape[0]),indexes_of_end]
             acc_move_played = (torch.argmax(out_, dim=-1) == targets_).float().mean()
@@ -129,7 +148,7 @@ if __name__ == "__main__":
 
             progress_bar.set_description(f"Loss: {loss.item()} Accuracy: {acc.item()}")
             if use_wandb:
-                wandb.log({"loss": loss.item(), "accuracy": acc.item(), "start_think_acc": start_think_acc.item(), "end_think_acc": end_think_acc.item(), "end_variation_acc": end_variation_acc.item(), "end_acc": end_acc.item(), "legal_prob": legal_prob, "legal_prob_first_move": legal_prob_first_move, "acc_move_played": acc_move_played.item()})
+                wandb.log({"loss": loss.item(),"teacher_loss": loss_teacher.item(), "accuracy": acc.item(), "start_think_acc": start_think_acc.item(), "end_think_acc": end_think_acc.item(), "end_variation_acc": end_variation_acc.item(), "end_acc": end_acc.item(), "legal_prob": legal_prob, "legal_prob_first_move": legal_prob_first_move, "acc_move_played": acc_move_played.item()})
         if i % 1000 == 0:
             checkpoint_path = f"fine_tune/checkpoint_{i+1}.pt"
             torch.save(model.state_dict(), checkpoint_path)

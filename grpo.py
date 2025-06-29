@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
-from data.vocab import policy_index
+from utils.vocab import policy_index
 import chess
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     wandb_log = True
     if wandb_log:
         wandb.init(project="ChessRL-GRPO")
-    from data.parse import dir_iterator
+    from utils.parse import dir_iterator
     dir_path = "/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn"
     gen = dir_iterator(dir_path,triple = True)
     #load weights 

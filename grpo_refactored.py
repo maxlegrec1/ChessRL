@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
-from data.vocab import policy_index
+from utils.vocab import policy_index
 import chess
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -127,7 +127,7 @@ class ChessGRPOTrainer:
         old_probs = []
         board_expand = board_tensor.unsqueeze(0).expand(self.G,-1,-1,-1,-1).contiguous()
         board_expand = board_expand.view(self.G*board_expand.shape[1],board_expand.shape[2],board_expand.shape[3],board_expand.shape[4])
-        print(board_expand.shape)
+        #print(board_expand.shape)
         sequences,old_probs = self.model.generate_sequence(board_expand)
         return sequences.view(self.G,-1,sequences.shape[1]),old_probs.view(self.G,-1,old_probs.shape[1],old_probs.shape[2]),board_expand
 
@@ -351,7 +351,7 @@ class ChessGRPOTrainer:
         per_token_loss = torch.exp(new_log_probs - new_log_probs.detach()) * advantages
         per_token_loss = -(per_token_loss - self.beta * per_token_kl)
         #per_token_loss = self.beta * per_token_kl
-        print(per_token_loss.shape,mask.shape)
+        #print(per_token_loss.shape,mask.shape)
         loss = ((per_token_loss * mask).sum(dim=2) / mask.sum(dim=2)).mean()
         mean_kl = ((per_token_kl * mask).sum(dim=2) / mask.sum(dim=2)).mean()
 
@@ -362,7 +362,7 @@ class ChessGRPOTrainer:
         legal_loss = legal_loss.sum() / to_consider.sum()
         
         loss = loss + self.config["legal_loss_weight"] * legal_loss
-        print(first_occurrence, legal_loss)
+        print(first_occurrence)
         legal_prob = F.softmax(logits_of_move_played, dim=-1)
         legal_prob = legal_prob * legal_mask
         legal_prob = legal_prob.sum(dim=-1)
@@ -390,8 +390,6 @@ class ChessGRPOTrainer:
         sequences, old_probs, board_tokens_batch = self.generate_sequence(board_tokens_batch)
         rewards, format_reward, move_rewards, legal_rewards, acc = self.compute_rewards(sequences, target_moves_batch, fens)
         
-        max_reward = move_rewards.max(dim=0)[0].mean()
-        mean_reward = move_rewards.mean()
         advantages = (rewards - rewards.mean(dim=0) + self.alpha * (rewards.mean(dim=0) - rewards.mean())) / (rewards.std(dim=0) + 0.1)
 
         batched = sequences.view(-1, sequences.shape[2])
@@ -403,7 +401,11 @@ class ChessGRPOTrainer:
 
         loss, kl, legal_prob = self.compute_loss_bis(new_logits, ref_logits, advantages, sequences, legal_mask)
         loss.backward()
-        
+        max_reward = move_rewards.max(dim=0)
+        print(move_rewards)
+        print(max_reward)
+        max_reward = max_reward[0].mean()
+        mean_reward = move_rewards.mean()
         self.loss_t += loss.item()
         self.kl_t += kl.mean().item()
         self.rewards_t += rewards.mean().item()
@@ -453,7 +455,7 @@ class ChessGRPOTrainer:
 
 
 if __name__ == "__main__":
-    from model import GPT, GPTConfig
+    from model_bis import GPT, GPTConfig
     import wandb
     
     # Define configuration
@@ -479,8 +481,8 @@ if __name__ == "__main__":
         "num_training_steps": 100000,
         "model_save_steps": 1000,
         "model_save_path": "GRPO.pt",
-        "metrics_steps": 100,
-        "metrics_num_steps" : 100,
+        "metrics_steps": 1000,
+        "metrics_num_steps" : 1000,
         "refresh_engine_rate": 1000
     }
     
@@ -499,13 +501,13 @@ if __name__ == "__main__":
         wandb.init(project="ChessRL-GRPO", config=config)
     
     # Load dataset
-    from data.parse import dir_iterator
+    from utils.parse import dir_iterator
     dir_path = config["dir_path"]
     gen = dir_iterator(dir_path, triple=True,batch_size = config['batch_size'])
     
     # Uncomment to load pretrained weights
-    model.load_state_dict(torch.load("fine_tune/new_13000.pt"))
-    reference.load_state_dict(torch.load("fine_tune/new_13000.pt"))
+    model.load_state_dict(torch.load("fine_tune/base.pt"))
+    reference.load_state_dict(torch.load("fine_tune/base.pt"))
 
     # Initialize optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
@@ -535,6 +537,6 @@ if __name__ == "__main__":
 
         if (step +1) % config["metrics_steps"] == 0 and wandb_log:
 
-            r = calculate_metrics([trainer.model,trainer.ref_model],gen,trainer,num_steps = config["metrics_num_steps"],name = step)
+            r = calculate_metrics([trainer.model,trainer.ref_model],gen,trainer,num_steps = config["metrics_num_steps"],name = step,temp = 0,raw = True)
 
             wandb.log({"model_metric": r[0], "ref_model_metric": r[1]})

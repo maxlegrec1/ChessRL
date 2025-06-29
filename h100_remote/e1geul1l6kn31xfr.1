@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+        <meta name="description" content="Convenient file sharing. Registration is not required. Large files are supported.">
+        <meta name="author" content="Espen Braastad">
+        <link rel="icon" href="/static/img/favicon.png">
+
+        <link rel="preload" href="/static/webfonts/fa-regular-400.woff2" as="font">
+        <link rel="preload" href="/static/webfonts/fa-solid-900.woff2" as="font">
+
+        <link rel="stylesheet" href="/static/css/bootstrap.min.css"/>
+        <link rel="stylesheet" href="/static/css/fontawesome.all.min.css"/>
+        <link rel="stylesheet" href="/static/css/custom.css"/>
+
+        <title>Filebin | e1geul1l6kn31xfr</title>
+        <script src="/static/js/sorttable.js"></script>
+        <script src="/static/js/filebin2.js"></script>
+
+        
+        <script>
+            window.onload = function () {
+                if (typeof FileReader == "undefined") alert ("Your browser \
+                    is not supported. You will need to use a \
+                    browser with File API support to upload files.");
+                var fileCount = document.getElementById("fileCount");
+                var fileList = document.getElementById("fileList");
+                var fileDrop = document.getElementById("fileDrop");
+                var fileField = document.getElementById("fileField");
+                var bin = "e1geul1l6kn31xfr";
+                var binURL = "/e1geul1l6kn31xfr";
+                FileAPI = new FileAPI(
+                    fileCount,
+                    fileList,
+                    fileDrop,
+                    fileField,
+                    bin,
+                    binURL
+                );
+                FileAPI.init();
+                
+                fileDrop.ondrop = FileAPI.uploadQueue;
+                
+                if (fileField) {
+                    fileField.addEventListener("change", FileAPI.uploadQueue)
+                }
+            }
+        </script>
+        
+    </head>
+    <body class="container-xl">
+
+        
+
+
+<nav class="navbar navbar-expand-sm navbar-light d-flex justify-content-between align-items-start">
+    <div>
+        <ul class="navbar-nav">
+	    
+                <li class="nav-item">
+                    <a class="nav-link" href="/">Create new bin</a>
+                </li>
+            
+        </ul>
+    </div>
+    <div class="text-right">
+        <ul class="navbar-nav">
+	    
+                <li class="nav-item">
+                    <a class="nav-link text-danger" href="#" data-bs-toggle="modal" data-bs-target="#modalTakedown">Takedown</a>
+                </li>
+	    
+        </ul>
+    </div>
+</nav>
+
+
+<hr class="mt-0"/>
+
+
+
+<div class="modal fade" id="modalTakedown" tabindex="-1" role="dialog" aria-labelledby="modalTakedownTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header alert-secondary">
+                <h5 class="modal-title" id="modalTakedownTitle">Takedown</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Filebin provides functionality for clients to upload and download files.</p>
+
+                <p>There is an opportunity to abuse this to share illegal, copyrighted or malicious content, even though this is against the <a href="/terms">Terms and conditions</a>. There is no automatic moderation of such content, but anyone familiar with the location of the files can delete them at their own will.</p>
+
+                <p>If this bin contains files that should not be here, please <a href="#" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#modalDeleteBin">delete the bin</a>. This will immediately make the files unavailable, and is faster than sending a takedown request to the service owner.</p>
+
+                <p>If you need to contact the service owner, please reach out at contact@filebin.net.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-danger" data-bs-dismiss="modal" data-bs-toggle="modal" data-bs-target="#modalDeleteBin">
+                    <i class="fas fa-fw fa-trash-alt"></i> Delete bin
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+
+
+
+        <div class="row">
+            <div class="col">
+                <h1 class="display-1">Filebin</h1>
+            </div>
+            <div class="col">
+                <div class="text-end">
+                    <a href="#" data-bs-toggle="modal" data-bs-target="#modalBinQR" aria-haspopup="true" aria-expanded="false">
+                        <img class="img-fluid" src="/qr/e1geul1l6kn31xfr?thumbnail" alt="QR code for https://filebin.net/e1geul1l6kn31xfr"/>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        
+            
+            <span id="fileCount"></span>
+
+            
+            <span id="fileDrop"></span>
+
+            
+            <span id="fileList"></span>
+        
+
+        
+        
+        <p class="lead">
+        
+            
+                The bin <a class="link-primary link-custom" href="/e1geul1l6kn31xfr">e1geul1l6kn31xfr</a> was created 8 minutes ago, updated 1 minute ago
+                
+
+                and it expires 6 days from now.
+                It contains 1 uploaded
+
+                file at 765 MB.
+                    
+                
+
+                
+                
+            
+        </p>
+
+        
+            <p>
+                <ul class="nav nav-pills">
+                    <li class="nav-item me-3">
+                        <a class="btn btn-primary" href="#" data-bs-toggle="modal" data-bs-target="#modalArchive">
+                            <i class="fas fa-fw fa-cloud-download-alt"></i> Download files
+                        </a>
+                    </li>
+
+                    <li class="nav-item">
+                        <div class="dropdown">
+                                <a class="btn btn-primary dropdown-toggle text-white" href="#" id="dropdownBinMenuButton" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                                    More
+                                </a>
+                                <ul class="dropdown-menu dropdown-menu-right" aria-labelledby="dropdownBinMenuButton">
+                                    
+                                        <li>
+                                            <span class="dropdown-item fileUpload">
+                                                <span>
+                                                    <i class="fas fa-fw fa-cloud-upload-alt text-primary"></i> Upload more files
+                                                </span>
+                                                <input type="file" class="upload" id="fileField" multiple/>
+                                            </span>
+                                        </li>
+                                    
+                                    <li>
+                                        <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalBinProperties" aria-haspopup="true" aria-expanded="false">
+                                            <i class="fas fa-fw fa-info-circle text-primary"></i> Bin properties
+                                        </a>
+                                    </li>
+                                    <li>
+                                        <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalBinQR" aria-haspopup="true" aria-expanded="false">
+                                            <i class="fas fa-fw fa-qrcode text-primary"></i> QR code
+                                        </a>
+                                    </li>
+                                    <li>
+                                    <div class="dropdown-divider"></div>
+                                    </li>
+                                    
+                                    <li>
+                                        <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalLockBin" aria-haspopup="true" aria-expanded="false">
+                                            <i class="fas fa-fw fa-lock text-warning"></i> Lock bin
+                                        </a>
+                                    </li>
+                                    
+                                    <li>
+                                    <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalDeleteBin">
+                                        <i class="far fa-fw fa-trash-alt text-danger"></i> Delete bin
+                                    </a>
+                                    </li>
+                                </ul>
+                        </div>
+                    </li>
+                </ul>
+            </p>
+        
+
+        
+            <table class="table table-hover sortable">
+                <thead>
+                    <tr>
+                        <th scope="col">Filename</th>
+                        <th scope="col">Content type</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">Uploaded</th>
+                        <th scope="col"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                        <tr>
+                            <td sorttable_customkey="follow_big_checkpoint_step_100000(1).pt">
+                                
+                                    
+                                        <i class="far fa-fw fa-file"></i>
+                                    
+                                
+                                
+                                    <a class="link-primary link-custom" href="/e1geul1l6kn31xfr/follow_big_checkpoint_step_100000%281%29.pt">follow_big_checkpoint_step_100000(1).pt</a>
+                                
+                            </td>
+                            <td>
+                                application/zip
+                            </td>
+                            <td sorttable_customkey="765421866">
+                                765 MB
+                            </td>
+                            <td sorttable_customkey="2025-05-12 21:21:21.599847 &#43;0000 UTC">
+                                1 minute ago
+                            </td>
+                            <td>
+                                <div class="dropdown">
+                                    <a class="dropdown-toggle small link-custom" href="#" id="dropdownFileMenuButton" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                                        More
+                                    </a>
+                                    <div class="dropdown-menu dropdown-menu-right" aria-labelledby="dropdownFileMenuButton">
+                                        
+                                            <a class="dropdown-item" href="/e1geul1l6kn31xfr/follow_big_checkpoint_step_100000%281%29.pt">
+                                                <i class="fas fa-fw fa-cloud-download-alt text-primary"></i> Download file
+                                            </a>
+                                        
+                                        <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalFileProperties-0">
+                                            <i class="fas fa-fw fa-info-circle text-primary"></i> File properties
+                                        </a>
+                                        <div class="dropdown-divider"></div>
+                                        <a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#modalDeleteFile-0">
+                                            <i class="far fa-fw fa-trash-alt text-danger"></i> Delete file
+                                        </a>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    
+                </tbody>
+            </table>
+        
+
+        
+        <div class="modal fade" id="modalArchive" tabindex="-1" role="dialog" aria-labelledby="modalArchiveTitle" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="modalArchiveTitle">Download files</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>
+                            The files in this bin can be downloaded as a single file archive. The default filename of the archive is <code>e1geul1l6kn31xfr</code> and the size is 765 MB uncompressed.
+                        </p>
+
+                        
+                            <p class="lead">Select archive format to download:</p>
+
+                            <ul class="nav nav-pills">
+                                <li class="nav-item me-3">
+                                    <a class="btn btn-primary" href="/archive/e1geul1l6kn31xfr/tar"><i class="fas fa-fw fa-file-archive"></i> Tar</a>
+                                </li>
+                                <li class="nav-item">
+                                    <a class="btn btn-primary" href="/archive/e1geul1l6kn31xfr/zip"><i class="fas fa-fw fa-file-archive"></i> Zip</a>
+                                </li>
+                            </ul>
+                        
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+        <div class="modal fade" id="modalDeleteBin" tabindex="-1" role="dialog" aria-labelledby="modalDeleteBinTitle" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header alert-secondary">
+                        <h5 class="modal-title" id="modalDeleteBinTitle">Delete bin</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>You are free to delete this bin. However you are encouraged to delete your own bins only, or bins that are being used to share obvious illegal, copyrighted or malicious content. Bins that are deleted can not be reused.</p>
+
+                        <p>This action is not reversible.</p>
+
+                        <p class="lead">Delete the bin <a class="link-primary" href="/e1geul1l6kn31xfr">e1geul1l6kn31xfr</a> and all of its files?</p>
+
+                        <div id="deleteStatus"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <div class="pull-left">
+                        <button type="button" class="btn btn-danger" id="deleteButton" onclick="deleteURL('/e1geul1l6kn31xfr','deleteStatus')"><i class="fas fa-fw fa-trash-alt"></i> Confirm</button>
+                        </div>
+                        <a href="/e1geul1l6kn31xfr" class="btn btn-secondary"><i class="fa fa-close"></i> Close</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+        <div class="modal fade" id="modalBinProperties" tabindex="-1" role="dialog" aria-labelledby="modalBinPropertiesTitle" aria-hidden="true">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header alert-secondary">
+                        <h5 class="modal-title" id="modalBinPropertiesTitle">Bin properties</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <dl class="row">
+                            <dt class="col-sm-3">Bin</dt>
+                            <dd class="col-sm-9">
+                                <a class="link-primary link-custom" href="/e1geul1l6kn31xfr">
+                                    e1geul1l6kn31xfr
+                                </a>
+                            </dd>
+
+                            <dt class="col-sm-3">Number of files</dt>
+                            <dd class="col-sm-9">
+                                1
+                            </dd>
+
+                            <dt class="col-sm-3">Total size</dt>
+                            <dd class="col-sm-9">
+                                765 MB (765421866 bytes)
+                            </dd>
+
+                            <dt class="col-sm-3">Status</dt>
+                            <dd class="col-sm-9">
+                                
+                                    Unlocked, which means that files can be uploaded and updated.
+                                
+                            </dd>
+
+                            <dt class="col-sm-3">Created</dt>
+                            <dd class="col-sm-9">
+                                8 minutes ago
+                                (2025-05-12 21:14:39 UTC)
+                            </dd>
+
+                            <dt class="col-sm-3">Approved</dt>
+                            <dd class="col-sm-9">
+                                
+                                    8 minutes ago
+                                    (2025-05-12 21:14:39 UTC)
+                                
+                            </dd>
+
+                            <dt class="col-sm-3">Last updated</dt>
+                            <dd class="col-sm-9">
+                                1 minute ago
+                                (2025-05-12 21:21:21 UTC)
+                            </dd>
+
+                            <dt class="col-sm-3">Expires</dt>
+                            <dd class="col-sm-9">
+                                
+                                    6 days from now
+                                
+                                (2025-05-19 21:21:21 UTC)
+                            </dd>
+                        </dl>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+        <div class="modal fade" id="modalBinQR" tabindex="-1" role="dialog" aria-labelledby="modalBinQRTitle" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header alert-secondary">
+                        <h5 class="modal-title" id="modalBinQRTitle">QR code</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>The URL to this bin is <a href="https://filebin.net/e1geul1l6kn31xfr">https://filebin.net/e1geul1l6kn31xfr</a>, which is embedded in the QR code below. This can be used to conveniently share the URL across mobile devices without having to type out the URL.</p>
+
+                        <div class="text-center">
+                            <img src="/qr/e1geul1l6kn31xfr" alt="QR code for https://filebin.net/e1geul1l6kn31xfr"/>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+        <div class="modal fade" id="modalLockBin" tabindex="-1" role="dialog" aria-labelledby="modalLockBinTitle" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header alert-secondary">
+                        <h5 class="modal-title" id="modalLockBinTitle">Lock bin</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>The bin is currently unlocked, which means that new files can be added to it and existing files can be updated. If the bin is locked, the bin will become read only and no more file uploads will be allowed. Note that a locked bin can still be deleted.</p>
+                <p>This action is not reversible.</p>
+
+                        <p class="lead">Do you want to lock bin <a class="link-primary" href="/e1geul1l6kn31xfr">e1geul1l6kn31xfr</a>?</p>
+
+                        <div id="lockStatus"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <div class="pull-left">
+                        <button type="button" class="btn btn-warning" id="lockButton" onclick="lockBin('e1geul1l6kn31xfr','lockStatus')"><i class="fas fa-fw fa-lock"></i> Confirm</button>
+                        </div>
+                        <a href="/e1geul1l6kn31xfr" class="btn btn-secondary"><i class="fa fa-close"></i> Close</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+        
+            <div class="modal fade" id="modalDeleteFile-0" tabindex="-1" role="dialog" aria-labelledby="modalDeleteFileTitle" aria-hidden="true">
+                <div class="modal-dialog" role="document">
+                    <div class="modal-content">
+                        <div class="modal-header alert-secondary">
+                            <h5 class="modal-title" id="modalDeleteFileTitle">Delete file</h5>
+                            
+                            <a class="btn-close" href="/e1geul1l6kn31xfr"></a>
+                        </div>
+                        <div class="modal-body">
+                            <p>You are free to delete any file in this bin. However you are encouraged to delete the files that you have uploaded only, or files with obvious malicious or illegal content.</p>
+                            <p>This action is not reversible.</p>
+
+                            <p class="lead">Delete the file
+                                
+                                    <a class="link-primary" href="/e1geul1l6kn31xfr/follow_big_checkpoint_step_100000%281%29.pt">follow_big_checkpoint_step_100000(1).pt</a>
+                                
+                                ?
+                            </p>
+
+                            <div id="deleteStatus-0"></div>
+                        </div>
+                        <div class="modal-footer">
+                            <div class="pull-left">
+                            <button type="button" class="btn btn-danger" id="deleteButton" onclick="deleteURL('/e1geul1l6kn31xfr/follow_big_checkpoint_step_100000(1).pt','deleteStatus-0')"><i class="fas fa-fw fa-trash-alt"></i> Confirm</button>
+                            </div>
+                            <a href="/e1geul1l6kn31xfr" class="btn btn-secondary"><i class="fa fa-close"></i> Close</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        
+        
+
+        
+        
+            <div class="modal fade" id="modalFileProperties-0" tabindex="-1" role="dialog" aria-labelledby="modalFilePropertiesTitle" aria-hidden="true">
+                <div class="modal-dialog modal-lg" role="document">
+                    <div class="modal-content">
+                        <div class="modal-header alert-secondary">
+                            <h5 class="modal-title" id="modalFilePropertiesTitle">File properties</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <dl class="row">
+                                <dt class="col-sm-3">Filename</dt>
+                                <dd class="col-sm-9">
+                                    
+                                        <a class="link-primary link-custom" href="/e1geul1l6kn31xfr/follow_big_checkpoint_step_100000%281%29.pt">follow_big_checkpoint_step_100000(1).pt</a>
+                                    
+                                </dd>
+
+                                <dt class="col-sm-3">Bin</dt>
+                                <dd class="col-sm-9">
+                                    <a class="link-primary link-custom" href="/e1geul1l6kn31xfr">
+                                        e1geul1l6kn31xfr
+                                    </a>
+                                </dd>
+
+                                <dt class="col-sm-3">File size</dt>
+                                <dd class="col-sm-9">
+                                    765 MB (765421866 bytes)
+                                </dd>
+
+                                
+
+                                <dt class="col-sm-3">Created</dt>
+                                <dd class="col-sm-9">
+                                    1 minute ago
+                                    (2025-05-12 21:21:21 UTC)
+                                </dd>
+
+                                <dt class="col-sm-3">Expires</dt>
+                                <dd class="col-sm-9">
+                                    
+                                        6 days from now
+                                    
+                                    (2025-05-19 21:21:21 UTC)
+                                </dd>
+                            </dl>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        
+        
+
+        
+        <div class="modal fade" id="modalApprovalInfo" tabindex="-1" role="dialog" aria-labelledby="modalApprovalInfoTitle" aria-hidden="true">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header alert-secondary">
+                        <h5 class="modal-title" id="modalApprovalInfoTitle">Pending approval</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>This bin is pending administrator approval.</p>
+                        <p>While the bin is pending approval, files can be added, updated and deleted as normal and the bin can also be locked. File downloads and archive downloads, however, will be rejected until the bin is approved.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+
+        
+<nav class="navbar navbar-expand-sm navbar-light small">
+    <ul class="navbar-nav">
+        <li class="nav-item">
+            <a class="nav-link" href="/about">About</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="/api">API documentation</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="/contact">Contact</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="/privacy">Privacy</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link" href="/terms">Terms and conditions</a>
+        </li>
+    </ul>
+</nav>
+
+        <script src="/static/js/popper.min.js"></script>
+        <script src="/static/js/bootstrap.min.js"></script>
+    </body>
+</html>

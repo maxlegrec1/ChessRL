@@ -1,0 +1,3 @@
+│ > Based on the tensorflow training code found at ./LeelaData, investigate my pytorch code pretrain_value_new.py doesn't train the value to the same accuracy (40%) when the other pipeline goes to 60% in a matter of hours. The training data       │
+│   for the pytorch pipeline is the same as the tensorflow one, and was converted using LeelaData/show_value_head_ground_truth.py . Create a new folder gemini where you will recreate the pytorch training pipeline and iterate on it in the          │
+│   aim to reproduce the same performance as the lc zero training pipeline.

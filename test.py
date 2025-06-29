@@ -1,11 +1,11 @@
 import torch
 from model_bis import GPT,GPTConfig
-from data.parse import dir_iterator
-from data.vocab import policy_index
+from utils.parse import dir_iterator
+from utils.vocab import policy_index
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
-def calculate_metrics(models,gen,Trainer,device = "cuda",num_steps = 100, depth = 15, name = 0,temp = 1, raw = False):
+def calculate_metrics(models,gen,Trainer,device = "cuda",num_steps = 100, depth = 15, name = 0,temp = 0.1, raw = False):
     models_rewards = [0]* len(models)
     plots = [[] for _ in range(len(models))]
     for _ in tqdm(range(num_steps)):
@@ -52,18 +52,26 @@ if __name__ == "__main__":
     model_config.block_size = 256
     device = "cuda"
     # Initialize models
-    num_models = 1
+    num_models = 4
     models = [GPT(model_config).to(device) for _ in range(num_models)]
-    models[0].load_state_dict(torch.load("fine_tune/news_2400.pt"))
-    #models[1].load_state_dict(torch.load("999_GRPO.pt"))
-    #models[2].load_state_dict(torch.load("1999_GRPO.pt"))
-    #models[3].load_state_dict(torch.load("2999_GRPO.pt"))
-    gen = dir_iterator("/media/maxime/Crucial X8/GitRefactored/ParrotChess/pros_pgn", triple=True,batch_size = 1)
+    models[0].load_state_dict(torch.load("fine_tune/base.pt"))
+    models[1].load_state_dict(torch.load("fine_tune/long_4500.pt"))
+    models[2].load_state_dict(torch.load("fine_tune/final.pt"))
+    models[3].load_state_dict(torch.load("999_GRPO.pt"))
+    '''
+    models[3].load_state_dict(torch.load("2999_GRPO.pt"))
+    models[4].load_state_dict(torch.load("3999_GRPO.pt"))
+    models[5].load_state_dict(torch.load("4999_GRPO.pt"))
+    models[6].load_state_dict(torch.load("5999_GRPO.pt"))
+    models[7].load_state_dict(torch.load("6999_GRPO.pt"))
+    models[8].load_state_dict(torch.load("7999_GRPO.pt"))
+    '''
+    gen = dir_iterator("data/compressed_pgns", triple=True,batch_size = 1)
 
     from grpo_refactored import ChessGRPOTrainer
     Trainer = ChessGRPOTrainer(None,None,None)
 
-    models_rewards = calculate_metrics(models,gen,Trainer,device,num_steps = 1,name = 0,temp = 0.01, raw = True)
+    models_rewards = calculate_metrics(models,gen,Trainer,device,num_steps = 1000,name = "prout",temp = 0, raw = True)
     #models_rewards = calculate_metrics(models,gen,Trainer,device,num_steps = 10,name = 1)
     Trainer.stockfish.close()
     print(models_rewards)
