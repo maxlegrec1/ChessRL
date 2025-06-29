@@ -99,7 +99,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-def leela_data_generator(config_path):
+def leela_data_generator(config_path="/mnt/2tb/LeelaDataReader/lczero-training/tf/configs/example.yaml"):
     """
     A generator that yields batches of data from Leela's chunk files,
     providing FEN strings, Q-values, and winner probabilities.
