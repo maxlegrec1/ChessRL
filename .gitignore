@@ -11,3 +11,5 @@ runs/
 *.pkl
 *.zst
 *.csv
+*.png
+leelalogs/
