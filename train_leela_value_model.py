@@ -5,6 +5,8 @@ import torch.optim as optim
 import wandb
 import os
 from utils.parse_value_leela import leela_data_generator
+from new_paradigm.simple import BT4
+from torch.cuda.amp import GradScaler, autocast
 
 class SimpleValueNet(nn.Module):
     """
@@ -50,9 +52,19 @@ def train():
     wandb.init(project=config["wandb_project"], config=config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SimpleValueNet().to(device)
+    #model = SimpleValueNet().to(device)
+    model = BT4().to(device)
+    #print number of parameters
+    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
     optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
     criterion = nn.CrossEntropyLoss()
+
+    use_amp = device.type == 'cuda'
+    if use_amp:
+        scaler = GradScaler()
+        print("Using Automatic Mixed Precision (AMP).")
+    else:
+        print("CUDA not available. Training on CPU without AMP.")
 
     # Check if config file exists
     if not os.path.exists(config["leela_config_path"]):
@@ -67,26 +79,28 @@ def train():
     print("Starting training...")
     model.train()
     for step in range(config["total_steps"]):
+        inp = next(data_generator)
 
-        pos, _, _, value, _ = next(data_generator)
-        
-        pos = pos.to(device)
-        value = value.to(device)
+        optimizer.zero_grad(set_to_none=True)
 
-        optimizer.zero_grad()
-        
-        # The forward pass will handle the reshape
-        predictions = model(pos)
+        with autocast(enabled=use_amp):
+            out, value, loss_policy, loss_value, loss_q, targets, true_values = model(inp, compute_loss=True)
+            loss = loss_value
 
-        loss = criterion(predictions, value)
-        loss.backward()
-        optimizer.step()
-        
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
         # Calculate accuracy
-        _, predicted_labels = torch.max(predictions, 1)
-        _, true_labels = torch.max(value, 1)
-        correct_predictions = (predicted_labels == true_labels).sum().item()
-        batch_size = pos.size(0)
+        value = value.squeeze(1)
+        print(value.shape)
+        _, predicted_labels = torch.max(value, 1)
+        correct_predictions = (predicted_labels == true_values).sum().item()
+        batch_size = out.size(0)
         accuracy = correct_predictions / batch_size
         
         if step % 100 == 0:
