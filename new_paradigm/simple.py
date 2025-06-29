@@ -129,7 +129,7 @@ class BT4(torch.nn.Module):
         self.layers = torch.nn.ModuleList([EncoderLayer(d_model,d_ff,num_heads) for _ in range(num_layers)])
         #self.encoder = torch.nn.TransformerEncoder(torch.nn.TransformerEncoderLayer(d_model,num_heads,d_ff,0,"gelu",batch_first=True),num_layers)
 
-        self.linear1 = torch.nn.Linear(112,d_model)
+        self.linear1 = torch.nn.Linear(19,d_model)
 
         self.layernorm1 = torch.nn.LayerNorm(d_model)
 
@@ -172,7 +172,7 @@ class BT4(torch.nn.Module):
         value_h = self.value_head(x)
         value_h = value_h.view(b,seq_len,3)
         value_h_q = self.value_head_q(x)
-        value_h_q = value_h_q.view(b,seq_len,1)
+        value_h_q = value_h_q.view(b,seq_len,3)
         policy_tokens = self.policy_tokens_lin(x)
         policy_tokens = torch.nn.GELU()(policy_tokens)
         policy_tokens = policy_tokens + pos_enc
@@ -205,8 +205,8 @@ class BT4(torch.nn.Module):
             loss_policy = F.cross_entropy(policy.view(-1,policy.size(-1)), targets.view(-1),ignore_index=1928)
             z = torch.argmax(true_values, dim=-1)
             loss_value = F.cross_entropy(value_h.view(-1,value_h.size(-1)), z.view(-1),ignore_index=3)
-            value_q = q_values[:,0]-q_values[:,2]
-            loss_q = F.mse_loss(value_h_q.view(-1,value_h_q.size(-1)), value_q.view(-1,1))
+            #value_q = q_values[:,0]-q_values[:,2]
+            loss_q = F.mse_loss(value_h_q.view(-1,value_h_q.size(-1)), q_values.view(-1,3))
             return policy, value_h, loss_policy, loss_value,loss_q, targets, z
         return policy
 
@@ -305,8 +305,8 @@ class BT4(torch.nn.Module):
                 x_processed = self.layers[i](x_processed, pos_enc)
             
             value_logits = self.value_head_q(x_processed)
-            value_logits = value_logits.view(b, seq_len, 1)
-            
+            value_logits = value_logits.view(b, seq_len, 3)
+            value_logits = torch.softmax(value_logits,dim=-1)
         return value_logits.squeeze(1)  # Remove sequence dimension, keep batch dimension
 
     def calculate_move_values(self, fen, device="cuda"):
@@ -337,12 +337,13 @@ class BT4(torch.nn.Module):
         
         # Calculate values from the current player's perspective
         # batch_value_probs[:, 0] = black_win_prob, [:, 1] = draw_prob, [:, 2] = white_win_prob
+        batch_value_q = batch_value_q[:,2]-batch_value_q[:,0]
         if is_white_turn:
             # White's perspective: 1/2 * draw_prob + white_win_prob
-            player_values = -batch_value_q
+            player_values = batch_value_q
         else:
             # Black's perspective: 1/2 * draw_prob + black_win_prob
-            player_values = batch_value_q
+            player_values = -batch_value_q
         
         return legal_moves, player_values
 
@@ -450,7 +451,7 @@ class ValueHeadQ(torch.nn.Module):
         super().__init__()
         self.dense1 = torch.nn.Linear(d_model,128)
         self.dense2 = torch.nn.Linear(128*64,128)
-        self.dense3 = torch.nn.Linear(128,1)
+        self.dense3 = torch.nn.Linear(128,3)
 
     def forward(self,x):
         b,_,_ = x.size()
@@ -460,7 +461,6 @@ class ValueHeadQ(torch.nn.Module):
         x = self.dense2(x)
         x = torch.nn.GELU()(x)
         x = self.dense3(x)
-        x = torch.tanh(x)
         return x
 
 if __name__ == "__main__":
