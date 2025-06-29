@@ -7,9 +7,9 @@ import random
 from collections import deque
 import pyarrow.parquet as pq
 try:
-    from utils.vocab import policy_index
+    from utils.vocab import policy_index,policy_leela
 except ImportError:
-    from vocab import policy_index
+    from vocab import policy_index,policy_leela
 
 try:
     from utils.fen_encoder import fen_to_tensor
@@ -17,7 +17,6 @@ except ImportError:
     from fen_encoder import fen_to_tensor
 
 import chess
-
 # Precompute mapping from move string to index for fast lookup
 _policy_map = {uci: idx for idx, uci in enumerate(policy_index)}
 _pad_id = len(policy_index) - 1  # fallback padding ID
@@ -39,6 +38,36 @@ except Exception as e:
     _dummy_encoded_fen_tensor = None # Should cause errors if used
     _zero_fen_pad_tensor = None # Should cause errors if used
 
+
+def mirror_move_uci(move_uci):
+    """
+    Mirror the move UCI to change perspective from white to black and vice versa.
+    For example: a move like "e2e4" becomes "e7e5".
+    A move like h7h8q becomes h2h1q.
+    """
+    if len(move_uci) < 4:
+        assert False, "Move UCI is too short"
+    
+    # Extract the move components
+    from_square = move_uci[0:2]
+    to_square = move_uci[2:4]
+    promotion = move_uci[4:] if len(move_uci) > 4 else ""
+    
+    # Mirror the squares
+    def mirror_square(square):
+        file = square[0]
+        rank = square[1]
+        # Files stay the same (a-h)
+        # Ranks are mirrored: 1->8, 2->7, 3->6, 4->5, 5->4, 6->3, 7->2, 8->1
+        rank_map = {'1': '8', '2': '7', '3': '6', '4': '5', 
+                   '5': '4', '6': '3', '7': '2', '8': '1'}
+        mirrored_rank = rank_map.get(rank, rank)
+        return file + mirrored_rank
+    
+    mirrored_from = mirror_square(from_square)
+    mirrored_to = mirror_square(to_square)
+    
+    return mirrored_from + mirrored_to + promotion
 
 def get_padding_move():
     """
@@ -194,7 +223,9 @@ def batch_generator(input_dir, batch_size, block_size=1, return_fen=False, tripl
                     value_q_batch = []              # List of q values
                     # Process each row in the batch
                     for _, row in batch_df.iterrows():
-                        fen, wdl,q = row.iloc[0], row.iloc[3], row.iloc[1]
+                        fen, wdl,q,policy = row.iloc[0], row.iloc[3], row.iloc[1], row.iloc[2]
+                        move_uci = policy_leela[policy.argmax()]
+
                         white_win, draw_prob, black_win = wdl[0], wdl[1], wdl[2]
                         q_win,q_draw,q_loss = q[0],q[1],q[2]
                         # Apply mirroring with 50% probability for data augmentation
@@ -202,6 +233,7 @@ def batch_generator(input_dir, batch_size, block_size=1, return_fen=False, tripl
                             fen= mirror_fen(fen)
                             white_win, draw_prob, black_win = black_win, draw_prob, white_win
                             q_win,q_draw,q_loss = q_loss,q_draw,q_win
+                            move_uci = mirror_move_uci(move_uci)
                         # Process the single FEN
                         current_fen_str = fen
                         current_game_fens_encoded_list = [torch.from_numpy(fen_to_tensor(current_fen_str))]
@@ -213,10 +245,9 @@ def batch_generator(input_dir, batch_size, block_size=1, return_fen=False, tripl
                         # Add raw FEN if needed
                         if return_fen or triple:
                             raw_fens_for_output_batch.append([current_fen_str])
-                        
+                        move_id = _policy_map[move_uci]
                         # Always use padding move (single move per position)
-                        padding_move = get_padding_move()
-                        encoded_game_moves = torch.tensor([padding_move], dtype=torch.long)
+                        encoded_game_moves = torch.tensor([move_id], dtype=torch.long)
                         game_move_sequences_batch.append(encoded_game_moves)
                         
                         # Process probabilities - get the index of the winning outcome

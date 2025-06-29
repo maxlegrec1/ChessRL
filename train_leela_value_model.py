@@ -64,7 +64,7 @@ def train(config):
 
         with autocast(enabled=use_amp,device_type='cuda', dtype=torch.float16):
             out, value, loss_policy, loss_value, loss_q, targets, true_values = model(inp, compute_loss=True)
-            loss = loss_value +loss_q#+loss_policy
+            loss = loss_value +loss_q+loss_policy
         loss_policy = loss_policy / config["gradient_accumulation_steps"]
         loss_value = loss_value / config["gradient_accumulation_steps"]
         loss_q = loss_q / config["gradient_accumulation_steps"]
@@ -92,7 +92,7 @@ def train(config):
             acc = acc[targets != 1928].mean()
             
             fens = inp[2]
-            if step_counter % 1000 == 0:
+            if step_counter % 10000 == 0:
                 if step_counter == 0:
                     tactics_accuracy = 0
                     endgame_score = 0
@@ -103,8 +103,8 @@ def train(config):
                 else:
                     tactics_accuracy = calculate_tactics_accuracy(model, num_positions=1000, is_thinking_model=False, T=0.1)
                     endgame_score = calculate_endgame_score(model, T=0.1, is_thinking_model=False, limit_elo=False, num_positions=100)
-                    win_rate_vs_stockfish_use_value,elo_use_value = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = 1400,use_value=True)
-                    win_rate_vs_stockfish,elo = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = 1400)
+                    win_rate_vs_stockfish_use_value,elo_use_value = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,elo_use_value),use_value=True)
+                    win_rate_vs_stockfish,elo = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,elo))
                     #win_rate_vs_model = main_model_vs_model(model1=model,model1_name=f"{step_counter}", temp=0.4, num_games=100)
             else:
                 pass
