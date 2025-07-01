@@ -60,7 +60,7 @@ def calculate_endgame_score(model,file = "data/endgames2.csv",T = 1,num_position
 
 
     engine.quit()
-    return points / (i+1)
+    return points / positions
 
 if __name__ == "__main__":
     config = GPTConfig()

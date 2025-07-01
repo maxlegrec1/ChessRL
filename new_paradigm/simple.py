@@ -206,6 +206,7 @@ class BT4(torch.nn.Module):
             z = torch.argmax(true_values, dim=-1)
             loss_value = F.cross_entropy(value_h.view(-1,value_h.size(-1)), z.view(-1),ignore_index=3)
             #value_q = q_values[:,0]-q_values[:,2]
+            value_h_q = torch.softmax(value_h_q,dim=-1)
             loss_q = F.mse_loss(value_h_q.view(-1,value_h_q.size(-1)), q_values.view(-1,3))
             return policy, value_h, loss_policy, loss_value,loss_q, targets, z
         return policy

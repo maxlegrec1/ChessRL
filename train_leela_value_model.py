@@ -103,8 +103,8 @@ def train(config):
                 else:
                     tactics_accuracy = calculate_tactics_accuracy(model, num_positions=1000, is_thinking_model=False, T=0.1)
                     endgame_score = calculate_endgame_score(model, T=0.1, is_thinking_model=False, limit_elo=False, num_positions=100)
-                    win_rate_vs_stockfish_use_value,elo_use_value = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,elo_use_value),use_value=True)
-                    win_rate_vs_stockfish,elo = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,elo))
+                    win_rate_vs_stockfish_use_value,elo_use_value = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,int(elo_use_value)),use_value=True)
+                    win_rate_vs_stockfish,elo = main_model_vs_stockfish(model=model,model1_name=f"{step_counter}", temp=0, num_games=40,elo = max(1400,int(elo)))
                     #win_rate_vs_model = main_model_vs_model(model1=model,model1_name=f"{step_counter}", temp=0.4, num_games=100)
             else:
                 pass
