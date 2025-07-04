@@ -1,12 +1,11 @@
 
 import chess
 import torch
-from model_bis import GPT, GPTConfig
 from tqdm import tqdm
 from utils.vocab import policy_index
 tactics_path = "data/lichess_db_puzzle.csv"
 
-def calculate_tactics_accuracy(model, file=tactics_path, num_positions=1000, is_thinking_model=True, T=1,device = "cuda"):
+def calculate_tactics_accuracy(model, file=tactics_path, num_positions=1000, is_thinking_model=True, T=1,device = "cuda",use_value=False):
     """
     Calculate the accuracy of the model on a given file.
     Displays a tqdm progress bar with running accuracy.
@@ -40,11 +39,12 @@ def calculate_tactics_accuracy(model, file=tactics_path, num_positions=1000, is_
 
             # Strip promotion if needed
             target_parsed = target_move if target_move in policy_index else target_move[:-1]
-
-            if is_thinking_model:
+            if use_value:
+                move_played = model.get_best_move_value(fen, T=T,device = device)
+            elif is_thinking_model:
                 move_played = model.get_move_from_fen(fen, T=T,device = device)
             else:
-                move_played = model.get_move_from_fen_no_thinking(fen, T=T,device = device)
+                move_played = model.get_move_from_fen_no_thinking(fen, T=T,device = device,return_probs=True)
 
             if move_played != target_parsed:
                 success = False
@@ -63,24 +63,18 @@ def calculate_tactics_accuracy(model, file=tactics_path, num_positions=1000, is_
 
 
 if __name__ == "__main__":
-    config = GPTConfig()
-
-    config.n_layer = 15
-    config.n_embd= 1024
-    config.n_head = 32
-    config.vocab_size = 1929
-    config.block_size = 256
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     device = "cuda"  # Use the appropriate device
-    model = GPT(config).to(device)
-    #model.load_state_dict(torch.load("pretrain/follow_checkpoint_step_160000.pt"))
-    #model.load_state_dict(torch.load("pretrain/small_pretrain_bt4_hq_10000.pt"))
-    #model.load_state_dict(torch.load("pretrain/pretrain_bt4_hq_10000.pt"))
-    #model.load_state_dict(torch.load("pretrain/pretrain_bt4_40000.pt"))
-    model.load_state_dict(torch.load("pretrain/model.pt"))
+
+    from new_paradigm.simple import BT4
+    model = BT4().to(device)
+    model.load_state_dict(torch.load("pretrain/this_time_its_right_295000.pt"))
     #13.6,16.4,15.4,14.4,15.5,17.7,17,19.3,21.1,19.9
 
     num_games = 1000
-    accuracy = calculate_tactics_accuracy(model, tactics_path, num_games, is_thinking_model=False,T = 0.1,device = device)
+    accuracy = calculate_tactics_accuracy(model, tactics_path, num_games, is_thinking_model=False,T = 0.0,device = device,use_value=True)
 
     print(f"Accuracy: {accuracy * 100:.2f}%")
