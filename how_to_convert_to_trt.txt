@@ -1,0 +1,11 @@
+python conversion/to_onnx.py # generate model.onnx
+
+trtexec --onnx=model.onnx --saveEngine=model.trt --fp16 # generate model.trt
+
+# Optional if not done ; build c++ inference
+uv run python setup.py build_ext --inplace
+
+
+
+
+

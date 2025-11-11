@@ -1,0 +1,24 @@
+Setup used to train :
+
+uv run python src/train/train.py   --data-path src/data/shuffled_data.parquet   --batch-size 1024   --learning-rate 5e-5   --kl-weight 0.1   --max-logit-clip 10.0   --max-kl-clip 10.0   --max-steps 20000
+
+
+To evaluate Model performance : 
+
+uv run python /mnt/2tb_2/ChessRL/brawls.py --num_games 100 --model1 small --model2 small --temp 0.0 --temp2 0.0 --ckpt1 src/models/small/model.pt --ckpt2 checkpoints/checkpoint_final.pt 
+
+
+
+# Generate data
+
+# with calibration
+uv run python -m src.generate.play_self   --batch-size 1024   --player-1-kind small --player-2-kind leela   --player-1-device cuda --player-2-device cuda   --player-1-fp16 --player-2-fp16   --player-1-temp 0.1 --player-2-temp 0.1   --player-1-name small --player-2-name leela   --randomize-starting-player   --use-hf-openings   --target-games 100000   --output-dir runs/pgn   --calibrate --calibration-games 4096   --calibration-mode buckets   --calibration-buckets 5   --calibration-samples-per-bucket 256   --calibration-temp-min 0.05   --calibration-temp-max 2.0
+
+# without calibration
+uv run python -m src.generate.play_self   --batch-size 1024   --player-1-kind small --player-2-kind leela   --player-1-device cuda --player-2-device cuda   --player-1-fp16 --player-2-fp16   --player-1-temp 0.1 --player-2-temp 0.1   --player-1-name small --player-2-name leela   --randomize-starting-player   --use-hf-openings   --target-games 100000   --output-dir runs/pgn
+
+# Convert to pgn
+uv run python src/data/pgn_to_training_data.py --max-games 100000
+
+# Shuffle parquet
+uv run src/data/shuffle_parquet_two_pass.py --buckets 240

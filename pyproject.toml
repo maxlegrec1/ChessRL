@@ -1,0 +1,36 @@
+[project]
+name = "chessrl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.3.3",
+    "bulletchess",
+    "python-chess>=1.999",
+    "torch>=2.9.0",
+    "tqdm>=4.67.1",
+    "torchtune",
+    "torchao",
+    "rich>=14.2.0",
+    "wandb>=0.22.3",
+    "torch-tensorrt>=2.9.0",
+    "pip>=25.3",
+    "pybind11>=3.0.1",
+    "onnx>=1.19.1",
+    "onnxscript>=0.5.6",
+    "nvidia-modelopt>=0.37.0",
+    "onnx-graphsurgeon>=0.5.8",
+    "onnxruntime>=1.23.2",
+    "pycuda>=2025.1.2",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torch-tensorrt = { index = "pytorch-cu130" }
+tensorrt = { index = "pytorch-cu130" }
