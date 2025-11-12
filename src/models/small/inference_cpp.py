@@ -70,7 +70,7 @@ class CppPolicy:
         if iters < 1:
             raise ValueError("iterations must be >= 1")
 
-        result = self._binding.generate_moves(list(fens), temp, iters, self._engine_path)
+        result = self._binding.small_generate_moves(list(fens), temp, iters, self._engine_path)
         moves = list(result.moves)
         wdl = [tuple(map(float, vec)) for vec in result.wdl]
         policy_result: PolicyValueResult = (moves, wdl)
