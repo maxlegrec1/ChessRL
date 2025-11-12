@@ -218,7 +218,23 @@ class PolicyHead(nn.Module):
 
         return self.apply_map(policy_attn_logits, promotion_logits)
 
-## Value head removed as it's unused for move prediction
+class ValueHead(nn.Module):
+    def __init__(self, embedding_size, val_embedding_size, default_activation=Mish()):
+        super(ValueHead, self).__init__()
+        self.embedding = nn.Linear(embedding_size, val_embedding_size)
+        self.activation = default_activation
+        self.flatten = nn.Flatten()
+        self.dense1 = nn.Linear(val_embedding_size * 64, 128)
+        self.dense2 = nn.Linear(128, 3)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        x = self.activation(x)
+        x = self.flatten(x)
+        x = self.dense1(x)
+        x = self.activation(x)
+        x = self.dense2(x)
+        return x
 
 class BT4(nn.Module):
     def __init__(self, embedding_size=1024, embedding_dense_sz=512, encoder_layers=15, encoder_d_model=1024, encoder_heads=32, encoder_dff=1536, dropout_rate=0.0, pol_embedding_size=1024, policy_d_model=1024, val_embedding_size=128, default_activation=Mish(),
@@ -249,7 +265,8 @@ class BT4(nn.Module):
         
         self.policy_embedding = nn.Linear(embedding_size, pol_embedding_size)
         self.policy_head = PolicyHead(pol_embedding_size, policy_d_model)
-        
+        self.value_head_winner = ValueHead(embedding_size, val_embedding_size)
+        self.value_head_q = ValueHead(embedding_size, val_embedding_size)
         self.activation = default_activation
         
         self.apply(self._init_weights)
@@ -297,7 +314,10 @@ class BT4(nn.Module):
         
         policy_logits = self.policy_head(policy_tokens)
         
-        return policy_logits
+        value_winner = self.value_head_winner(flow)
+        value_q = self.value_head_q(flow)
+
+        return policy_logits, value_winner, value_q
     
     def get_move_from_fen_no_thinking(self, fen_or_moves: Union[str, List[str]], T: float, device: str = None, **kwargs) -> str:
         """
@@ -343,7 +363,7 @@ class BT4(nn.Module):
         
         self.eval()
         with torch.inference_mode():
-            policy_logits = self.forward(input_tensor_112)
+            policy_logits,_,_ = self.forward(input_tensor_112)
         
         # Apply legal moves mask without in-place ops (inference tensor)
         logits0 = policy_logits[0] + torch.from_numpy(legal_moves_mask).to(policy_logits.device)
@@ -440,9 +460,9 @@ class BT4(nn.Module):
         with torch.inference_mode():
             if use_fp16 and device.type == 'cuda':
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    policy_logits = self.forward(batch_tensor)
+                    policy_logits,_,_ = self.forward(batch_tensor)
             else:
-                policy_logits = self.forward(batch_tensor)
+                policy_logits,_,_ = self.forward(batch_tensor)
         
         # Process each position in the batch
         moves = []
@@ -543,9 +563,9 @@ class BT4(nn.Module):
         with torch.inference_mode():
             if use_fp16 and device.type == 'cuda':
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    policy_logits = self.forward(batch_tensor)
+                    policy_logits,_,_ = self.forward(batch_tensor)
             else:
-                policy_logits = self.forward(batch_tensor)
+                policy_logits,_,_ = self.forward(batch_tensor)
         
         # Process each position in the batch
         moves = []
