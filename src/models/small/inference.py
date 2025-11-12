@@ -121,6 +121,9 @@ class Inference(torch.nn.Module):
         for i in range(self.num_layers):
             x = self.layers[i](x,pos_enc)
 
+        value = self.value_head(x)
+        value = torch.softmax(value, dim=-1)
+
         policy_tokens = self.policy_tokens_lin(x)
         policy_tokens = torch.nn.GELU()(policy_tokens)
         policy_tokens = policy_tokens + pos_enc
@@ -137,8 +140,7 @@ class Inference(torch.nn.Module):
 
         policy = self.policy_head(policy_attn_logits)#shape (-1,1929)
 
-        policy = policy
-        return policy
+        return policy, value
 
     def load_state_dict(self, state_dict, strict: bool = True):
         load_return = super().load_state_dict(state_dict, strict)
@@ -166,9 +168,9 @@ class Inference(torch.nn.Module):
 
         if use_fp16 and torch.device(device).type == 'cuda':
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                logits = self(x.half())
+                logits,_ = self(x.half())
         else:
-            logits = self(x)
+            logits,_ = self(x)
         logits = logits.view(-1,1929)
         legal_move_mask = torch.zeros((1, 1929), device=device)
         for legal_move in board.legal_moves():
@@ -380,9 +382,9 @@ class Inference(torch.nn.Module):
         with torch.inference_mode():
             if use_fp16 and device.type == 'cuda':
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    logits = self(batch_x.half())
+                    logits,_ = self(batch_x.half())
             else:
-                logits = self(batch_x)
+                logits,_ = self(batch_x)
         B = logits.shape[0]
         logits = logits.view(B, 1929)
 

@@ -52,7 +52,7 @@ class CppPolicy:
         self,
         fens: Sequence[str],
         temperature: float | None = None,
-        iterations: int | None = None,
+        iterations: int | None = 1,
         return_timings: bool = False,
     ) -> List[str] | Tuple[List[str], InferenceStats]:
         if not fens:

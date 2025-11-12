@@ -39,6 +39,7 @@ start_time = time.time()
 moves = model.batch_get_moves_from_fens([fen]*1024, T=0.1, use_fp16 = True)
 end_time = time.time()
 print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+print(moves)
 
 from src.models.small.inference_cpp import CppPolicy
 cpp_policy = CppPolicy()
