@@ -10,6 +10,10 @@ import sys
 _BINDING = None
 
 
+WdlVector = Tuple[float, float, float]
+PolicyValueResult = Tuple[List[str], List[WdlVector]]
+
+
 def _load_binding():
     global _BINDING
     if _BINDING is None:
@@ -54,9 +58,12 @@ class CppPolicy:
         temperature: float | None = None,
         iterations: int | None = 1,
         return_timings: bool = False,
-    ) -> List[str] | Tuple[List[str], InferenceStats]:
+    ) -> PolicyValueResult | Tuple[PolicyValueResult, InferenceStats]:
         if not fens:
-            return [] if not return_timings else ([], InferenceStats(0.0, 0.0, 0.0, 0.0))
+            empty: PolicyValueResult = ([], [])
+            if return_timings:
+                return empty, InferenceStats(0.0, 0.0, 0.0, 0.0)
+            return empty
 
         temp = self._default_temperature if temperature is None else float(temperature)
         iters = self._default_iterations if iterations is None else int(iterations)
@@ -64,6 +71,9 @@ class CppPolicy:
             raise ValueError("iterations must be >= 1")
 
         result = self._binding.generate_moves(list(fens), temp, iters, self._engine_path)
+        moves = list(result.moves)
+        wdl = [tuple(map(float, vec)) for vec in result.wdl]
+        policy_result: PolicyValueResult = (moves, wdl)
         if return_timings:
             timings = result.timings
             stats = InferenceStats(
@@ -72,8 +82,8 @@ class CppPolicy:
                 sampling_ms=timings.sampling_ms,
                 total_ms=timings.total_ms,
             )
-            return list(result.moves), stats
-        return list(result.moves)
+            return policy_result, stats
+        return policy_result
 
 
 __all__ = ["CppPolicy", "InferenceStats"]

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@ struct InferenceTimings
 struct MoveGenerationResult
 {
     std::vector<std::string> moves;
+    std::vector<std::array<float, 3>> wdl;
     InferenceTimings timings;
 };
 

@@ -15,6 +15,7 @@ PYBIND11_MODULE(_inference_cpp, m)
 
     py::class_<chessrl::MoveGenerationResult>(m, "MoveGenerationResult")
         .def_property_readonly("moves", [](const chessrl::MoveGenerationResult& self) { return self.moves; })
+        .def_property_readonly("wdl", [](const chessrl::MoveGenerationResult& self) { return self.wdl; })
         .def_property_readonly("timings", [](const chessrl::MoveGenerationResult& self) { return self.timings; });
 
     m.def(

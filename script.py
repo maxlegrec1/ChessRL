@@ -33,17 +33,20 @@ model = Inference().to("cuda")
 model.load_state_dict(torch.load("src/models/small/model.pt"), strict= False)
 # model.load_state_dict(torch.load("checkpoints/checkpoint_step_2000.pt",weights_only=False)["model_state_dict"],strict=False)
 
-fen = "r3k2r/ppp2ppp/2P5/8/2p1q1b1/B1P2N2/P4PPP/R2Q2K1 b kq - 0 14"
+fen = "r1bqkb1r/pppp1ppp/2n2n2/4p1N1/2B1P3/8/PPPP1PPP/RNBQK2R b KQkq - 5 4"
 
 start_time = time.time()
 moves = model.batch_get_moves_from_fens([fen]*1024, T=0.1, use_fp16 = True)
+value = model.get_position_value(fen)
 end_time = time.time()
 print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
-print(moves)
+print(value)
 
 from src.models.small.inference_cpp import CppPolicy
-cpp_policy = CppPolicy()
+cpp_policy = CppPolicy(engine_path="model.trt")
 start_time = time.time()
-moves = cpp_policy([fen]*1024, temperature=0.1, iterations=1)
+moves,wdl = cpp_policy([fen]*1024, temperature=0.1, iterations=1)
 end_time = time.time()
 print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+
+print(moves[:8], wdl[:8])

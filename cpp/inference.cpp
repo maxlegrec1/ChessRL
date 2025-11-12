@@ -37,6 +37,13 @@ constexpr int kBoardSize = 8;
 constexpr int kFeaturePlanes = 19;
 constexpr int kPolicySize = 1929;
 constexpr int kBatchSize = 1024;
+constexpr int kValueSize = 3;
+
+struct RawInferenceOutputs
+{
+    std::vector<float> policy;
+    std::vector<float> wdl;
+};
 
 class Logger : public nvinfer1::ILogger
 {
@@ -156,20 +163,47 @@ struct EngineContext
         }
 
         const int nbTensors = engine->getNbIOTensors();
+        std::vector<std::string> outputNames;
+        outputNames.reserve(nbTensors);
+
         for (int i = 0; i < nbTensors; ++i)
         {
             const char* name = engine->getIOTensorName(i);
-            if (engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
+            const auto mode = engine->getTensorIOMode(name);
+            if (mode == nvinfer1::TensorIOMode::kINPUT)
             {
                 inputName = name;
             }
-            else if (engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kOUTPUT)
+            else if (mode == nvinfer1::TensorIOMode::kOUTPUT)
             {
-                outputName = name;
+                outputNames.emplace_back(name);
             }
         }
 
-        if (inputName.empty() || outputName.empty())
+        for (const auto& name : outputNames)
+        {
+            const auto dims = engine->getTensorShape(name.c_str());
+            const size_t total = volume(dims);
+            if (total == static_cast<size_t>(kBatchSize) * kPolicySize && policyOutputName.empty())
+            {
+                policyOutputName = name;
+            }
+            else if (total == static_cast<size_t>(kBatchSize) * kValueSize && valueOutputName.empty())
+            {
+                valueOutputName = name;
+            }
+        }
+
+        if (policyOutputName.empty() && !outputNames.empty())
+        {
+            policyOutputName = outputNames.front();
+        }
+        if (valueOutputName.empty() && outputNames.size() >= 2)
+        {
+            valueOutputName = outputNames[1];
+        }
+
+        if (inputName.empty() || policyOutputName.empty() || valueOutputName.empty())
         {
             throw std::runtime_error("Failed to determine input/output tensor names.");
         }
@@ -180,7 +214,8 @@ struct EngineContext
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::string inputName;
-    std::string outputName;
+    std::string policyOutputName;
+    std::string valueOutputName;
 };
 
 EngineContext& getEngineContext(const std::string& engine_path)
@@ -354,12 +389,13 @@ EncodedBatch encodeBatch(const std::vector<std::string>& fens)
     return encoded;
 }
 
-std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& input)
+RawInferenceOutputs runInference(EngineContext& ctx, const std::vector<float>& input)
 {
     auto& engine = *ctx.engine;
 
     const auto inputDims = engine.getTensorShape(ctx.inputName.c_str());
-    const auto outputDims = engine.getTensorShape(ctx.outputName.c_str());
+    const auto policyDims = engine.getTensorShape(ctx.policyOutputName.c_str());
+    const auto valueDims = engine.getTensorShape(ctx.valueOutputName.c_str());
 
     const auto expectedInput = nvinfer1::Dims4{kBatchSize, kBoardSize, kBoardSize, kFeaturePlanes};
     if (volume(inputDims) != volume(expectedInput))
@@ -367,14 +403,21 @@ std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& in
         throw std::runtime_error("Input tensor has unexpected size.");
     }
 
-    const auto expectedOutput = nvinfer1::Dims2{kBatchSize, kPolicySize};
-    if (volume(outputDims) != volume(expectedOutput))
+    const auto expectedPolicy = nvinfer1::Dims2{kBatchSize, kPolicySize};
+    if (volume(policyDims) != volume(expectedPolicy))
     {
-        throw std::runtime_error("Output tensor has unexpected size.");
+        throw std::runtime_error("Policy tensor has unexpected size.");
+    }
+
+    const auto expectedValue = nvinfer1::Dims2{kBatchSize, kValueSize};
+    if (volume(valueDims) != volume(expectedValue))
+    {
+        throw std::runtime_error("Value tensor has unexpected size.");
     }
 
     const auto inputType = engine.getTensorDataType(ctx.inputName.c_str());
-    const auto outputType = engine.getTensorDataType(ctx.outputName.c_str());
+    const auto policyType = engine.getTensorDataType(ctx.policyOutputName.c_str());
+    const auto valueType = engine.getTensorDataType(ctx.valueOutputName.c_str());
 
     std::unique_ptr<nvinfer1::IExecutionContext> executionContext(engine.createExecutionContext());
     if (!executionContext)
@@ -388,11 +431,13 @@ std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& in
     }
 
     DeviceBuffer inputDevice(volume(inputDims) * getElementSize(inputType));
-    DeviceBuffer outputDevice(volume(outputDims) * getElementSize(outputType));
+    DeviceBuffer policyDevice(volume(policyDims) * getElementSize(policyType));
+    DeviceBuffer valueDevice(volume(valueDims) * getElementSize(valueType));
     CudaStream stream;
 
     std::vector<__half> inputHalf;
-    std::vector<__half> outputHalf;
+    std::vector<__half> policyHalf;
+    std::vector<__half> valueHalf;
 
     const void* inputHostData = nullptr;
     size_t inputBytes = 0;
@@ -423,7 +468,8 @@ std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& in
     }
 
     if (!executionContext->setTensorAddress(ctx.inputName.c_str(), inputDevice.data())
-        || !executionContext->setTensorAddress(ctx.outputName.c_str(), outputDevice.data()))
+        || !executionContext->setTensorAddress(ctx.policyOutputName.c_str(), policyDevice.data())
+        || !executionContext->setTensorAddress(ctx.valueOutputName.c_str(), valueDevice.data()))
     {
         throw std::runtime_error("Failed to set tensor addresses.");
     }
@@ -433,29 +479,56 @@ std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& in
         throw std::runtime_error("TensorRT enqueue failed.");
     }
 
-    std::vector<float> output(volume(outputDims));
-    void* outputHostData = nullptr;
-    size_t outputBytes = 0;
+    RawInferenceOutputs outputs;
+    outputs.policy.resize(volume(policyDims));
+    outputs.wdl.resize(volume(valueDims));
 
-    if (outputType == nvinfer1::DataType::kFLOAT)
+    void* policyHostData = nullptr;
+    size_t policyBytes = 0;
+
+    if (policyType == nvinfer1::DataType::kFLOAT)
     {
-        outputHostData = output.data();
-        outputBytes = output.size() * sizeof(float);
+        policyHostData = outputs.policy.data();
+        policyBytes = outputs.policy.size() * sizeof(float);
     }
-    else if (outputType == nvinfer1::DataType::kHALF)
+    else if (policyType == nvinfer1::DataType::kHALF)
     {
-        outputHalf.resize(output.size());
-        outputHostData = outputHalf.data();
-        outputBytes = outputHalf.size() * sizeof(__half);
+        policyHalf.resize(outputs.policy.size());
+        policyHostData = policyHalf.data();
+        policyBytes = policyHalf.size() * sizeof(__half);
     }
     else
     {
-        throw std::runtime_error("Unsupported output tensor type.");
+        throw std::runtime_error("Unsupported policy tensor type.");
     }
 
-    if (cudaMemcpyAsync(outputHostData, outputDevice.data(), outputBytes, cudaMemcpyDeviceToHost, stream.get()) != cudaSuccess)
+    void* valueHostData = nullptr;
+    size_t valueBytes = 0;
+
+    if (valueType == nvinfer1::DataType::kFLOAT)
     {
-        throw std::runtime_error("cudaMemcpyAsync (D2H) failed.");
+        valueHostData = outputs.wdl.data();
+        valueBytes = outputs.wdl.size() * sizeof(float);
+    }
+    else if (valueType == nvinfer1::DataType::kHALF)
+    {
+        valueHalf.resize(outputs.wdl.size());
+        valueHostData = valueHalf.data();
+        valueBytes = valueHalf.size() * sizeof(__half);
+    }
+    else
+    {
+        throw std::runtime_error("Unsupported value tensor type.");
+    }
+
+    if (cudaMemcpyAsync(policyHostData, policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, stream.get()) != cudaSuccess)
+    {
+        throw std::runtime_error("cudaMemcpyAsync (policy D2H) failed.");
+    }
+
+    if (cudaMemcpyAsync(valueHostData, valueDevice.data(), valueBytes, cudaMemcpyDeviceToHost, stream.get()) != cudaSuccess)
+    {
+        throw std::runtime_error("cudaMemcpyAsync (value D2H) failed.");
     }
 
     if (cudaStreamSynchronize(stream.get()) != cudaSuccess)
@@ -463,15 +536,23 @@ std::vector<float> runInference(EngineContext& ctx, const std::vector<float>& in
         throw std::runtime_error("cudaStreamSynchronize failed.");
     }
 
-    if (outputType == nvinfer1::DataType::kHALF)
+    if (policyType == nvinfer1::DataType::kHALF)
     {
-        for (size_t i = 0; i < output.size(); ++i)
+        for (size_t i = 0; i < outputs.policy.size(); ++i)
         {
-            output[i] = __half2float(outputHalf[i]);
+            outputs.policy[i] = __half2float(policyHalf[i]);
         }
     }
 
-    return output;
+    if (valueType == nvinfer1::DataType::kHALF)
+    {
+        for (size_t i = 0; i < outputs.wdl.size(); ++i)
+        {
+            outputs.wdl[i] = __half2float(valueHalf[i]);
+        }
+    }
+
+    return outputs;
 }
 
 std::vector<std::string> selectMoves(
@@ -598,12 +679,30 @@ MoveGenerationResult runOnce(const std::vector<std::string>& fens, float tempera
     const auto encodeEnd = clock::now();
 
     const auto inferStart = clock::now();
-    std::vector<float> logits = runInference(ctx, encoded.features);
+    RawInferenceOutputs rawOutputs = runInference(ctx, encoded.features);
     const auto inferEnd = clock::now();
 
     const auto sampleStart = clock::now();
-    std::vector<std::string> moves = selectMoves(logits, encoded.boards, temperature);
+    std::vector<std::string> moves = selectMoves(rawOutputs.policy, encoded.boards, temperature);
     const auto sampleEnd = clock::now();
+
+    if (rawOutputs.wdl.size() != encoded.boards.size() * static_cast<size_t>(kValueSize))
+    {
+        throw std::runtime_error("Mismatch between value outputs and batch size.");
+    }
+
+    std::vector<std::array<float, kValueSize>> wdlVectors;
+    wdlVectors.reserve(encoded.boards.size());
+    for (size_t idx = 0; idx < encoded.boards.size(); ++idx)
+    {
+        std::array<float, kValueSize> entry{};
+        for (int j = 0; j < kValueSize; ++j)
+        {
+            entry[static_cast<size_t>(j)]
+                = rawOutputs.wdl[idx * static_cast<size_t>(kValueSize) + static_cast<size_t>(j)];
+        }
+        wdlVectors.push_back(entry);
+    }
 
     const auto totalEnd = clock::now();
 
@@ -618,7 +717,7 @@ MoveGenerationResult runOnce(const std::vector<std::string>& fens, float tempera
         .totalMs = durationMs(totalStart, totalEnd),
     };
 
-    return MoveGenerationResult{std::move(moves), timings};
+    return MoveGenerationResult{std::move(moves), std::move(wdlVectors), timings};
 }
 
 } // namespace

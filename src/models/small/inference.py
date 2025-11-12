@@ -121,7 +121,7 @@ class Inference(torch.nn.Module):
         for i in range(self.num_layers):
             x = self.layers[i](x,pos_enc)
 
-        value = self.value_head(x)
+        value = self.value_head_q(x)
         value = torch.softmax(value, dim=-1)
 
         policy_tokens = self.policy_tokens_lin(x)
