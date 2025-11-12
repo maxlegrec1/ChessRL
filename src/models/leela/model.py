@@ -5,7 +5,7 @@ from .attn_map import apm_map, apm_out
 import math
 from .encoding_simple import encode_fen_to_tensor, encode_moves_to_tensor
 from .vocab import policy_index
-from typing import Union, List
+from typing import Union, List, Optional
 import bulletchess
 
 class Gating(nn.Module):
@@ -510,7 +510,7 @@ class BT4(nn.Module):
         
         return moves
     
-    def batch_get_moves_from_move_lists(self, move_lists: List[List[str]], T: float, device: str = None, use_fp16: bool = False):
+    def batch_get_moves_from_move_lists(self, move_lists: List[List[str]], T: float, device: str = None, use_fp16: bool = False, fens: Optional[List[str]] = None):
         """
         Get moves for multiple move histories using batched inference.
         
@@ -518,6 +518,9 @@ class BT4(nn.Module):
             move_lists: List of move sequences, where each sequence is a list of UCI moves
             T: Temperature for sampling (0.0 = deterministic/argmax, >0.0 = stochastic)
             device: Device to run the model on (if None, uses model's device)
+            fens: Optional list of FEN strings that represent the board state prior to 
+                  applying the corresponding move list. When provided, each move history
+                  is applied starting from the supplied FEN instead of the standard initial position.
         
         Returns:
             List of UCI move strings
@@ -533,19 +536,22 @@ class BT4(nn.Module):
         
         batch_size = len(move_lists)
         
+        if fens is not None and len(fens) != len(move_lists):
+            raise ValueError("Length of fens must match length of move_lists when provided.")
+        
         # Batch encode all move histories
         input_tensors = []
         legal_moves_masks = []
         is_black_to_move_list = []
         castling_rights_list = []
         
-        for move_history in move_lists:
-            input_tensor, legal_mask = encode_moves_to_tensor(move_history)
+        for idx, move_history in enumerate(move_lists):
+            starting_fen = fens[idx] if fens is not None else None
+            input_tensor, legal_mask = encode_moves_to_tensor(move_history, starting_fen=starting_fen)
             input_tensors.append(input_tensor.squeeze(0))  # Remove batch dim
             legal_moves_masks.append(legal_mask)
-        # Create boards to check if black is to move and for castling rights
-        for move_history in move_lists:
-            board = bulletchess.Board()
+            
+            board = bulletchess.Board.from_fen(starting_fen) if starting_fen is not None else bulletchess.Board()
             for mv in move_history:
                 move = bulletchess.Move.from_uci(mv)
                 board.apply(move)
