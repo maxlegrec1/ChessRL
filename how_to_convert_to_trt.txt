@@ -1,11 +1,16 @@
-python conversion/to_onnx.py # generate model.onnx
+uv run python -m src.conversion_small.to_onnx # generate model.onnx
 
 trtexec --onnx=model.onnx --saveEngine=model.trt --fp16 # generate model.trt
 
 # Optional if not done ; build c++ inference
+cd cpp
 uv run python setup.py build_ext --inplace
 
 
 
 
 
+# convert leela
+uv run python -m src.conversion_leela.to_onnx # generate leela.onnx
+
+trtexec --onnx=leela.onnx --saveEngine=leela.trt --fp16

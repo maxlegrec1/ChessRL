@@ -1,6 +1,3 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.small.inference import Inference
 import torch
@@ -25,20 +22,8 @@ model.load_state_dict(torch.load("src/models/small/model.pt",weights_only=False)
 
 torch_model = model
 # Create example inputs for exporting the model. The inputs should be a tuple of tensors.
-example_inputs = torch.randn(1024, 8, 8, 19,device='cuda')
+example_inputs = torch.randn(32, 8, 8, 19,device='cuda')
 
 onnx_program = torch.onnx.export(torch_model, example_inputs, dynamo=True)
-onnx_program.save("model.onnx")
+onnx_program.save("model_minibatch.onnx")
 
-
-# dummy_input = torch.randn(32, 8, 8, 19,device='cuda')
-# dynamic_axes = {'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
-
-# torch.onnx.export(
-#     model,
-#     dummy_input,
-#     "model_dynamic.onnx",
-#     input_names = ['input'], 
-#     output_names = ['output'],
-#     dynamic_axes=dynamic_axes
-# )

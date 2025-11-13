@@ -34,7 +34,7 @@ class _CppPolicyAdapter:
         original_length = len(fens)
         if len(fens) != 1024:
             fens = fens + [fens[0]] * (1024 - len(fens))
-        moves = self.cpp_policy(fens, temperature=T)
+        moves,wdl = self.cpp_policy(fens, temperature=T)
         moves = moves[:original_length]
         if return_probs:
             raise NotImplementedError("CppPolicy does not currently support returning probabilities")
@@ -104,9 +104,9 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print("loading player1 weights")
+    print("loading player1 weights at ", args.player_1_ckpt)
     player1_model = _load_model(args.player_1_kind, args.player_1_device, args.player_1_ckpt)
-    print("loading player2 weights")
+    print("loading player2 weights at ", args.player_2_ckpt)
     player2_model = _load_model(args.player_2_kind, args.player_2_device, args.player_2_ckpt)
 
     cfg = SelfPlayConfig(

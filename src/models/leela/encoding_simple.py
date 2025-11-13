@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import bulletchess
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from .vocab import policy_index
 
 # Precompute policy string to index mapping for O(1) lookups
@@ -121,8 +121,8 @@ def _build_snapshots(board: bulletchess.Board) -> List[bulletchess.Board]:
     return snaps
 
 
-def encode_moves_to_tensor(uci_moves: List[str]) -> Tuple[torch.Tensor, np.ndarray]:
-    board = bulletchess.Board()
+def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = None) -> Tuple[torch.Tensor, np.ndarray]:
+    board = bulletchess.Board.from_fen(starting_fen) if starting_fen is not None else bulletchess.Board()
     for mv in uci_moves:
         move = bulletchess.Move.from_uci(mv)
         board.apply(move)

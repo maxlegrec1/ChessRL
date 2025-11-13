@@ -33,16 +33,49 @@ model = Inference().to("cuda")
 model.load_state_dict(torch.load("src/models/small/model.pt"), strict= False)
 # model.load_state_dict(torch.load("checkpoints/checkpoint_step_2000.pt",weights_only=False)["model_state_dict"],strict=False)
 
-fen = "r3k2r/ppp2ppp/2P5/8/2p1q1b1/B1P2N2/P4PPP/R2Q2K1 b kq - 0 14"
+fen = "r1bqkb1r/p4ppp/2p2n2/nB2p1N1/8/5Q2/PPPP1PPP/RNB1K2R b KQkq - 1 8"
 
-start_time = time.time()
-moves = model.batch_get_moves_from_fens([fen]*1024, T=0.1, use_fp16 = True)
-end_time = time.time()
-print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+# move, probs = model.get_move_from_fen_no_thinking(fen, T=1, use_fp16 = True,return_probs=True)
+# print(move, probs)
+# probs = probs.squeeze(0)
+# # sort indices of probs by descending order
+# sorted_indices = torch.argsort(probs, dim=-1, descending=True)
+# print(sorted_indices)
+# print(probs[sorted_indices.tolist()[:10]])
+# from src.models.small.inference import policy_index
+# # first 10 moves
+# print([policy_index[i] for i in sorted_indices.tolist()[:10]])
 
-from src.models.small.inference_cpp import CppPolicy
-cpp_policy = CppPolicy()
-start_time = time.time()
-moves = cpp_policy([fen]*1024, temperature=0.1, iterations=1)
-end_time = time.time()
-print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+
+# start_time = time.time()
+# moves = model.batch_get_moves_from_fens([fen]*1024, T=0.1, use_fp16 = True)
+# value = model.get_position_value(fen)
+# end_time = time.time()
+# print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+# print(value)
+
+# from src.models.small.inference_cpp import CppPolicy
+# cpp_policy = CppPolicy(engine_path="model.trt")
+# start_time = time.time()
+# moves,wdl = cpp_policy([fen]*1024, temperature=0.1, iterations=1)
+# end_time = time.time()
+# print(f"Time taken to run inference: {end_time - start_time:.2f} seconds")
+
+# print(moves[:8], wdl[:8])
+
+import bulletchess
+from src.models.small.fen_encoder import fen_to_tensor
+board = bulletchess.Board.from_fen(fen)
+x = torch.from_numpy(fen_to_tensor(fen)).to("cuda").to(torch.float32)
+x = x.view(1,8,8,19)
+
+policy, _ = model(x)
+print(policy.shape)
+policy = policy.cpu().squeeze(0)
+sorted_indices = torch.argsort(policy, dim=-1, descending=True)
+sorted_indices = sorted_indices.squeeze(0)
+
+print(sorted_indices)
+print(policy[sorted_indices[:10]])
+from src.models.small.inference import policy_index
+print([policy_index[i] for i in sorted_indices[:10]])
