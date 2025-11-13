@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -95,6 +98,24 @@ size_t volume(const nvinfer1::Dims& dims)
     return result;
 }
 
+size_t normalized_tensor_volume(const nvinfer1::Dims& dims)
+{
+    const size_t total = volume(dims);
+    if (dims.nbDims > 0)
+    {
+        const int first = dims.d[0];
+        if (first > 0)
+        {
+            const size_t batch = static_cast<size_t>(first);
+            if (batch > 0 && total % batch == 0)
+            {
+                return total / batch;
+            }
+        }
+    }
+    return total;
+}
+
 class DeviceBuffer
 {
 public:
@@ -118,6 +139,36 @@ public:
 
 private:
     void* mPtr{nullptr};
+};
+
+class ResizableDeviceBuffer
+{
+public:
+    void ensure(size_t bytes)
+    {
+        if (bytes == 0)
+        {
+            buffer_.reset();
+            capacity_ = 0;
+            return;
+        }
+        if (bytes > capacity_)
+        {
+            buffer_ = std::make_unique<DeviceBuffer>(bytes);
+            capacity_ = bytes;
+        }
+    }
+
+    void* data() const noexcept
+    {
+        return buffer_ ? buffer_->data() : nullptr;
+    }
+
+    size_t capacity() const noexcept { return capacity_; }
+
+private:
+    size_t capacity_{0};
+    std::unique_ptr<DeviceBuffer> buffer_;
 };
 
 class CudaStream
@@ -198,12 +249,12 @@ public:
             else if (mode == nvinfer1::TensorIOMode::kOUTPUT)
             {
                 const auto dims = mEngine->getTensorShape(name);
-                const size_t total = volume(dims);
-                if (total == static_cast<size_t>(kSmallPolicySize) && mPolicyOutputName.empty())
+                const size_t base = normalized_tensor_volume(dims);
+                if (base == static_cast<size_t>(kSmallPolicySize) && mPolicyOutputName.empty())
                 {
                     mPolicyOutputName = name;
                 }
-                else if (total == static_cast<size_t>(kSmallValueSize) && mValueOutputName.empty())
+                else if (base == static_cast<size_t>(kSmallValueSize) && mValueOutputName.empty())
                 {
                     mValueOutputName = name;
                 }
@@ -236,7 +287,7 @@ SmallEngineContext& getSmallEngineContext(const std::string& engine_path)
     static auto* mutex = new std::mutex();
     static auto* contexts = new std::unordered_map<std::string, std::unique_ptr<SmallEngineContext>>();
 
-    std::string resolved = resolveEnginePath(engine_path, "model_single.trt");
+    std::string resolved = resolveEnginePath(engine_path, "model_minibatch.trt");
     std::lock_guard<std::mutex> lock(*mutex);
     auto it = contexts->find(resolved);
     if (it == contexts->end())
@@ -327,6 +378,14 @@ std::vector<float> encodeSmallFeatures(const chess::Board& board)
     fillPlane(18, halfMoveNorm);
 
     return features;
+}
+
+SmallEncodedPosition build_small_encoded_position(const chess::Board& board)
+{
+    SmallEncodedPosition encoded;
+    encoded.features = encodeSmallFeatures(board);
+    encoded.swap_wdl = board.sideToMove() == chess::Color::WHITE;
+    return encoded;
 }
 
 SmallRawOutputs runSmallInference(
@@ -493,9 +552,9 @@ SmallPolicyValue evaluateSmall(
     const std::string fenString = fen.empty() ? std::string(chess::constants::STARTPOS) : std::string(fen);
     chess::Board board(fenString);
 
-    std::vector<float> features = encodeSmallFeatures(board);
+    SmallEncodedPosition encoded = build_small_encoded_position(board);
     SmallEngineContext& ctx = getSmallEngineContext(engine_path);
-    SmallRawOutputs raw = runSmallInference(ctx, features);
+    SmallRawOutputs raw = runSmallInference(ctx, encoded.features);
 
     if (raw.policy.size() != static_cast<size_t>(kSmallPolicySize))
     {
@@ -512,7 +571,7 @@ SmallPolicyValue evaluateSmall(
     {
         result.wdl[static_cast<size_t>(i)] = raw.wdl[static_cast<size_t>(i)];
     }
-    if (board.sideToMove() == chess::Color::WHITE)
+    if (encoded.swap_wdl)
     {
         std::swap(result.wdl[0], result.wdl[2]);
     }
@@ -573,16 +632,16 @@ public:
             else if (mode == nvinfer1::TensorIOMode::kOUTPUT)
             {
                 const auto dims = mEngine->getTensorShape(name);
-                const size_t total = volume(dims);
-                if (total == static_cast<size_t>(kLeelaPolicySize) && mPolicyOutputName.empty())
+                const size_t base = normalized_tensor_volume(dims);
+                if (base == static_cast<size_t>(kLeelaPolicySize) && mPolicyOutputName.empty())
                 {
                     mPolicyOutputName = name;
                 }
-                else if (total == static_cast<size_t>(kLeelaValueSize) && mValueWinnerOutputName.empty())
+                else if (base == static_cast<size_t>(kLeelaValueSize) && mValueWinnerOutputName.empty())
                 {
                     mValueWinnerOutputName = name;
                 }
-                else if (total == static_cast<size_t>(kLeelaValueSize) && mValueQOutputName.empty())
+                else if (base == static_cast<size_t>(kLeelaValueSize) && mValueQOutputName.empty())
                 {
                     mValueQOutputName = name;
                 }
@@ -617,7 +676,7 @@ LeelaEngineContext& getLeelaEngineContext(const std::string& engine_path)
     static auto* mutex = new std::mutex();
     static auto* contexts = new std::unordered_map<std::string, std::unique_ptr<LeelaEngineContext>>();
 
-    std::string resolved = resolveEnginePath(engine_path, "leela_single.trt");
+    std::string resolved = resolveEnginePath(engine_path, "leela_minibatch.trt");
     std::lock_guard<std::mutex> lock(*mutex);
     auto it = contexts->find(resolved);
     if (it == contexts->end())
@@ -880,7 +939,7 @@ struct LeelaEncoded
     std::vector<float> features;
     chess::Board maskBoard;
     bool isBlackToMove{false};
-    std::string castlingRights;
+    std::string castling_rights;
 };
 
 LeelaEncoded encodeLeelaInput(std::string_view originFen, const std::vector<std::string>& moveHistory)
@@ -918,7 +977,7 @@ LeelaEncoded encodeLeelaInput(std::string_view originFen, const std::vector<std:
     encoded.features.assign(kLeelaFeaturePlanes * kLeelaBoardSize * kLeelaBoardSize, 0.0F);
 
     encoded.isBlackToMove = finalBoard.sideToMove() == chess::Color::BLACK;
-    encoded.castlingRights = extractCastlingRights(finalBoard);
+    encoded.castling_rights = extractCastlingRights(finalBoard);
 
     auto featureHistory = history;
     if (encoded.isBlackToMove)
@@ -977,6 +1036,16 @@ LeelaEncoded encodeLeelaInput(std::string_view originFen, const std::vector<std:
     writeConstantPlane(encoded.features, 111, 1.0F);
 
     return encoded;
+}
+
+LeelaEncodedPosition build_leela_encoded_position(std::string_view origin_fen, const std::vector<std::string>& move_history)
+{
+    LeelaEncoded encoded = encodeLeelaInput(origin_fen, move_history);
+    LeelaEncodedPosition position;
+    position.features = std::move(encoded.features);
+    position.is_black_to_move = encoded.isBlackToMove;
+    position.castling_rights = std::move(encoded.castling_rights);
+    return position;
 }
 
 LeelaRawOutputs runLeelaInference(LeelaEngineContext& ctx, const std::vector<float>& input)
@@ -1172,7 +1241,7 @@ LeelaPolicyValue evaluateLeela(
     const std::vector<std::string>& move_history,
     const std::string& engine_path)
 {
-    LeelaEncoded encoded = encodeLeelaInput(origin_fen, move_history);
+    LeelaEncodedPosition encoded = build_leela_encoded_position(origin_fen, move_history);
     LeelaEngineContext& ctx = getLeelaEngineContext(engine_path);
     LeelaRawOutputs raw = runLeelaInference(ctx, encoded.features);
 
@@ -1190,24 +1259,839 @@ LeelaPolicyValue evaluateLeela(
         result.value_winner_logits[static_cast<size_t>(i)] = raw.valueWinner[static_cast<size_t>(i)];
         result.value_q_logits[static_cast<size_t>(i)] = raw.valueQ[static_cast<size_t>(i)];
     }
-    result.is_black_to_move = encoded.isBlackToMove;
-    result.castling_rights = std::move(encoded.castlingRights);
+    result.is_black_to_move = encoded.is_black_to_move;
+    result.castling_rights = std::move(encoded.castling_rights);
     return result;
+}
+
+template <typename Pending>
+void fulfillWithException(std::vector<Pending>& work, const std::exception_ptr& ep)
+{
+    for (auto& item : work)
+    {
+        if (item.promise)
+        {
+            item.promise->set_exception(ep);
+        }
+    }
 }
 
 } // namespace
 
-SmallPolicyValue evaluate_small_position(std::string_view fen, const std::string& engine_path)
+SmallEncodedPosition encode_small_position(const chess::Board& board)
 {
-    return evaluateSmall(fen, engine_path);
+    return build_small_encoded_position(board);
 }
 
-LeelaPolicyValue evaluate_leela_position(
+LeelaEncodedPosition encode_leela_position(
     std::string_view origin_fen,
-    const std::vector<std::string>& move_history,
-    const std::string& engine_path)
+    const std::vector<std::string>& move_history)
 {
-    return evaluateLeela(origin_fen, move_history, engine_path);
+    return build_leela_encoded_position(origin_fen, move_history);
+}
+
+struct SmallBatchRunner::Impl
+{
+    struct SmallPending
+    {
+        SmallEncodedPosition position;
+        std::shared_ptr<std::promise<SmallPolicyValue>> promise;
+    };
+
+    explicit Impl(SmallBatchConfig cfg)
+        : config(std::move(cfg))
+        , ctx(getSmallEngineContext(config.engine_path))
+        , flush_threshold_(static_cast<size_t>(config.max_batch_size))
+    {
+        if (config.max_batch_size <= 0)
+        {
+            throw std::invalid_argument("SmallBatchRunner requires positive max_batch_size");
+        }
+        worker = std::thread([this]() { worker_loop(); });
+    }
+
+    ~Impl()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stop_worker_ = true;
+        }
+        cv.notify_all();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+
+    BatchTicket<SmallPolicyValue> enqueue(SmallEncodedPosition position)
+    {
+        const size_t expected = static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes;
+        if (position.features.size() != expected)
+        {
+            throw std::runtime_error("Small batch request provided incorrect feature vector length.");
+        }
+
+        auto promise = std::make_shared<std::promise<SmallPolicyValue>>();
+        auto future = promise->get_future().share();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            queue.emplace_back(SmallPending{std::move(position), std::move(promise)});
+        }
+        cv.notify_one();
+        return BatchTicket<SmallPolicyValue>(std::move(future));
+    }
+
+    void process()
+    {
+        std::vector<SmallPending> work;
+        work.reserve(static_cast<size_t>(config.max_batch_size));
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            while (!queue.empty() && work.size() < static_cast<size_t>(config.max_batch_size))
+            {
+                work.push_back(std::move(queue.front()));
+                queue.pop_front();
+            }
+        }
+
+        if (work.empty())
+        {
+            return;
+        }
+
+        const auto ep_guard = [&work](const std::exception_ptr& ep) {
+            fulfillWithException(work, ep);
+        };
+
+        try
+        {
+            auto start_time = std::chrono::steady_clock::now();
+            if (!exec)
+            {
+                exec.reset(ctx.engine().createExecutionContext());
+                if (!exec)
+                {
+                    throw std::runtime_error("Failed to create small-model batch execution context.");
+                }
+            }
+            if (!stream)
+            {
+                stream = std::make_unique<CudaStream>();
+            }
+
+            auto& engine = ctx.engine();
+            const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
+            const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
+            const auto valueType = engine.getTensorDataType(ctx.valueName().c_str());
+
+            const size_t actualCount = work.size();
+            const size_t inputElements
+                = static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes;
+            const size_t policyElements = static_cast<size_t>(kSmallPolicySize);
+            const size_t valueElements = static_cast<size_t>(kSmallValueSize);
+
+            nvinfer1::Dims inputDims = engine.getTensorShape(ctx.inputName().c_str());
+            if (inputDims.nbDims <= 0)
+            {
+                throw std::runtime_error("Small-model input tensor has unexpected rank.");
+            }
+            if (inputDims.d[0] == -1)
+            {
+                inputDims.d[0] = static_cast<int>(actualCount);
+            }
+            const size_t engineBatch = inputDims.d[0] == -1 ? actualCount : static_cast<size_t>(inputDims.d[0]);
+            if (engineBatch < actualCount)
+            {
+                throw std::runtime_error("Small-model engine batch is smaller than requested work size.");
+            }
+            inputDims.d[0] = static_cast<int>(engineBatch);
+            if (!exec->setInputShape(ctx.inputName().c_str(), inputDims))
+            {
+                throw std::runtime_error("Failed to set small-model batch input shape.");
+            }
+
+            inputDevice.ensure(engineBatch * inputElements * getElementSize(inputType));
+            policyDevice.ensure(engineBatch * policyElements * getElementSize(policyType));
+            valueDevice.ensure(engineBatch * valueElements * getElementSize(valueType));
+
+            std::vector<float> concatenated(engineBatch * inputElements, 0.0F);
+            for (size_t i = 0; i < engineBatch; ++i)
+            {
+                const auto& features = (i < actualCount) ? work[i].position.features : work.back().position.features;
+                std::copy(features.begin(), features.end(), concatenated.begin() + static_cast<ptrdiff_t>(i * inputElements));
+            }
+
+            std::vector<__half> inputHalf;
+            const void* inputHost = nullptr;
+            size_t inputBytes = 0;
+            if (inputType == nvinfer1::DataType::kFLOAT)
+            {
+                inputHost = concatenated.data();
+                inputBytes = concatenated.size() * sizeof(float);
+            }
+            else if (inputType == nvinfer1::DataType::kHALF)
+            {
+                inputHalf.resize(concatenated.size());
+                for (size_t i = 0; i < concatenated.size(); ++i)
+                {
+                    inputHalf[i] = __float2half(concatenated[i]);
+                }
+                inputHost = inputHalf.data();
+                inputBytes = inputHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported small-model batch input tensor type.");
+            }
+
+            if (cudaMemcpyAsync(inputDevice.data(), inputHost, inputBytes, cudaMemcpyHostToDevice, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
+            }
+
+            if (!exec->setTensorAddress(ctx.inputName().c_str(), inputDevice.data())
+                || !exec->setTensorAddress(ctx.policyName().c_str(), policyDevice.data())
+                || !exec->setTensorAddress(ctx.valueName().c_str(), valueDevice.data()))
+            {
+                throw std::runtime_error("Failed to set small-model batch tensor addresses.");
+            }
+
+            if (!exec->enqueueV3(stream->get()))
+            {
+                throw std::runtime_error("Small-model batched TensorRT enqueue failed.");
+            }
+
+            const size_t totalPolicy = engineBatch * policyElements;
+            const size_t totalValue = engineBatch * valueElements;
+
+            std::vector<float> policyFloat(totalPolicy);
+            std::vector<float> valueFloat(totalValue);
+            std::vector<__half> policyHalf;
+            std::vector<__half> valueHalf;
+
+            void* policyHost = nullptr;
+            size_t policyBytes = 0;
+            if (policyType == nvinfer1::DataType::kFLOAT)
+            {
+                policyHost = policyFloat.data();
+                policyBytes = policyFloat.size() * sizeof(float);
+            }
+            else if (policyType == nvinfer1::DataType::kHALF)
+            {
+                policyHalf.resize(totalPolicy);
+                policyHost = policyHalf.data();
+                policyBytes = policyHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported small-model batch policy tensor type.");
+            }
+
+            void* valueHost = nullptr;
+            size_t valueBytes = 0;
+            if (valueType == nvinfer1::DataType::kFLOAT)
+            {
+                valueHost = valueFloat.data();
+                valueBytes = valueFloat.size() * sizeof(float);
+            }
+            else if (valueType == nvinfer1::DataType::kHALF)
+            {
+                valueHalf.resize(totalValue);
+                valueHost = valueHalf.data();
+                valueBytes = valueHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported small-model batch value tensor type.");
+            }
+
+            if (cudaMemcpyAsync(policyHost, policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (small batch policy D2H) failed.");
+            }
+            if (cudaMemcpyAsync(valueHost, valueDevice.data(), valueBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
+            }
+
+            if (cudaStreamSynchronize(stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaStreamSynchronize (small batch) failed.");
+            }
+
+            if (telemetry_enabled_)
+            {
+                const double infer_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - start_time)
+                                              .count();
+                std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+                batches_ += 1;
+                positions_ += actualCount;
+                total_infer_ms_ += infer_ms;
+            }
+
+            if (policyType == nvinfer1::DataType::kHALF)
+            {
+                policyFloat.resize(totalPolicy);
+                for (size_t i = 0; i < totalPolicy; ++i)
+                {
+                    policyFloat[i] = __half2float(policyHalf[i]);
+                }
+            }
+            if (valueType == nvinfer1::DataType::kHALF)
+            {
+                valueFloat.resize(totalValue);
+                for (size_t i = 0; i < totalValue; ++i)
+                {
+                    valueFloat[i] = __half2float(valueHalf[i]);
+                }
+            }
+
+            for (size_t i = 0; i < actualCount; ++i)
+            {
+                SmallPolicyValue result;
+                result.policy_logits.assign(
+                    policyFloat.begin() + static_cast<ptrdiff_t>(i * policyElements),
+                    policyFloat.begin() + static_cast<ptrdiff_t>((i + 1) * policyElements));
+                for (size_t j = 0; j < valueElements; ++j)
+                {
+                    result.wdl[j] = valueFloat[i * valueElements + j];
+                }
+                if (work[i].position.swap_wdl)
+                {
+                    std::swap(result.wdl[0], result.wdl[2]);
+                }
+                work[i].promise->set_value(std::move(result));
+            }
+        }
+        catch (...)
+        {
+            ep_guard(std::current_exception());
+            throw;
+        }
+    }
+
+    size_t pending_size() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return queue.size();
+    }
+
+    void worker_loop()
+    {
+        while (true)
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [this]() { return stop_worker_ || queue.size() >= flush_threshold_; });
+            if (stop_worker_)
+            {
+                break;
+            }
+            lock.unlock();
+            try
+            {
+                process();
+            }
+            catch (...)
+            {
+                // Exceptions are delivered via promises; keep worker alive.
+            }
+        }
+    }
+
+    BatchStatistics stats() const
+    {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        return BatchStatistics{batches_, positions_, total_infer_ms_};
+    }
+
+    SmallBatchConfig config;
+    SmallEngineContext& ctx;
+    size_t flush_threshold_{0};
+    std::unique_ptr<nvinfer1::IExecutionContext> exec;
+    std::unique_ptr<CudaStream> stream;
+    ResizableDeviceBuffer inputDevice;
+    ResizableDeviceBuffer policyDevice;
+    ResizableDeviceBuffer valueDevice;
+    mutable std::mutex mutex;
+    std::condition_variable cv;
+    bool stop_worker_{false};
+    std::deque<SmallPending> queue;
+    std::thread worker;
+    const bool telemetry_enabled_{config.enable_telemetry};
+    mutable std::mutex telemetry_mutex_;
+    size_t batches_{0};
+    size_t positions_{0};
+    double total_infer_ms_{0.0};
+};
+
+SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
+{
+    struct Cache
+    {
+        std::mutex mutex;
+        std::unordered_map<std::string, std::weak_ptr<Impl>> entries;
+    };
+    static Cache cache;
+
+    const std::string key = [&config]() {
+        std::ostringstream oss;
+        oss << resolveEnginePath(config.engine_path, "model_minibatch.trt")
+            << '|' << config.max_batch_size
+            << '|' << (config.enable_telemetry ? '1' : '0');
+        return oss.str();
+    }();
+
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (auto existing = cache.entries[key].lock())
+    {
+        impl_ = existing;
+        return;
+    }
+
+    auto fresh = std::make_shared<Impl>(std::move(config));
+    cache.entries[key] = fresh;
+    impl_ = std::move(fresh);
+}
+
+SmallBatchRunner::Ticket SmallBatchRunner::enqueue(SmallEncodedPosition position)
+{
+    return impl_->enqueue(std::move(position));
+}
+
+void SmallBatchRunner::process_pending()
+{
+    impl_->process();
+}
+
+size_t SmallBatchRunner::pending() const
+{
+    return impl_->pending_size();
+}
+
+BatchStatistics SmallBatchRunner::statistics() const
+{
+    return impl_->stats();
+}
+
+struct LeelaBatchRunner::Impl
+{
+    struct LeelaPending
+    {
+        LeelaEncodedPosition position;
+        std::shared_ptr<std::promise<LeelaPolicyValue>> promise;
+    };
+
+    explicit Impl(LeelaBatchConfig cfg)
+        : config(std::move(cfg))
+        , ctx(getLeelaEngineContext(config.engine_path))
+        , flush_threshold_(static_cast<size_t>(config.max_batch_size))
+    {
+        if (config.max_batch_size <= 0)
+        {
+            throw std::invalid_argument("LeelaBatchRunner requires positive max_batch_size");
+        }
+        worker = std::thread([this]() { worker_loop(); });
+    }
+
+    ~Impl()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stop_worker_ = true;
+        }
+        cv.notify_all();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+
+    BatchTicket<LeelaPolicyValue> enqueue(LeelaEncodedPosition position)
+    {
+        const size_t expected
+            = static_cast<size_t>(kLeelaFeaturePlanes) * kLeelaBoardSize * kLeelaBoardSize;
+        if (position.features.size() != expected)
+        {
+            throw std::runtime_error("Leela batch request provided incorrect feature vector length.");
+        }
+
+        auto promise = std::make_shared<std::promise<LeelaPolicyValue>>();
+        auto future = promise->get_future().share();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            queue.emplace_back(LeelaPending{std::move(position), std::move(promise)});
+        }
+        cv.notify_one();
+        return BatchTicket<LeelaPolicyValue>(std::move(future));
+    }
+
+    void process()
+    {
+        std::vector<LeelaPending> work;
+        work.reserve(static_cast<size_t>(config.max_batch_size));
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            while (!queue.empty() && work.size() < static_cast<size_t>(config.max_batch_size))
+            {
+                work.push_back(std::move(queue.front()));
+                queue.pop_front();
+            }
+        }
+
+        if (work.empty())
+        {
+            return;
+        }
+
+        const auto ep_guard = [&work](const std::exception_ptr& ep) {
+            fulfillWithException(work, ep);
+        };
+
+        try
+        {
+            auto start_time = std::chrono::steady_clock::now();
+            if (!exec)
+            {
+                exec.reset(ctx.engine().createExecutionContext());
+                if (!exec)
+                {
+                    throw std::runtime_error("Failed to create Leela-model batch execution context.");
+                }
+            }
+            if (!stream)
+            {
+                stream = std::make_unique<CudaStream>();
+            }
+
+            auto& engine = ctx.engine();
+            const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
+            const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
+            const auto winnerType = engine.getTensorDataType(ctx.valueWinnerName().c_str());
+            const auto qType = engine.getTensorDataType(ctx.valueQName().c_str());
+
+            const size_t actualCount = work.size();
+            const size_t inputElements
+                = static_cast<size_t>(kLeelaFeaturePlanes) * kLeelaBoardSize * kLeelaBoardSize;
+            const size_t policyElements = static_cast<size_t>(kLeelaPolicySize);
+            const size_t valueElements = static_cast<size_t>(kLeelaValueSize);
+
+            nvinfer1::Dims inputDims = engine.getTensorShape(ctx.inputName().c_str());
+            if (inputDims.nbDims <= 0)
+            {
+                throw std::runtime_error("Leela-model input tensor has unexpected rank.");
+            }
+            if (inputDims.d[0] == -1)
+            {
+                inputDims.d[0] = static_cast<int>(actualCount);
+            }
+            const size_t engineBatch = inputDims.d[0] == -1 ? actualCount : static_cast<size_t>(inputDims.d[0]);
+            if (engineBatch < actualCount)
+            {
+                throw std::runtime_error("Leela-model engine batch is smaller than requested work size.");
+            }
+            inputDims.d[0] = static_cast<int>(engineBatch);
+            if (!exec->setInputShape(ctx.inputName().c_str(), inputDims))
+            {
+                throw std::runtime_error("Failed to set Leela-model batch input shape.");
+            }
+
+            inputDevice.ensure(engineBatch * inputElements * getElementSize(inputType));
+            policyDevice.ensure(engineBatch * policyElements * getElementSize(policyType));
+            winnerDevice.ensure(engineBatch * valueElements * getElementSize(winnerType));
+            qDevice.ensure(engineBatch * valueElements * getElementSize(qType));
+
+            std::vector<float> concatenated(engineBatch * inputElements, 0.0F);
+            for (size_t i = 0; i < engineBatch; ++i)
+            {
+                const auto& features = (i < actualCount) ? work[i].position.features : work.back().position.features;
+                std::copy(features.begin(), features.end(), concatenated.begin() + static_cast<ptrdiff_t>(i * inputElements));
+            }
+
+            std::vector<__half> inputHalf;
+            const void* inputHost = nullptr;
+            size_t inputBytes = 0;
+            if (inputType == nvinfer1::DataType::kFLOAT)
+            {
+                inputHost = concatenated.data();
+                inputBytes = concatenated.size() * sizeof(float);
+            }
+            else if (inputType == nvinfer1::DataType::kHALF)
+            {
+                inputHalf.resize(concatenated.size());
+                for (size_t i = 0; i < concatenated.size(); ++i)
+                {
+                    inputHalf[i] = __float2half(concatenated[i]);
+                }
+                inputHost = inputHalf.data();
+                inputBytes = inputHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported Leela-model batch input tensor type.");
+            }
+
+            if (cudaMemcpyAsync(inputDevice.data(), inputHost, inputBytes, cudaMemcpyHostToDevice, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (Leela batch H2D) failed.");
+            }
+
+            if (!exec->setTensorAddress(ctx.inputName().c_str(), inputDevice.data())
+                || !exec->setTensorAddress(ctx.policyName().c_str(), policyDevice.data())
+                || !exec->setTensorAddress(ctx.valueWinnerName().c_str(), winnerDevice.data())
+                || !exec->setTensorAddress(ctx.valueQName().c_str(), qDevice.data()))
+            {
+                throw std::runtime_error("Failed to set Leela-model batch tensor addresses.");
+            }
+
+            if (!exec->enqueueV3(stream->get()))
+            {
+                throw std::runtime_error("Leela-model batched TensorRT enqueue failed.");
+            }
+
+            const size_t totalPolicy = engineBatch * policyElements;
+            const size_t totalValue = engineBatch * valueElements;
+
+            std::vector<float> policyFloat(totalPolicy);
+            std::vector<float> winnerFloat(totalValue);
+            std::vector<float> qFloat(totalValue);
+            std::vector<__half> policyHalf;
+            std::vector<__half> winnerHalf;
+            std::vector<__half> qHalf;
+
+            void* policyHost = nullptr;
+            size_t policyBytes = 0;
+            if (policyType == nvinfer1::DataType::kFLOAT)
+            {
+                policyHost = policyFloat.data();
+                policyBytes = policyFloat.size() * sizeof(float);
+            }
+            else if (policyType == nvinfer1::DataType::kHALF)
+            {
+                policyHalf.resize(totalPolicy);
+                policyHost = policyHalf.data();
+                policyBytes = policyHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported Leela-model batch policy tensor type.");
+            }
+
+            void* winnerHost = nullptr;
+            size_t winnerBytes = 0;
+            if (winnerType == nvinfer1::DataType::kFLOAT)
+            {
+                winnerHost = winnerFloat.data();
+                winnerBytes = winnerFloat.size() * sizeof(float);
+            }
+            else if (winnerType == nvinfer1::DataType::kHALF)
+            {
+                winnerHalf.resize(totalValue);
+                winnerHost = winnerHalf.data();
+                winnerBytes = winnerHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported Leela-model batch winner tensor type.");
+            }
+
+            void* qHost = nullptr;
+            size_t qBytes = 0;
+            if (qType == nvinfer1::DataType::kFLOAT)
+            {
+                qHost = qFloat.data();
+                qBytes = qFloat.size() * sizeof(float);
+            }
+            else if (qType == nvinfer1::DataType::kHALF)
+            {
+                qHalf.resize(totalValue);
+                qHost = qHalf.data();
+                qBytes = qHalf.size() * sizeof(__half);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported Leela-model batch q tensor type.");
+            }
+
+            if (cudaMemcpyAsync(policyHost, policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (Leela batch policy D2H) failed.");
+            }
+            if (cudaMemcpyAsync(winnerHost, winnerDevice.data(), winnerBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (Leela batch winner D2H) failed.");
+            }
+            if (cudaMemcpyAsync(qHost, qDevice.data(), qBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (Leela batch q D2H) failed.");
+            }
+
+            if (cudaStreamSynchronize(stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaStreamSynchronize (Leela batch) failed.");
+            }
+
+            if (telemetry_enabled_)
+            {
+                const double infer_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - start_time)
+                                              .count();
+                std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+                batches_ += 1;
+                positions_ += actualCount;
+                total_infer_ms_ += infer_ms;
+            }
+
+            if (policyType == nvinfer1::DataType::kHALF)
+            {
+                policyFloat.resize(totalPolicy);
+                for (size_t i = 0; i < totalPolicy; ++i)
+                {
+                    policyFloat[i] = __half2float(policyHalf[i]);
+                }
+            }
+            if (winnerType == nvinfer1::DataType::kHALF)
+            {
+                winnerFloat.resize(totalValue);
+                for (size_t i = 0; i < totalValue; ++i)
+                {
+                    winnerFloat[i] = __half2float(winnerHalf[i]);
+                }
+            }
+            if (qType == nvinfer1::DataType::kHALF)
+            {
+                qFloat.resize(totalValue);
+                for (size_t i = 0; i < totalValue; ++i)
+                {
+                    qFloat[i] = __half2float(qHalf[i]);
+                }
+            }
+
+            for (size_t i = 0; i < actualCount; ++i)
+            {
+                LeelaPolicyValue result;
+                result.policy_logits.assign(
+                    policyFloat.begin() + static_cast<ptrdiff_t>(i * policyElements),
+                    policyFloat.begin() + static_cast<ptrdiff_t>((i + 1) * policyElements));
+                for (size_t j = 0; j < valueElements; ++j)
+                {
+                    result.value_winner_logits[j] = winnerFloat[i * valueElements + j];
+                    result.value_q_logits[j] = qFloat[i * valueElements + j];
+                }
+                result.is_black_to_move = work[i].position.is_black_to_move;
+                result.castling_rights = work[i].position.castling_rights;
+                work[i].promise->set_value(std::move(result));
+            }
+        }
+        catch (...)
+        {
+            ep_guard(std::current_exception());
+            throw;
+        }
+    }
+
+    size_t pending_size() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return queue.size();
+    }
+
+    void worker_loop()
+    {
+        while (true)
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [this]() { return stop_worker_ || queue.size() >= flush_threshold_; });
+            if (stop_worker_)
+            {
+                break;
+            }
+            lock.unlock();
+            try
+            {
+                process();
+            }
+            catch (...)
+            {
+                // Exceptions are delivered via promises; keep worker alive.
+            }
+        }
+    }
+
+    BatchStatistics stats() const
+    {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        return BatchStatistics{batches_, positions_, total_infer_ms_};
+    }
+
+    LeelaBatchConfig config;
+    LeelaEngineContext& ctx;
+    size_t flush_threshold_{0};
+    std::unique_ptr<nvinfer1::IExecutionContext> exec;
+    std::unique_ptr<CudaStream> stream;
+    ResizableDeviceBuffer inputDevice;
+    ResizableDeviceBuffer policyDevice;
+    ResizableDeviceBuffer winnerDevice;
+    ResizableDeviceBuffer qDevice;
+    mutable std::mutex mutex;
+    std::condition_variable cv;
+    bool stop_worker_{false};
+    std::deque<LeelaPending> queue;
+    std::thread worker;
+    const bool telemetry_enabled_{config.enable_telemetry};
+    mutable std::mutex telemetry_mutex_;
+    size_t batches_{0};
+    size_t positions_{0};
+    double total_infer_ms_{0.0};
+};
+
+LeelaBatchRunner::LeelaBatchRunner(LeelaBatchConfig config)
+{
+    struct Cache
+    {
+        std::mutex mutex;
+        std::unordered_map<std::string, std::weak_ptr<Impl>> entries;
+    };
+    static Cache cache;
+
+    const std::string key = [&config]() {
+        std::ostringstream oss;
+        oss << resolveEnginePath(config.engine_path, "leela_minibatch.trt")
+            << '|' << config.max_batch_size
+            << '|' << (config.enable_telemetry ? '1' : '0');
+        return oss.str();
+    }();
+
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (auto existing = cache.entries[key].lock())
+    {
+        impl_ = existing;
+        return;
+    }
+
+    auto fresh = std::make_shared<Impl>(std::move(config));
+    cache.entries[key] = fresh;
+    impl_ = std::move(fresh);
+}
+
+LeelaBatchRunner::Ticket LeelaBatchRunner::enqueue(LeelaEncodedPosition position)
+{
+    return impl_->enqueue(std::move(position));
+}
+
+void LeelaBatchRunner::process_pending()
+{
+    impl_->process();
+}
+
+size_t LeelaBatchRunner::pending() const
+{
+    return impl_->pending_size();
+}
+
+BatchStatistics LeelaBatchRunner::statistics() const
+{
+    return impl_->stats();
 }
 
 } // namespace chessrl::mcts::single

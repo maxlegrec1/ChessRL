@@ -8,9 +8,12 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -126,6 +129,59 @@ std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::st
     return index;
 }
 
+int read_batch_size_env(const char* specific)
+{
+    if (specific)
+    {
+        if (const char* value = std::getenv(specific))
+        {
+            const int numeric = std::atoi(value);
+            if (numeric > 0)
+            {
+                return numeric;
+            }
+        }
+    }
+    if (const char* value = std::getenv("CHESSRL_MCTS_BATCH_SIZE"))
+    {
+        const int numeric = std::atoi(value);
+        if (numeric > 0)
+        {
+            return numeric;
+        }
+    }
+    return 32;
+}
+
+bool telemetry_enabled_env()
+{
+    if (const char* value = std::getenv("CHESSRL_MCTS_TELEMETRY"))
+    {
+        std::string lower(value);
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return lower != "0" && lower != "false" && lower != "off";
+    }
+    return false;
+}
+
+single::LeelaBatchConfig make_leela_batch_config(const MctsOptions& options)
+{
+    single::LeelaBatchConfig cfg;
+    if (options.leela_engine_path.empty())
+    {
+        cfg.engine_path = "leela_minibatch.trt";
+    }
+    else
+    {
+        cfg.engine_path = options.leela_engine_path;
+    }
+    cfg.max_batch_size = read_batch_size_env("CHESSRL_MCTS_LEELA_BATCH_SIZE");
+    cfg.enable_telemetry = telemetry_enabled_env();
+    return cfg;
+}
+
 class LeelaMctsRunner
 {
 public:
@@ -134,6 +190,9 @@ public:
         , origin_fen_(options_.request.fen)
         , vocab_(leela_policy_vocabulary())
         , vocab_index_(build_vocab_index(vocab_))
+        , leela_batch_config_(make_leela_batch_config(options_))
+        , leela_batch_runner_(leela_batch_config_)
+        , leela_batch_flush_threshold_(static_cast<size_t>(leela_batch_config_.max_batch_size))
         , rng_(std::random_device{}())
     {
         const chess::Board board = apply_history(options_.request);
@@ -150,7 +209,18 @@ public:
         {
             run_simulation();
         }
-        return summarize();
+        MctsSummary summary = summarize();
+        if (leela_batch_config_.enable_telemetry)
+        {
+            auto stats = leela_batch_runner_.statistics();
+            if (stats.batches > 0)
+            {
+                std::clog << "[telemetry][leela] batches=" << stats.batches
+                          << " positions=" << stats.positions
+                          << " infer_ms=" << stats.total_inference_ms << '\n';
+            }
+        }
+        return summary;
     }
 
 private:
@@ -236,6 +306,29 @@ private:
         }
     }
 
+    std::shared_ptr<const single::LeelaEncodedPosition> acquire_leela_encoding(
+        const HistoryHandle& history,
+        const std::vector<std::string>& move_history)
+    {
+        if (!history)
+        {
+            return std::make_shared<single::LeelaEncodedPosition>(single::encode_leela_position(origin_fen_, move_history));
+        }
+        const HistoryEntry* key = history.get();
+        std::lock_guard<std::mutex> lock(leela_cache_mutex_);
+        auto it = leela_encoding_cache_.find(key);
+        if (it != leela_encoding_cache_.end())
+        {
+            if (auto existing = it->second.lock())
+            {
+                return existing;
+            }
+        }
+        auto fresh = std::make_shared<single::LeelaEncodedPosition>(single::encode_leela_position(origin_fen_, move_history));
+        leela_encoding_cache_[key] = fresh;
+        return fresh;
+    }
+
     float evaluate_node(int node_index)
     {
         TreeNode& node = tree_.nodes[node_index];
@@ -264,8 +357,17 @@ private:
         }
 
         const std::vector<std::string> history = history_to_vector(node.history);
-        LeelaPolicyValue eval
-            = single::evaluate_leela_position(origin_fen_, history, options_.leela_engine_path);
+        auto encoded = acquire_leela_encoding(node.history, history);
+        auto ticket = leela_batch_runner_.enqueue(*encoded);
+        if (leela_batch_runner_.pending() >= leela_batch_flush_threshold_)
+        {
+            leela_batch_runner_.process_pending();
+        }
+        while (!ticket.ready())
+        {
+            leela_batch_runner_.process_pending();
+        }
+        LeelaPolicyValue eval = ticket.get();
         if (eval.policy_logits.size() != chessrl::leela_policy_size())
         {
             throw std::runtime_error("Single-batch Leela inference returned unexpected policy size.");
@@ -600,6 +702,11 @@ private:
     SearchTree tree_;
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
+    single::LeelaBatchConfig leela_batch_config_;
+    single::LeelaBatchRunner leela_batch_runner_;
+    size_t leela_batch_flush_threshold_{0};
+    mutable std::mutex leela_cache_mutex_;
+    std::unordered_map<const HistoryEntry*, std::weak_ptr<const single::LeelaEncodedPosition>> leela_encoding_cache_;
     std::mt19937 rng_;
     std::vector<int> path_buffer_;
     std::vector<float> dirichlet_noise_;

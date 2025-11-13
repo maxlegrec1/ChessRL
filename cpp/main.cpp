@@ -57,8 +57,9 @@ int main()
 
         chessrl::mcts::MctsOptions adv_options;
         adv_options.request.fen = "";
-        adv_options.request.history = {"e2e4", "e7e5", "g1f3", "b8c6", "f1b5","g8f6","e1g1"};
-        adv_options.simulations = 32;
+        adv_options.request.history = {"e2e4", "e7e5", "g1f3", "b8c6", "f1c4","g8f6","f3g5","d7d5","e4d5","c6a5","c4b5","c7c6","d5c6","b7c6","d1f3"};
+        adv_options.simulations = 600;
+        adv_options.cpuct = 1.5F;
         auto adv_summary = chessrl::mcts::run_adversarial_mcts(adv_options);
         print_summary("[adversarial]", adv_summary);
 

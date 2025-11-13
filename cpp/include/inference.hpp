@@ -59,13 +59,6 @@ LeelaInferenceResult leela_generate_from_move_lists(
     int iterations = 1,
     const std::string& engine_path = "leela.trt");
 
-SmallPolicyValue small_evaluate_single(const std::string& fen, const std::string& engine_path = "model.trt");
-
-LeelaPolicyValue leela_evaluate_single(
-    const std::string& origin_fen,
-    const std::vector<std::string>& move_history,
-    const std::string& engine_path = "leela.trt");
-
 size_t small_policy_size();
 size_t leela_policy_size();
 

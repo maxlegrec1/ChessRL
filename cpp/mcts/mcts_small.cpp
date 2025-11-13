@@ -7,9 +7,12 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -68,6 +71,59 @@ std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::st
     return index;
 }
 
+int read_batch_size_env(const char* specific)
+{
+    if (specific)
+    {
+        if (const char* value = std::getenv(specific))
+        {
+            const int numeric = std::atoi(value);
+            if (numeric > 0)
+            {
+                return numeric;
+            }
+        }
+    }
+    if (const char* value = std::getenv("CHESSRL_MCTS_BATCH_SIZE"))
+    {
+        const int numeric = std::atoi(value);
+        if (numeric > 0)
+        {
+            return numeric;
+        }
+    }
+    return 32;
+}
+
+bool telemetry_enabled_env()
+{
+    if (const char* value = std::getenv("CHESSRL_MCTS_TELEMETRY"))
+    {
+        std::string lower(value);
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return lower != "0" && lower != "false" && lower != "off";
+    }
+    return false;
+}
+
+single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
+{
+    single::SmallBatchConfig cfg;
+    if (options.small_engine_path.empty())
+    {
+        cfg.engine_path = "model_minibatch.trt";
+    }
+    else
+    {
+        cfg.engine_path = options.small_engine_path;
+    }
+    cfg.max_batch_size = read_batch_size_env("CHESSRL_MCTS_SMALL_BATCH_SIZE");
+    cfg.enable_telemetry = telemetry_enabled_env();
+    return cfg;
+}
+
 } // namespace
 
 class SmallMctsRunner
@@ -77,6 +133,9 @@ public:
         : options_(std::move(options))
         , vocab_(small_policy_vocabulary())
         , vocab_index_(build_vocab_index(vocab_))
+        , small_batch_config_(make_small_batch_config(options_))
+        , small_batch_runner_(small_batch_config_)
+        , small_batch_flush_threshold_(static_cast<size_t>(small_batch_config_.max_batch_size))
         , rng_(std::random_device{}())
     {
         const chess::Board board = apply_history(options_.request);
@@ -93,7 +152,18 @@ public:
         {
             run_simulation();
         }
-        return summarize();
+        MctsSummary summary = summarize();
+        if (small_batch_config_.enable_telemetry)
+        {
+            auto stats = small_batch_runner_.statistics();
+            if (stats.batches > 0)
+            {
+                std::clog << "[telemetry][small] batches=" << stats.batches
+                          << " positions=" << stats.positions
+                          << " infer_ms=" << stats.total_inference_ms << '\n';
+            }
+        }
+        return summary;
     }
 
 private:
@@ -206,8 +276,17 @@ private:
             return node.value_prior;
         }
 
-        const std::string fen = node.board.getFen();
-        SmallPolicyValue eval = single::evaluate_small_position(fen, options_.small_engine_path);
+        auto encoded = acquire_small_encoding(node.history, node.board);
+        auto ticket = small_batch_runner_.enqueue(*encoded);
+        if (small_batch_runner_.pending() >= small_batch_flush_threshold_)
+        {
+            small_batch_runner_.process_pending();
+        }
+        while (!ticket.ready())
+        {
+            small_batch_runner_.process_pending();
+        }
+        SmallPolicyValue eval = ticket.get();
         if (eval.policy_logits.size() != chessrl::small_policy_size())
         {
             throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
@@ -529,10 +608,38 @@ private:
         return summary;
     }
 
+    std::shared_ptr<const single::SmallEncodedPosition> acquire_small_encoding(
+        const HistoryHandle& history,
+        const chess::Board& board)
+    {
+        if (!history)
+        {
+            return std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
+        }
+        const HistoryEntry* key = history.get();
+        std::lock_guard<std::mutex> lock(small_cache_mutex_);
+        auto it = small_encoding_cache_.find(key);
+        if (it != small_encoding_cache_.end())
+        {
+            if (auto existing = it->second.lock())
+            {
+                return existing;
+            }
+        }
+        auto fresh = std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
+        small_encoding_cache_[key] = fresh;
+        return fresh;
+    }
+
     MctsOptions options_;
     SearchTree tree_;
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
+    single::SmallBatchConfig small_batch_config_;
+    single::SmallBatchRunner small_batch_runner_;
+    size_t small_batch_flush_threshold_{0};
+    mutable std::mutex small_cache_mutex_;
+    std::unordered_map<const HistoryEntry*, std::weak_ptr<const single::SmallEncodedPosition>> small_encoding_cache_;
     std::mt19937 rng_;
     std::vector<int> path_buffer_;
     std::vector<float> dirichlet_noise_;
@@ -545,8 +652,6 @@ MctsSummary run_small_mcts(MctsOptions options)
 }
 
 #ifndef CHESSRL_MCTS_NO_STANDALONE
-} // namespace chessrl::mcts
-
 int main(int argc, char** argv)
 {
     try
