@@ -384,7 +384,6 @@ SmallEncodedPosition build_small_encoded_position(const chess::Board& board)
 {
     SmallEncodedPosition encoded;
     encoded.features = encodeSmallFeatures(board);
-    encoded.swap_wdl = board.sideToMove() == chess::Color::WHITE;
     return encoded;
 }
 
@@ -570,10 +569,6 @@ SmallPolicyValue evaluateSmall(
     for (int i = 0; i < kSmallValueSize; ++i)
     {
         result.wdl[static_cast<size_t>(i)] = raw.wdl[static_cast<size_t>(i)];
-    }
-    if (encoded.swap_wdl)
-    {
-        std::swap(result.wdl[0], result.wdl[2]);
     }
     return result;
 }
@@ -1556,10 +1551,6 @@ struct SmallBatchRunner::Impl
                 for (size_t j = 0; j < valueElements; ++j)
                 {
                     result.wdl[j] = valueFloat[i * valueElements + j];
-                }
-                if (work[i].position.swap_wdl)
-                {
-                    std::swap(result.wdl[0], result.wdl[2]);
                 }
                 work[i].promise->set_value(std::move(result));
             }

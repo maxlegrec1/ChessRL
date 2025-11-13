@@ -51,7 +51,6 @@ private:
 struct SmallEncodedPosition
 {
     std::vector<float> features;
-    bool swap_wdl{false};
 };
 
 struct BatchStatistics

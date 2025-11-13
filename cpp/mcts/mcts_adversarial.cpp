@@ -463,7 +463,8 @@ private:
             const int child_index = node.children[i];
             const TreeNode& child = tree_.nodes[child_index];
             const float prior = node.child_priors[i];
-            const float q = child.visit_count > 0 ? child.value_sum / static_cast<float>(child.visit_count) : 0.0F;
+            const float child_mean = child.visit_count > 0 ? child.value_sum / static_cast<float>(child.visit_count) : 0.0F;
+            const float q = -child_mean;
             const float u = options_.cpuct * prior * sqrt_visits / (1.0F + static_cast<float>(child.visit_count));
             const float score = q + u;
             if (score > best_score)
@@ -935,11 +936,14 @@ private:
             }
             else if (prior_sum_average > 0.0F)
             {
-                const float avg_prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+                const float avg_prior
+                    = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
                 detail.visit_fraction = avg_prior / prior_sum_average;
             }
-            detail.prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
-            detail.average_value = entry.visit_total > 0 ? entry.value_total / static_cast<float>(entry.visit_total) : 0.0F;
+            detail.prior
+                = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+            detail.average_value
+                = entry.visit_total > 0 ? -entry.value_total / static_cast<float>(entry.visit_total) : 0.0F;
             if (entry.representative_child >= 0)
             {
                 detail.continuation = principal_variation(tree_, entry.representative_child);
