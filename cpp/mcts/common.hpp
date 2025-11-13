@@ -3,6 +3,7 @@
 #include <array>
 #include <string>
 #include <vector>
+#include <memory>
 
 #include "chess-library/include/chess.hpp"
 
@@ -14,6 +15,10 @@ struct SearchInput
     std::string fen;
     std::vector<std::string> history;
 };
+
+struct HistoryEntry;
+
+using HistoryHandle = std::shared_ptr<const HistoryEntry>;
 
 struct MctsOptions
 {
@@ -48,7 +53,7 @@ struct TreeNode
     int visit_count{0};
     float value_prior{0.0F};
     std::array<float, 3> wdl{{0.0F, 0.0F, 0.0F}};
-    std::vector<std::string> history;
+    HistoryHandle history;
     std::vector<int> children;
     std::vector<chess::Move> child_moves;
     std::vector<float> child_priors;
@@ -59,17 +64,18 @@ struct SearchTree
     std::vector<TreeNode> nodes;
 
     int add_root(const chess::Board& board, const std::vector<std::string>& history);
+    void reserve(size_t count);
     int add_child(
         int parent_index,
         chess::Move move,
         float prior,
-        const chess::Board& child_board,
-        const std::string& move_uci);
+        const chess::Board& child_board);
 };
 
 std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl);
 std::array<float, 3> orient_leela_wdl(const chess::Board& board, const std::array<float, 3>& white_perspective_wdl);
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index);
+std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 
 } // namespace chessrl::mcts
 

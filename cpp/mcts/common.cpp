@@ -10,8 +10,30 @@
 
 namespace chessrl::mcts
 {
+
+struct HistoryEntry
+{
+    std::shared_ptr<const HistoryEntry> parent;
+    std::string move;
+    int length{0};
+};
+
 namespace
 {
+
+HistoryHandle build_history_chain(const std::vector<std::string>& history)
+{
+    HistoryHandle tail;
+    for (const auto& move : history)
+    {
+        auto entry = std::make_shared<HistoryEntry>();
+        entry->parent = tail;
+        entry->move = move;
+        entry->length = tail ? tail->length + 1 : 1;
+        tail = std::move(entry);
+    }
+    return tail;
+}
 
 bool starts_with_flag(const std::string& value)
 {
@@ -147,6 +169,22 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
     }
 
     return line;
+}
+
+std::vector<std::string> history_to_vector(const HistoryHandle& tail)
+{
+    if (!tail)
+    {
+        return {};
+    }
+    std::vector<std::string> moves(static_cast<size_t>(tail->length));
+    auto current = tail;
+    for (int index = tail->length - 1; index >= 0; --index)
+    {
+        moves[static_cast<size_t>(index)] = current->move;
+        current = current->parent;
+    }
+    return moves;
 }
 
 MctsOptions parse_cli(int argc, char** argv)
@@ -311,18 +349,22 @@ int SearchTree::add_root(const chess::Board& board, const std::vector<std::strin
     root.board = board;
     root.terminal = root.board.isGameOver().second != chess::GameResult::NONE;
     root.prior = 1.0F;
-    root.history = history;
+    root.history = build_history_chain(history);
 
     nodes.push_back(std::move(root));
     return 0;
+}
+
+void SearchTree::reserve(size_t count)
+{
+    nodes.reserve(count);
 }
 
 int SearchTree::add_child(
     int parent_index,
     chess::Move move,
     float prior,
-    const chess::Board& child_board,
-    const std::string& move_uci)
+    const chess::Board& child_board)
 {
     if (parent_index < 0 || parent_index >= static_cast<int>(nodes.size()))
     {
@@ -336,7 +378,17 @@ int SearchTree::add_child(
     node.board = child_board;
     node.terminal = node.board.isGameOver().second != chess::GameResult::NONE;
     node.history = nodes[parent_index].history;
-    node.history.push_back(move_uci);
+
+    const bool chess960 = nodes[parent_index].board.chess960();
+    const std::string move_uci = chess::uci::moveToUci(move, chess960);
+    if (!move_uci.empty())
+    {
+        auto entry = std::make_shared<HistoryEntry>();
+        entry->parent = node.history;
+        entry->move = move_uci;
+        entry->length = node.history ? node.history->length + 1 : 1;
+        node.history = std::move(entry);
+    }
 
     nodes.push_back(std::move(node));
     const int child_index = static_cast<int>(nodes.size()) - 1;

@@ -26,7 +26,6 @@ namespace
 struct MovePrior
 {
     chess::Move move;
-    std::string uci;
     int policy_index{-1};
     float prior{0.0F};
     float logit{0.0F};
@@ -82,6 +81,9 @@ public:
     {
         const chess::Board board = apply_history(options_.request);
         tree_.add_root(board, options_.request.history);
+        const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
+        tree_.reserve(expected_nodes);
+        path_buffer_.reserve(64);
     }
 
     MctsSummary run()
@@ -97,10 +99,10 @@ public:
 private:
     void run_simulation()
     {
-        std::vector<int> path;
-        path.reserve(64);
+        path_buffer_.clear();
+        path_buffer_.push_back(0);
+        std::vector<int>& path = path_buffer_;
         int node_index = 0;
-        path.push_back(node_index);
 
         while (true)
         {
@@ -228,16 +230,18 @@ private:
         }
 
         const chess::Board parent_board = node.board;
+        const float value_prior = node.value_prior;
         for (const auto& entry : priors)
         {
             chess::Board child_board = parent_board;
             child_board.makeMove(entry.move);
-            tree_.add_child(node_index, entry.move, entry.prior, child_board, entry.uci);
+            tree_.add_child(node_index, entry.move, entry.prior, child_board);
         }
 
-        node.expanded = true;
+        TreeNode& refreshed = tree_.nodes[node_index];
+        refreshed.expanded = true;
 
-        return node.value_prior;
+        return value_prior;
     }
 
 
@@ -257,7 +261,6 @@ private:
         {
             MovePrior entry;
             entry.move = move;
-            entry.uci = chess::uci::moveToUci(move, board.chess960());
             entry.logit = -std::numeric_limits<float>::infinity();
 
             const std::string key = move_to_vocab_key(board, move);
@@ -364,9 +367,9 @@ private:
         }
 
         std::gamma_distribution<float> gamma(options_.dirichlet_alpha, 1.0F);
-        std::vector<float> noise(priors.size());
+        dirichlet_noise_.resize(priors.size());
         float sum = 0.0F;
-        for (float& n : noise)
+        for (float& n : dirichlet_noise_)
         {
             n = gamma(rng_);
             sum += n;
@@ -379,7 +382,7 @@ private:
         const float epsilon = options_.dirichlet_epsilon;
         for (size_t i = 0; i < priors.size(); ++i)
         {
-            const float dirichlet = noise[i] / sum;
+            const float dirichlet = dirichlet_noise_[i] / sum;
             priors[i].prior = (1.0F - epsilon) * priors[i].prior + epsilon * dirichlet;
         }
     }
@@ -531,6 +534,8 @@ private:
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
     std::mt19937 rng_;
+    std::vector<int> path_buffer_;
+    std::vector<float> dirichlet_noise_;
 };
 
 MctsSummary run_small_mcts(MctsOptions options)

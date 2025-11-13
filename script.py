@@ -33,7 +33,7 @@ model = Inference().to("cuda")
 model.load_state_dict(torch.load("src/models/small/model.pt"), strict= False)
 # model.load_state_dict(torch.load("checkpoints/checkpoint_step_2000.pt",weights_only=False)["model_state_dict"],strict=False)
 
-fen = "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 5 4"
+fen = "r1bqkb1r/p4ppp/2p2n2/nB2p1N1/8/5Q2/PPPP1PPP/RNB1K2R b KQkq - 1 8"
 
 # move, probs = model.get_move_from_fen_no_thinking(fen, T=1, use_fp16 = True,return_probs=True)
 # print(move, probs)

@@ -41,15 +41,17 @@ int main()
     try
     {
         chessrl::mcts::MctsOptions small_options;
-        small_options.request.fen = "r1bqkb1r/pppp1ppp/2n2n2/1B2p3/4P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 5 4";
+        small_options.request.fen = "r1bqkb1r/p4ppp/2p2n2/nB2p1N1/8/5Q2/PPPP1PPP/RNB1K2R b KQkq - 1 8";
         small_options.simulations = 600;
+        small_options.cpuct = 1.5F;
         auto small_summary = chessrl::mcts::run_small_mcts(small_options);
         print_summary("[small]", small_summary);
 
         chessrl::mcts::MctsOptions leela_options;
         leela_options.request.fen = "";
-        leela_options.request.history = {"e2e4", "e7e5", "g1f3", "b8c6", "f1b5","g8f6","e1g1"};
-        leela_options.simulations = 32;
+        leela_options.request.history = {"e2e4", "e7e5", "g1f3", "b8c6", "f1c4","g8f6","f3g5","d7d5","e4d5","c6a5","c4b5","c7c6","d5c6","b7c6","d1f3"};
+        leela_options.simulations = 600;
+        leela_options.cpuct = 1.5F;
         auto leela_summary = chessrl::mcts::run_leela_mcts(leela_options);
         print_summary("[leela]", leela_summary);
 
