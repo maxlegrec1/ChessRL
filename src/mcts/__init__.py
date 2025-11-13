@@ -3,6 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, MutableMapping, Sequence
 
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[2]
+_CPP_DIR = _ROOT / "cpp"
+if str(_CPP_DIR) not in sys.path:
+    sys.path.insert(0, str(_CPP_DIR))
+
 import _inference_cpp as _cpp  # type: ignore[attr-defined]
 
 
