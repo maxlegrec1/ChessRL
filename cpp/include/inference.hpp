@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,21 @@ struct LeelaInferenceResult
     InferenceTimings timings;
 };
 
+struct SmallPolicyValue
+{
+    std::vector<float> policy_logits;
+    std::array<float, 3> wdl;
+};
+
+struct LeelaPolicyValue
+{
+    std::vector<float> policy_logits;
+    std::array<float, 3> value_winner_logits;
+    std::array<float, 3> value_q_logits;
+    bool is_black_to_move{false};
+    std::string castling_rights;
+};
+
 SmallInferenceResult small_generate_moves(
     const std::vector<std::string>& fens,
     float temperature,
@@ -42,6 +58,19 @@ LeelaInferenceResult leela_generate_from_move_lists(
     float temperature,
     int iterations = 1,
     const std::string& engine_path = "leela.trt");
+
+SmallPolicyValue small_evaluate_single(const std::string& fen, const std::string& engine_path = "model.trt");
+
+LeelaPolicyValue leela_evaluate_single(
+    const std::string& origin_fen,
+    const std::vector<std::string>& move_history,
+    const std::string& engine_path = "leela.trt");
+
+size_t small_policy_size();
+size_t leela_policy_size();
+
+const std::vector<std::string>& small_policy_vocabulary();
+const std::vector<std::string>& leela_policy_vocabulary();
 
 } // namespace chessrl
 

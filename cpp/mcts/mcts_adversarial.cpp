@@ -1,0 +1,892 @@
+#include "inference.hpp"
+#include "mcts/adversarial_runner.hpp"
+#include "mcts/common.hpp"
+#include "mcts/single_inference.hpp"
+#include "mcts/summary.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <numeric>
+#include <optional>
+#include <random>
+#include <stdexcept>
+#include <utility>
+#include <unordered_map>
+#include <vector>
+
+namespace chessrl::mcts
+{
+namespace
+{
+
+struct MovePrior
+{
+    chess::Move move;
+    std::string uci;
+    int policy_index{-1};
+    float prior{0.0F};
+    float logit{0.0F};
+};
+
+std::array<float, 3> softmax3(const std::array<float, 3>& logits)
+{
+    float max_logit = std::max({logits[0], logits[1], logits[2]});
+    std::array<float, 3> probs{};
+    float sum = 0.0F;
+    for (int i = 0; i < 3; ++i)
+    {
+        const float value = std::exp(logits[static_cast<size_t>(i)] - max_logit);
+        probs[static_cast<size_t>(i)] = value;
+        sum += value;
+    }
+    if (sum <= 0.0F)
+    {
+        return {1.0F / 3.0F, 1.0F / 3.0F, 1.0F / 3.0F};
+    }
+    const float inv_sum = 1.0F / sum;
+    for (float& p : probs)
+    {
+        p *= inv_sum;
+    }
+    return probs;
+}
+
+std::string mirror_uci_ranks(const std::string& move)
+{
+    auto mirror_rank = [](char c) -> char {
+        if (c < '1' || c > '8')
+        {
+            return c;
+        }
+        const int rank = c - '0';
+        const int mirrored = 9 - rank;
+        return static_cast<char>('0' + mirrored);
+    };
+
+    if (move.size() < 4)
+    {
+        return move;
+    }
+
+    std::string mirrored = move;
+    mirrored[1] = mirror_rank(mirrored[1]);
+    mirrored[3] = mirror_rank(mirrored[3]);
+    return mirrored;
+}
+
+std::string to_pseudo_castling(const std::string& move)
+{
+    if (move == "e1g1")
+    {
+        return "e1h1";
+    }
+    if (move == "e1c1")
+    {
+        return "e1a1";
+    }
+    if (move == "e8g8")
+    {
+        return "e8h8";
+    }
+    if (move == "e8c8")
+    {
+        return "e8a8";
+    }
+    return move;
+}
+
+std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::string>& vocab)
+{
+    std::unordered_map<std::string, int> index;
+    index.reserve(vocab.size());
+    for (size_t i = 0; i < vocab.size(); ++i)
+    {
+        index.emplace(vocab[i], static_cast<int>(i));
+    }
+    return index;
+}
+
+std::optional<float> terminal_value(const chess::Board& board)
+{
+    const auto result = board.isGameOver().second;
+    switch (result)
+    {
+    case chess::GameResult::WIN:
+        return 1.0F;
+    case chess::GameResult::LOSE:
+        return -1.0F;
+    case chess::GameResult::DRAW:
+        return 0.0F;
+    default:
+        return std::nullopt;
+    }
+}
+
+class AdversarialMctsRunner
+{
+public:
+    explicit AdversarialMctsRunner(MctsOptions options)
+        : options_(std::move(options))
+        , origin_fen_(options_.request.fen)
+        , small_vocab_(small_policy_vocabulary())
+        , small_vocab_index_(build_vocab_index(small_vocab_))
+        , leela_vocab_(leela_policy_vocabulary())
+        , leela_vocab_index_(build_vocab_index(leela_vocab_))
+        , rng_(std::random_device{}())
+    {
+        const chess::Board board = apply_history(options_.request);
+        attacker_color_ = board.sideToMove();
+        tree_.add_root(board, options_.request.history);
+    }
+
+    MctsSummary run()
+    {
+        ensure_attacker_root_evaluated();
+        for (int i = 0; i < options_.simulations; ++i)
+        {
+            run_simulation();
+        }
+        return summarize();
+    }
+
+private:
+    void ensure_attacker_root_evaluated()
+    {
+        TreeNode& root = tree_.nodes.front();
+        if (!root.expanded)
+        {
+            evaluate_attacker_node(0);
+        }
+    }
+
+    void run_simulation()
+    {
+        std::vector<int> path;
+        path.reserve(64);
+        int node_index = 0;
+        path.push_back(node_index);
+
+        while (true)
+        {
+            TreeNode& node = tree_.nodes[node_index];
+
+            if (node.terminal)
+            {
+                float value = terminal_value(node.board).value_or(node.value_prior);
+                backpropagate(path, value);
+                return;
+            }
+
+            const bool attacker_turn = node.board.sideToMove() == attacker_color_;
+
+            if (!node.expanded)
+            {
+                if (attacker_turn)
+                {
+                    float value = evaluate_attacker_node(node_index);
+                    backpropagate(path, value);
+                    return;
+                }
+                else
+                {
+                    evaluate_victim_node(node_index);
+                }
+            }
+
+            if (attacker_turn)
+            {
+                const int child_index = select_attacker_child(node_index);
+                if (child_index < 0)
+                {
+                    float value = node.value_prior;
+                    backpropagate(path, value);
+                    return;
+                }
+                node_index = child_index;
+                path.push_back(node_index);
+            }
+            else
+            {
+                const int child_index = sample_victim_child(node_index);
+                if (child_index < 0)
+                {
+                    float value = node.value_prior;
+                    backpropagate(path, value);
+                    return;
+                }
+                node_index = child_index;
+                path.push_back(node_index);
+            }
+        }
+    }
+
+    float evaluate_attacker_node(int node_index)
+    {
+        TreeNode& node = tree_.nodes[node_index];
+        if (node.expanded && !node.children.empty())
+        {
+            return node.value_prior;
+        }
+
+        SmallPolicyValue eval = single::evaluate_small_position(node.board.getFen(), options_.small_engine_path);
+        if (eval.policy_logits.size() != chessrl::small_policy_size())
+        {
+            throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
+        }
+
+        node.wdl = orient_small_wdl(node.board, eval.wdl);
+        node.value_prior = node.wdl[0] - node.wdl[2];
+
+        std::vector<MovePrior> priors = compute_small_priors(node.board, eval);
+        if (priors.empty())
+        {
+            node.expanded = true;
+            node.terminal = true;
+            return node.value_prior;
+        }
+
+        if (node.parent == -1 && options_.use_dirichlet)
+        {
+            apply_dirichlet_noise(priors);
+        }
+
+        const chess::Board parent_board = node.board;
+        for (const auto& entry : priors)
+        {
+            chess::Board child_board = parent_board;
+            child_board.makeMove(entry.move);
+            tree_.add_child(node_index, entry.move, entry.prior, child_board, entry.uci);
+        }
+
+        node.expanded = true;
+        return node.value_prior;
+    }
+
+    void evaluate_victim_node(int node_index)
+    {
+        TreeNode& node = tree_.nodes[node_index];
+        if (node.expanded && !node.children.empty())
+        {
+            return;
+        }
+
+        SmallPolicyValue small_eval = single::evaluate_small_position(node.board.getFen(), options_.small_engine_path);
+        if (small_eval.policy_logits.size() != chessrl::small_policy_size())
+        {
+            throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
+        }
+
+        node.wdl = orient_small_wdl(node.board, small_eval.wdl);
+        node.value_prior = node.wdl[0] - node.wdl[2];
+
+        LeelaPolicyValue leela_eval
+            = single::evaluate_leela_position(origin_fen_, node.history, options_.leela_engine_path);
+        if (leela_eval.policy_logits.size() != chessrl::leela_policy_size())
+        {
+            throw std::runtime_error("Single-batch Leela inference returned unexpected policy size.");
+        }
+        const bool board_black = node.board.sideToMove() == chess::Color::BLACK;
+        if (leela_eval.is_black_to_move != board_black)
+        {
+            throw std::runtime_error("Mismatch between victim orientation and Leela evaluation result.");
+        }
+
+        std::vector<MovePrior> priors = compute_leela_priors(node.board, leela_eval);
+        if (priors.empty())
+        {
+            node.expanded = true;
+            node.terminal = true;
+            return;
+        }
+
+        const chess::Board parent_board = node.board;
+        for (const auto& entry : priors)
+        {
+            chess::Board child_board = parent_board;
+            child_board.makeMove(entry.move);
+            tree_.add_child(node_index, entry.move, entry.prior, child_board, entry.uci);
+        }
+
+        node.expanded = true;
+    }
+
+    int select_attacker_child(int node_index) const
+    {
+        const TreeNode& node = tree_.nodes[node_index];
+        if (node.children.empty())
+        {
+            return -1;
+        }
+
+        const float parent_visits = static_cast<float>(std::max(1, node.visit_count));
+        const float sqrt_visits = std::sqrt(parent_visits);
+
+        int best_child = -1;
+        float best_score = -std::numeric_limits<float>::infinity();
+
+        for (size_t i = 0; i < node.children.size(); ++i)
+        {
+            const int child_index = node.children[i];
+            const TreeNode& child = tree_.nodes[child_index];
+            const float prior = node.child_priors[i];
+            const float q = child.visit_count > 0 ? child.value_sum / static_cast<float>(child.visit_count) : 0.0F;
+            const float u = options_.cpuct * prior * sqrt_visits / (1.0F + static_cast<float>(child.visit_count));
+            const float score = q + u;
+            if (score > best_score)
+            {
+                best_score = score;
+                best_child = child_index;
+            }
+        }
+
+        return best_child;
+    }
+
+    int sample_victim_child(int node_index)
+    {
+        TreeNode& node = tree_.nodes[node_index];
+        if (node.children.empty())
+        {
+            return -1;
+        }
+
+        std::vector<double> weights;
+        weights.reserve(node.child_priors.size());
+        double sum = 0.0;
+        for (float prior : node.child_priors)
+        {
+            const double w = std::max(0.0F, prior);
+            weights.push_back(w);
+            sum += w;
+        }
+
+        if (sum <= 0.0)
+        {
+            const double uniform = 1.0 / static_cast<double>(weights.size());
+            std::fill(weights.begin(), weights.end(), uniform);
+        }
+
+        std::discrete_distribution<size_t> distribution(weights.begin(), weights.end());
+        const size_t choice = distribution(rng_);
+        return node.children[choice];
+    }
+
+    void backpropagate(const std::vector<int>& path, float value)
+    {
+        float current = value;
+        for (auto it = path.rbegin(); it != path.rend(); ++it)
+        {
+            TreeNode& node = tree_.nodes[*it];
+            node.visit_count += 1;
+            node.value_sum += current;
+            current = -current;
+        }
+    }
+
+    std::vector<MovePrior> compute_small_priors(const chess::Board& board, const SmallPolicyValue& eval) const
+    {
+        chess::Movelist legal_moves;
+        chess::movegen::legalmoves(legal_moves, board);
+
+        std::vector<MovePrior> entries;
+        entries.reserve(legal_moves.size());
+
+        float max_logit = -std::numeric_limits<float>::infinity();
+        int mapped_count = 0;
+
+        for (const auto& move : legal_moves)
+        {
+            MovePrior entry;
+            entry.move = move;
+            entry.uci = chess::uci::moveToUci(move, board.chess960());
+            entry.logit = -std::numeric_limits<float>::infinity();
+
+            std::string key = entry.uci;
+            if (!key.empty() && key.back() == 'n')
+            {
+                key.pop_back();
+            }
+            auto it = small_vocab_index_.find(key);
+            if (it != small_vocab_index_.end())
+            {
+                entry.policy_index = it->second;
+                if (entry.policy_index >= 0 && entry.policy_index < static_cast<int>(eval.policy_logits.size()))
+                {
+                    entry.logit = eval.policy_logits[static_cast<size_t>(entry.policy_index)];
+                    max_logit = std::max(max_logit, entry.logit);
+                    ++mapped_count;
+                }
+                else
+                {
+                    entry.policy_index = -1;
+                }
+            }
+
+            entries.push_back(std::move(entry));
+        }
+
+        if (entries.empty())
+        {
+            return entries;
+        }
+
+        if (mapped_count == 0)
+        {
+            const float uniform = 1.0F / static_cast<float>(entries.size());
+            for (auto& entry : entries)
+            {
+                entry.prior = uniform;
+            }
+            return entries;
+        }
+
+        if (options_.temperature <= 1e-5F)
+        {
+            auto best_it = std::max_element(entries.begin(), entries.end(), [](const MovePrior& a, const MovePrior& b) {
+                return a.logit < b.logit;
+            });
+            for (auto& entry : entries)
+            {
+                const bool is_best = (entry.policy_index >= 0) && (&entry == &*best_it);
+                entry.prior = is_best ? 1.0F : 0.0F;
+            }
+            return entries;
+        }
+
+        const float inv_temp = 1.0F / options_.temperature;
+        double sum = 0.0;
+        for (auto& entry : entries)
+        {
+            if (entry.policy_index < 0)
+            {
+                entry.prior = 0.0F;
+                continue;
+            }
+            const double scaled = static_cast<double>((entry.logit - max_logit) * inv_temp);
+            const double exp_val = std::exp(scaled);
+            entry.prior = static_cast<float>(exp_val);
+            sum += exp_val;
+        }
+
+        if (sum <= 0.0)
+        {
+            const float uniform = 1.0F / static_cast<float>(mapped_count);
+            for (auto& entry : entries)
+            {
+                if (entry.policy_index >= 0)
+                {
+                    entry.prior = uniform;
+                }
+            }
+            return entries;
+        }
+
+        const float inv_sum = static_cast<float>(1.0 / sum);
+        for (auto& entry : entries)
+        {
+            if (entry.policy_index >= 0)
+            {
+                entry.prior *= inv_sum;
+            }
+        }
+
+        return entries;
+    }
+
+    std::vector<MovePrior> compute_leela_priors(const chess::Board& board, const LeelaPolicyValue& eval) const
+    {
+        chess::Movelist legal_moves;
+        chess::movegen::legalmoves(legal_moves, board);
+
+        std::vector<MovePrior> entries;
+        entries.reserve(legal_moves.size());
+
+        float max_logit = -std::numeric_limits<float>::infinity();
+        int mapped_count = 0;
+        const bool is_black = board.sideToMove() == chess::Color::BLACK;
+
+        for (const auto& move : legal_moves)
+        {
+            MovePrior entry;
+            entry.move = move;
+            entry.uci = chess::uci::moveToUci(move, board.chess960());
+            entry.logit = -std::numeric_limits<float>::infinity();
+
+            std::string key = entry.uci;
+            if (!key.empty() && key.back() == 'n')
+            {
+                key.pop_back();
+            }
+            key = to_pseudo_castling(key);
+            if (is_black)
+            {
+                key = mirror_uci_ranks(key);
+            }
+
+            auto it = leela_vocab_index_.find(key);
+            if (it != leela_vocab_index_.end())
+            {
+                entry.policy_index = it->second;
+                if (entry.policy_index >= 0 && entry.policy_index < static_cast<int>(eval.policy_logits.size()))
+                {
+                    entry.logit = eval.policy_logits[static_cast<size_t>(entry.policy_index)];
+                    max_logit = std::max(max_logit, entry.logit);
+                    ++mapped_count;
+                }
+                else
+                {
+                    entry.policy_index = -1;
+                }
+            }
+
+            entries.push_back(std::move(entry));
+        }
+
+        if (entries.empty())
+        {
+            return entries;
+        }
+
+        if (mapped_count == 0)
+        {
+            const float uniform = 1.0F / static_cast<float>(entries.size());
+            for (auto& entry : entries)
+            {
+                entry.prior = uniform;
+            }
+            return entries;
+        }
+
+        const double temperature = std::max(1e-5, static_cast<double>(options_.temperature));
+        const double inv_temp = 1.0 / temperature;
+        double sum = 0.0;
+        for (auto& entry : entries)
+        {
+            if (entry.policy_index < 0)
+            {
+                entry.prior = 0.0F;
+                continue;
+            }
+            const double scaled = static_cast<double>(entry.logit - max_logit) * inv_temp;
+            const double exp_val = std::exp(scaled);
+            entry.prior = static_cast<float>(exp_val);
+            sum += exp_val;
+        }
+
+        if (sum <= 0.0)
+        {
+            const float uniform = 1.0F / static_cast<float>(mapped_count);
+            for (auto& entry : entries)
+            {
+                if (entry.policy_index >= 0)
+                {
+                    entry.prior = uniform;
+                }
+            }
+            return entries;
+        }
+
+        const float inv_sum = static_cast<float>(1.0 / sum);
+        for (auto& entry : entries)
+        {
+            if (entry.policy_index >= 0)
+            {
+                entry.prior *= inv_sum;
+            }
+        }
+
+        return entries;
+    }
+
+    void apply_dirichlet_noise(std::vector<MovePrior>& priors)
+    {
+        if (priors.empty())
+        {
+            return;
+        }
+
+        std::gamma_distribution<float> gamma(options_.dirichlet_alpha, 1.0F);
+        std::vector<float> noise(priors.size());
+        float sum = 0.0F;
+        for (float& n : noise)
+        {
+            n = gamma(rng_);
+            sum += n;
+        }
+        if (sum <= 0.0F)
+        {
+            return;
+        }
+
+        const float epsilon = options_.dirichlet_epsilon;
+        for (size_t i = 0; i < priors.size(); ++i)
+        {
+            const float dirichlet = noise[i] / sum;
+            priors[i].prior = (1.0F - epsilon) * priors[i].prior + epsilon * dirichlet;
+        }
+    }
+
+    MctsSummary summarize() const
+    {
+        const TreeNode& root = tree_.nodes.front();
+
+        struct AggregatedMove
+        {
+            std::string uci;
+            int visit_total{0};
+            float prior_total{0.0F};
+            float value_total{0.0F};
+            int representative_child{-1};
+            int occurrence_count{0};
+        };
+
+        std::unordered_map<std::string, size_t> aggregate_index;
+        std::vector<AggregatedMove> aggregated;
+        aggregated.reserve(root.children.size());
+
+        int total_visits = 0;
+        float prior_sum_total = 0.0F;
+
+        for (size_t i = 0; i < root.children.size(); ++i)
+        {
+            const int child_index = root.children[i];
+            const TreeNode& child = tree_.nodes[child_index];
+            const chess::Move move = root.child_moves[i];
+            const std::string uci = chess::uci::moveToUci(move, root.board.chess960());
+            const int visits = child.visit_count;
+            const float prior = root.child_priors[i];
+
+            auto [it, inserted] = aggregate_index.emplace(uci, aggregated.size());
+            if (inserted)
+            {
+                AggregatedMove entry;
+                entry.uci = uci;
+                entry.visit_total = visits;
+                entry.prior_total = prior;
+                entry.value_total = child.value_sum;
+                entry.representative_child = child_index;
+                entry.occurrence_count = 1;
+                aggregated.push_back(std::move(entry));
+            }
+            else
+            {
+                AggregatedMove& entry = aggregated[it->second];
+                entry.visit_total += visits;
+                entry.prior_total += prior;
+                entry.value_total += child.value_sum;
+                entry.occurrence_count += 1;
+                if (entry.representative_child < 0 || child.visit_count > tree_.nodes[entry.representative_child].visit_count)
+                {
+                    entry.representative_child = child_index;
+        }
+            }
+
+            total_visits += visits;
+            prior_sum_total += prior;
+        }
+
+        if (aggregated.empty())
+        {
+            return MctsSummary{
+                .action = {},
+                .policy = {},
+                .value = root.wdl,
+                .rollouts = {},
+            };
+        }
+
+        const float visit_sum = static_cast<float>(total_visits);
+
+        float prior_sum_average = 0.0F;
+        for (const auto& entry : aggregated)
+        {
+            if (entry.occurrence_count > 0)
+            {
+                prior_sum_average += entry.prior_total / static_cast<float>(entry.occurrence_count);
+            }
+        }
+
+        std::vector<std::pair<std::string, float>> distribution;
+        distribution.reserve(aggregated.size());
+
+        if (visit_sum <= 0.0F)
+        {
+            if (prior_sum_average <= 0.0F)
+            {
+                const float uniform = 1.0F / static_cast<float>(aggregated.size());
+                for (const auto& entry : aggregated)
+                {
+                    distribution.emplace_back(entry.uci, uniform);
+                }
+            }
+            else
+            {
+                for (const auto& entry : aggregated)
+                {
+                    const float avg_prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+                    distribution.emplace_back(entry.uci, avg_prior / prior_sum_average);
+                }
+            }
+        }
+        else
+        {
+            if (prior_sum_average <= 0.0F)
+            {
+                const float uniform = 1.0F / static_cast<float>(aggregated.size());
+                for (const auto& entry : aggregated)
+                {
+                    distribution.emplace_back(entry.uci, uniform);
+                }
+            }
+            else
+            {
+                for (const auto& entry : aggregated)
+            {
+                    const float avg_prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+                    distribution.emplace_back(entry.uci, avg_prior / prior_sum_average);
+                }
+            }
+        }
+
+        std::vector<std::pair<std::string, float>> sorted = distribution;
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+            if (a.second == b.second)
+            {
+                return a.first < b.first;
+            }
+            return a.second > b.second;
+        });
+
+        size_t best_index = 0;
+        float best_score = -1.0F;
+        if (visit_sum > 0.0F)
+        {
+            for (size_t i = 0; i < aggregated.size(); ++i)
+            {
+                const float visits = static_cast<float>(aggregated[i].visit_total);
+                if (visits > best_score)
+                {
+                    best_score = visits;
+                    best_index = i;
+                }
+            }
+        }
+        else
+        {
+            for (size_t i = 0; i < aggregated.size(); ++i)
+            {
+                const float prior = aggregated[i].prior_total;
+                if (prior > best_score)
+                {
+                    best_score = prior;
+                    best_index = i;
+                }
+            }
+        }
+
+        const std::string action = distribution[best_index].first;
+
+        MctsSummary summary;
+        summary.action = action;
+        summary.policy = std::move(sorted);
+        summary.value = root.wdl;
+        summary.rollouts.reserve(aggregated.size());
+        for (const auto& entry : aggregated)
+        {
+            RolloutDetail detail;
+            detail.root_move = entry.uci;
+            detail.visit_count = entry.visit_total;
+            if (visit_sum > 0.0F)
+            {
+                detail.visit_fraction = static_cast<float>(entry.visit_total) / visit_sum;
+            }
+            else if (prior_sum_average > 0.0F)
+            {
+                const float avg_prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+                detail.visit_fraction = avg_prior / prior_sum_average;
+            }
+            detail.prior = entry.occurrence_count > 0 ? entry.prior_total / static_cast<float>(entry.occurrence_count) : 0.0F;
+            detail.average_value = entry.visit_total > 0 ? entry.value_total / static_cast<float>(entry.visit_total) : 0.0F;
+            if (entry.representative_child >= 0)
+            {
+                detail.continuation = principal_variation(tree_, entry.representative_child);
+            }
+            summary.rollouts.push_back(std::move(detail));
+        }
+        return summary;
+    }
+
+    MctsOptions options_;
+    std::string origin_fen_;
+    SearchTree tree_;
+    chess::Color attacker_color_{chess::Color::WHITE};
+    std::vector<std::string> small_vocab_;
+    std::unordered_map<std::string, int> small_vocab_index_;
+    std::vector<std::string> leela_vocab_;
+    std::unordered_map<std::string, int> leela_vocab_index_;
+    std::mt19937 rng_;
+};
+
+} // namespace
+} // namespace chessrl::mcts
+
+namespace chessrl::mcts
+{
+
+MctsSummary run_adversarial_mcts(MctsOptions options)
+{
+    AdversarialMctsRunner runner(std::move(options));
+    return runner.run();
+}
+
+#ifndef CHESSRL_MCTS_NO_STANDALONE
+int main(int argc, char** argv)
+{
+    try
+    {
+        auto options = chessrl::mcts::parse_cli(argc, argv);
+        auto summary = chessrl::mcts::run_adversarial_mcts(std::move(options));
+
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "{\n";
+        if (summary.action.empty())
+        {
+            std::cout << "  \"action\": null,\n";
+        }
+        else
+        {
+            std::cout << "  \"action\": \"" << summary.action << "\",\n";
+        }
+        std::cout << "  \"policy\": {\n";
+        for (size_t i = 0; i < summary.policy.size(); ++i)
+        {
+            const auto& [move, prob] = summary.policy[i];
+            std::cout << "    \"" << move << "\": " << prob;
+            if (i + 1 < summary.policy.size())
+            {
+                std::cout << ",";
+            }
+            std::cout << "\n";
+        }
+        std::cout << "  },\n";
+        std::cout << "  \"value\": [" << summary.value[0] << ", " << summary.value[1] << ", " << summary.value[2] << "]\n";
+        std::cout << "}\n";
+        return EXIT_SUCCESS;
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "error: " << ex.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+}
+#endif // CHESSRL_MCTS_NO_STANDALONE
+
+} // namespace chessrl::mcts
+
+
+

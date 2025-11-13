@@ -306,6 +306,8 @@ public:
         return it->second;
     }
 
+    const std::vector<std::string>& tokensRef() const { return tokens; }
+
 private:
     static constexpr const char* kVocabPath = "cpp/policy_index.txt";
     std::vector<std::string> tokens;
@@ -929,6 +931,8 @@ public:
         }
         return it->second;
     }
+
+    const std::vector<std::string>& tokensRef() const { return tokens; }
 
 private:
     static constexpr const char* kVocabPath = "cpp/leela_policy_index.txt";
@@ -1820,6 +1824,98 @@ LeelaInferenceResult leela_generate_from_move_lists(
     lastResult.timings.totalMs = cumulative.totalMs / static_cast<double>(iterations);
 
     return lastResult;
+}
+
+SmallPolicyValue small_evaluate_single(const std::string& fen, const std::string& engine_path)
+{
+    std::string fenToUse = fen.empty() ? std::string(chess::constants::STARTPOS) : fen;
+
+    auto& ctx = small_impl::getEngineContext(engine_path);
+    std::vector<std::string> batch(static_cast<size_t>(kSmallBatchSize), fenToUse);
+
+    auto encoded = small_impl::encodeBatch(batch);
+    auto raw = small_impl::runInference(ctx, encoded.features);
+
+    if (raw.policy.size() != static_cast<size_t>(kSmallBatchSize) * kSmallPolicySize)
+    {
+        throw std::runtime_error("Unexpected small-model policy size for single evaluation.");
+    }
+    if (raw.wdl.size() != static_cast<size_t>(kSmallBatchSize) * kSmallValueSize)
+    {
+        throw std::runtime_error("Unexpected small-model value size for single evaluation.");
+    }
+
+    SmallPolicyValue result;
+    result.policy_logits.assign(raw.policy.begin(), raw.policy.begin() + kSmallPolicySize);
+    for (int i = 0; i < kSmallValueSize; ++i)
+    {
+        result.wdl[static_cast<size_t>(i)] = raw.wdl[static_cast<size_t>(i)];
+    }
+    return result;
+}
+
+LeelaPolicyValue leela_evaluate_single(
+    const std::string& origin_fen,
+    const std::vector<std::string>& move_history,
+    const std::string& engine_path)
+{
+    std::string fenToUse = origin_fen.empty() ? std::string(chess::constants::STARTPOS) : origin_fen;
+
+    auto& ctx = leela_impl::getEngineContext(engine_path);
+    std::vector<std::string> originFens(static_cast<size_t>(kLeelaBatchSize), fenToUse);
+    std::vector<std::vector<std::string>> histories(static_cast<size_t>(kLeelaBatchSize), move_history);
+
+    auto encoded = leela_impl::encodeBatch(originFens, histories);
+    auto raw = leela_impl::runInference(ctx, encoded.features);
+
+    if (raw.policy.size() != static_cast<size_t>(kLeelaBatchSize) * kLeelaPolicySize)
+    {
+        throw std::runtime_error("Unexpected Leela-model policy size for single evaluation.");
+    }
+    if (raw.valueWinner.size() != static_cast<size_t>(kLeelaBatchSize) * kLeelaValueSize
+        || raw.valueQ.size() != static_cast<size_t>(kLeelaBatchSize) * kLeelaValueSize)
+    {
+        throw std::runtime_error("Unexpected Leela-model value size for single evaluation.");
+    }
+
+    LeelaPolicyValue result;
+    result.policy_logits.assign(raw.policy.begin(), raw.policy.begin() + kLeelaPolicySize);
+    for (int i = 0; i < kLeelaValueSize; ++i)
+    {
+        result.value_winner_logits[static_cast<size_t>(i)] = raw.valueWinner[static_cast<size_t>(i)];
+        result.value_q_logits[static_cast<size_t>(i)] = raw.valueQ[static_cast<size_t>(i)];
+    }
+
+    if (!encoded.isBlackToMove.empty())
+    {
+        result.is_black_to_move = encoded.isBlackToMove.front();
+    }
+    if (!encoded.castlingRights.empty())
+    {
+        result.castling_rights = encoded.castlingRights.front();
+    }
+
+    return result;
+}
+
+size_t small_policy_size()
+{
+    return kSmallPolicySize;
+}
+
+size_t leela_policy_size()
+{
+    return kLeelaPolicySize;
+}
+
+const std::vector<std::string>& small_policy_vocabulary()
+{
+    return small_impl::getPolicyVocab().tokensRef();
+}
+
+const std::vector<std::string>& leela_policy_vocabulary()
+{
+    return leela_impl::getPolicyVocab().tokensRef();
 }
 
 } // namespace chessrl
