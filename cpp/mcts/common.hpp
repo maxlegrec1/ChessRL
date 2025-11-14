@@ -73,7 +73,6 @@ struct SearchTree
 };
 
 std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl);
-std::array<float, 3> orient_leela_wdl(const chess::Board& board, const std::array<float, 3>& white_perspective_wdl);
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index);
 std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 

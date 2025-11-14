@@ -95,16 +95,6 @@ std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::arra
     return {raw_wdl[2], raw_wdl[1], raw_wdl[0]};
 }
 
-std::array<float, 3> orient_leela_wdl(const chess::Board& board, const std::array<float, 3>& white_perspective_wdl)
-{
-    if (board.sideToMove() == chess::Color::WHITE)
-    {
-        return white_perspective_wdl;
-    }
-
-    return {white_perspective_wdl[2], white_perspective_wdl[1], white_perspective_wdl[0]};
-}
-
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index)
 {
     std::vector<std::string> line;

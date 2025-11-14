@@ -381,7 +381,7 @@ private:
         }
 
         const std::array<float, 3> value_probs_raw = softmax3(eval.value_q_logits);
-        node.wdl = orient_leela_wdl(node.board, value_probs_raw);
+        node.wdl = value_probs_raw;
         node.value_prior = node.wdl[0] - node.wdl[2];
         node.expanded = true;
 
