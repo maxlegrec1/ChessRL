@@ -367,6 +367,25 @@ int SearchTree::add_child(
     node.prior = prior;
     node.board = child_board;
     node.terminal = node.board.isGameOver().second != chess::GameResult::NONE;
+    if (node.terminal)
+    {
+        // Initialize terminal node WDL from the perspective of side to move on this node
+        const auto result = node.board.isGameOver().second;
+        switch (result)
+        {
+        case chess::GameResult::WIN:
+            node.wdl = {1.0F, 0.0F, 0.0F};
+            break;
+        case chess::GameResult::LOSE:
+            node.wdl = {0.0F, 0.0F, 1.0F};
+            break;
+        case chess::GameResult::DRAW:
+            node.wdl = {0.0F, 1.0F, 0.0F};
+            break;
+        default:
+            break;
+        }
+    }
     node.history = nodes[parent_index].history;
 
     const bool chess960 = nodes[parent_index].board.chess960();
