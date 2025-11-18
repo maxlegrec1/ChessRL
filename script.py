@@ -30,10 +30,10 @@ import torch
 from src.models.small.inference import Inference
 import time
 model = Inference().to("cuda")
-model.load_state_dict(torch.load("src/models/small/model.pt"), strict= False)
+model.load_state_dict(torch.load("model_adversarial_last.pt",weights_only=False)["model_state_dict"], strict= False)
 # model.load_state_dict(torch.load("checkpoints/checkpoint_step_2000.pt",weights_only=False)["model_state_dict"],strict=False)
 
-fen = "r2qnrk1/p4pp1/1p1p1P1p/2p5/2Pn1Q1P/2NB4/PP3PP1/R4RK1 w - - 1 19"
+fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/3Q1N2/PPP2PPP/R1B1K2R b KQkq - 1 9"
 
 # move, probs = model.get_move_from_fen_no_thinking(fen, T=1, use_fp16 = True,return_probs=True)
 # print(move, probs)
@@ -79,3 +79,12 @@ print(sorted_indices)
 print(policy[sorted_indices[:10]])
 from src.models.small.inference import policy_index
 print([policy_index[i] for i in sorted_indices[:10]])
+
+
+value = model.get_position_value(fen)
+print(value)
+
+
+model.load_state_dict(torch.load("src/models/small/model.pt"), strict= False)
+value = model.get_position_value(fen)
+print(value)

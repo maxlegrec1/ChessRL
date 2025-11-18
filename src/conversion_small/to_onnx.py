@@ -6,7 +6,7 @@ model = Inference().to("cuda")
 
 
 # model.load_state_dict(torch.load("checkpoints/checkpoint_step_2000.pt",weights_only=False)["model_state_dict"],strict=False)
-model.load_state_dict(torch.load("src/models/small/model.pt",weights_only=False),strict=False)
+model.load_state_dict(torch.load("model_adversarial_last_2.pt",weights_only=False)["model_state_dict"],strict=False)
 
 
 # fen = "r3k2r/ppp2ppp/2P5/8/2p1q1b1/B1P2N2/P4PPP/R2Q2K1 b kq - 0 14"
@@ -25,5 +25,5 @@ torch_model = model
 example_inputs = torch.randn(32, 8, 8, 19,device='cuda')
 
 onnx_program = torch.onnx.export(torch_model, example_inputs, dynamo=True)
-onnx_program.save("model_minibatch.onnx")
+onnx_program.save("model_minibatch_adversarial.onnx")
 
