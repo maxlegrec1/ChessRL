@@ -73,8 +73,8 @@ LeelaEncodedPosition encode_leela_position(std::string_view origin_fen, const st
 
 struct SmallBatchConfig
 {
-    std::string engine_path{"model_minibatch.trt"};
-    int max_batch_size{32};
+    std::string engine_path{"model.trt"};
+    int max_batch_size{1024};
     bool enable_telemetry{false};
 };
 

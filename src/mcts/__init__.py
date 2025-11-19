@@ -84,7 +84,7 @@ class _BaseMCTS:
 class SmallMCTS(_BaseMCTS):
     def __init__(
         self,
-        engine_path: str = "model_minibatch.trt",
+        engine_path: str = "model.trt",
         *,
         simulations: int = 800,
         cpuct: float = 1.5,
@@ -99,131 +99,39 @@ class SmallMCTS(_BaseMCTS):
 
     def run(
         self,
-        fen: str,
-        history: Sequence[str] = (),
+        fens: Sequence[str],
         *,
         simulations: int | None = None,
         cpuct: float | None = None,
         temperature: float | None = None,
         engine_path: str | None = None,
-    ) -> dict[str, object]:
+    ) -> list[dict[str, object]]:
+        if isinstance(fens, str):
+            raise TypeError("SmallMCTS.run requires a sequence of FEN strings, not a single string.")
+
+        fen_list = [str(fen) for fen in fens]
+        if not fen_list:
+            return []
+
         cfg = self._prepare_call(
             simulations=simulations,
             cpuct=cpuct,
             temperature=temperature,
             engine_path=engine_path,
         )
-        payload = _cpp.small_mcts_search(
-            fen,
-            _coerce_history(history),
+        payloads = _cpp.small_mcts_search_batch(
+            fen_list,
             cfg.simulations,
             cfg.cpuct,
             cfg.temperature,
             cfg.engine_path,
         )
-        return self._format_result(payload)
-
-    __call__ = run
-
-
-class LeelaMCTS(_BaseMCTS):
-    def __init__(
-        self,
-        engine_path: str = "leela_minibatch.trt",
-        *,
-        simulations: int = 800,
-        cpuct: float = 1.5,
-        temperature: float = 1.0,
-    ) -> None:
-        super().__init__(
-            engine_path,
-            simulations=simulations,
-            cpuct=cpuct,
-            temperature=temperature,
-        )
-
-    def run(
-        self,
-        fen: str,
-        history: Sequence[str] = (),
-        *,
-        simulations: int | None = None,
-        cpuct: float | None = None,
-        temperature: float | None = None,
-        engine_path: str | None = None,
-    ) -> dict[str, object]:
-        cfg = self._prepare_call(
-            simulations=simulations,
-            cpuct=cpuct,
-            temperature=temperature,
-            engine_path=engine_path,
-        )
-        payload = _cpp.leela_mcts_search(
-            fen,
-            _coerce_history(history),
-            cfg.simulations,
-            cfg.cpuct,
-            cfg.temperature,
-            cfg.engine_path,
-        )
-        return self._format_result(payload)
-
-    __call__ = run
-
-
-class AdversarialMCTS(_BaseMCTS):
-    def __init__(
-        self,
-        attacker_engine_path: str = "model_minibatch.trt",
-        defender_engine_path: str = "leela_minibatch.trt",
-        *,
-        simulations: int = 800,
-        cpuct: float = 1.5,
-        temperature: float = 1.0,
-    ) -> None:
-        super().__init__(
-            attacker_engine_path,
-            simulations=simulations,
-            cpuct=cpuct,
-            temperature=temperature,
-        )
-        self._defender_engine_path = defender_engine_path
-
-    def run(
-        self,
-        fen: str,
-        history: Sequence[str] = (),
-        *,
-        simulations: int | None = None,
-        cpuct: float | None = None,
-        temperature: float | None = None,
-        attacker_engine_path: str | None = None,
-        defender_engine_path: str | None = None,
-    ) -> dict[str, object]:
-        cfg = self._prepare_call(
-            simulations=simulations,
-            cpuct=cpuct,
-            temperature=temperature,
-            engine_path=attacker_engine_path,
-        )
-        defender_path = defender_engine_path or self._defender_engine_path
-        payload = _cpp.adversarial_mcts_search(
-            fen,
-            _coerce_history(history),
-            cfg.simulations,
-            cfg.cpuct,
-            cfg.temperature,
-            cfg.engine_path,
-            defender_path,
-        )
-        return self._format_result(payload)
+        return [self._format_result(payload) for payload in payloads]
 
     __call__ = run
 
 
 __all__ = [
     "SmallMCTS",
-    "LeelaMCTS",
-    "AdversarialMCTS",
 ]
 

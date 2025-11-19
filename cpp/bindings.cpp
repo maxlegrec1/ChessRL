@@ -2,8 +2,6 @@
 #include <pybind11/stl.h>
 
 #include "inference.hpp"
-#include "mcts/adversarial_runner.hpp"
-#include "mcts/leela_runner.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
 
@@ -44,13 +42,6 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_property_readonly("wdl", [](const chessrl::SmallInferenceResult& self) { return self.wdl; })
         .def_property_readonly("timings", [](const chessrl::SmallInferenceResult& self) { return self.timings; });
 
-    py::class_<chessrl::LeelaInferenceResult>(m, "LeelaInferenceResult")
-        .def_property_readonly("moves", [](const chessrl::LeelaInferenceResult& self) { return self.moves; })
-        .def_property_readonly(
-            "value_winner", [](const chessrl::LeelaInferenceResult& self) { return self.value_winner; })
-        .def_property_readonly("value_q", [](const chessrl::LeelaInferenceResult& self) { return self.value_q; })
-        .def_property_readonly("timings", [](const chessrl::LeelaInferenceResult& self) { return self.timings; });
-
     m.def(
         "small_generate_moves",
         [](const std::vector<std::string>& fens, float temperature, int iterations, const std::string& engine_path) {
@@ -63,100 +54,39 @@ PYBIND11_MODULE(_inference_cpp, m)
         "Run the TensorRT policy head and return sampled moves with timing stats.");
 
     m.def(
-        "leela_generate_from_move_lists",
-        [](const std::vector<std::string>& origin_fens,
-           const std::vector<std::vector<std::string>>& move_lists,
-           float temperature,
-           int iterations,
-           const std::string& engine_path) {
-            return chessrl::leela_generate_from_move_lists(origin_fens, move_lists, temperature, iterations, engine_path);
-        },
-        py::arg("origin_fens"),
-        py::arg("move_lists"),
-        py::arg("temperature"),
-        py::arg("iterations") = 1,
-        py::arg("engine_path") = std::string("leela.trt"),
-        "Run Leela TensorRT inference on batched move histories and return selected moves and value heads.");
-
-    m.def(
-        "small_mcts_search",
-        [](const std::string& fen,
-           const std::vector<std::string>& history,
+        "small_mcts_search_batch",
+        [](const std::vector<std::string>& fens,
            int simulations,
            float cpuct,
            float temperature,
            const std::string& engine_path) {
-            chessrl::mcts::MctsOptions options;
-            options.request.fen = fen;
-            options.request.history = history;
-            options.simulations = simulations;
-            options.cpuct = cpuct;
-            options.temperature = temperature;
-            options.small_engine_path = engine_path;
-            auto summary = chessrl::mcts::run_small_mcts(std::move(options));
-            return summary_to_python(summary);
-        },
-        py::arg("fen"),
-        py::arg("history") = std::vector<std::string>{},
-        py::arg("simulations") = 800,
-        py::arg("cpuct") = 1.5F,
-        py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("model_minibatch.trt"),
-        "Execute the small-model MCTS search and return action, policy distribution, and Q-values.");
+            std::vector<chessrl::mcts::MctsOptions> requests;
+            requests.reserve(fens.size());
+            for (const auto& fen : fens)
+            {
+                chessrl::mcts::MctsOptions options;
+                options.request.fen = fen;
+                options.simulations = simulations;
+                options.cpuct = cpuct;
+                options.temperature = temperature;
+                options.small_engine_path = engine_path;
+                requests.push_back(std::move(options));
+            }
 
-    m.def(
-        "leela_mcts_search",
-        [](const std::string& fen,
-           const std::vector<std::string>& history,
-           int simulations,
-           float cpuct,
-           float temperature,
-           const std::string& engine_path) {
-            chessrl::mcts::MctsOptions options;
-            options.request.fen = fen;
-            options.request.history = history;
-            options.simulations = simulations;
-            options.cpuct = cpuct;
-            options.temperature = temperature;
-            options.leela_engine_path = engine_path;
-            auto summary = chessrl::mcts::run_leela_mcts(std::move(options));
-            return summary_to_python(summary);
+            auto summaries = chessrl::mcts::run_small_mcts_batch(std::move(requests));
+            std::vector<py::dict> python_results;
+            python_results.reserve(summaries.size());
+            for (const auto& summary : summaries)
+            {
+                python_results.push_back(summary_to_python(summary));
+            }
+            return python_results;
         },
-        py::arg("fen"),
-        py::arg("history") = std::vector<std::string>{},
+        py::arg("fens"),
         py::arg("simulations") = 800,
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("leela_minibatch.trt"),
-        "Execute the Leela-style MCTS search and return action, policy distribution, and Q-values.");
-
-    m.def(
-        "adversarial_mcts_search",
-        [](const std::string& fen,
-           const std::vector<std::string>& history,
-           int simulations,
-           float cpuct,
-           float temperature,
-           const std::string& attacker_engine_path,
-           const std::string& defender_engine_path) {
-            chessrl::mcts::MctsOptions options;
-            options.request.fen = fen;
-            options.request.history = history;
-            options.simulations = simulations;
-            options.cpuct = cpuct;
-            options.temperature = temperature;
-            options.small_engine_path = attacker_engine_path;
-            options.leela_engine_path = defender_engine_path;
-            auto summary = chessrl::mcts::run_adversarial_mcts(std::move(options));
-            return summary_to_python(summary);
-        },
-        py::arg("fen"),
-        py::arg("history") = std::vector<std::string>{},
-        py::arg("simulations") = 800,
-        py::arg("cpuct") = 1.5F,
-        py::arg("temperature") = 1.0F,
-        py::arg("attacker_engine_path") = std::string("model_minibatch.trt"),
-        py::arg("defender_engine_path") = std::string("leela_minibatch.trt"),
-        "Execute the adversarial MCTS search (attacker vs defender engines) and return action, policy distribution, and Q-values.");
+        py::arg("engine_path") = std::string("model.trt"),
+        "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
 }
 

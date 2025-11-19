@@ -30,7 +30,7 @@ struct MctsOptions
     float dirichlet_epsilon{0.25F};
     bool use_dirichlet{false};
     float temperature{1.0F};
-    std::string small_engine_path{"model_minibatch.trt"};
+    std::string small_engine_path{"model.trt"};
     std::string leela_engine_path{"leela_minibatch.trt"};
 };
 

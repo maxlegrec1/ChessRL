@@ -287,7 +287,7 @@ SmallEngineContext& getSmallEngineContext(const std::string& engine_path)
     static auto* mutex = new std::mutex();
     static auto* contexts = new std::unordered_map<std::string, std::unique_ptr<SmallEngineContext>>();
 
-    std::string resolved = resolveEnginePath(engine_path, "model_minibatch.trt");
+    std::string resolved = resolveEnginePath(engine_path, "model.trt");
     std::lock_guard<std::mutex> lock(*mutex);
     auto it = contexts->find(resolved);
     if (it == contexts->end())
@@ -1573,10 +1573,14 @@ struct SmallBatchRunner::Impl
         while (true)
         {
             std::unique_lock<std::mutex> lock(mutex);
-            cv.wait(lock, [this]() { return stop_worker_ || queue.size() >= flush_threshold_; });
-            if (stop_worker_)
+            cv.wait_for(lock, flush_timeout_, [this]() { return stop_worker_ || queue.size() >= flush_threshold_; });
+            if (stop_worker_ && queue.empty())
             {
                 break;
+            }
+            if (queue.empty())
+            {
+                continue;
             }
             lock.unlock();
             try
@@ -1609,6 +1613,7 @@ struct SmallBatchRunner::Impl
     bool stop_worker_{false};
     std::deque<SmallPending> queue;
     std::thread worker;
+    const std::chrono::milliseconds flush_timeout_{1};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
     size_t batches_{0};
@@ -1627,7 +1632,7 @@ SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
 
     const std::string key = [&config]() {
         std::ostringstream oss;
-        oss << resolveEnginePath(config.engine_path, "model_minibatch.trt")
+        oss << resolveEnginePath(config.engine_path, "model.trt")
             << '|' << config.max_batch_size
             << '|' << (config.enable_telemetry ? '1' : '0');
         return oss.str();

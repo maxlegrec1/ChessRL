@@ -17,6 +17,7 @@
 #include <optional>
 #include <random>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -92,7 +93,7 @@ int read_batch_size_env(const char* specific)
             return numeric;
         }
     }
-    return 32;
+    return 1024;
 }
 
 bool telemetry_enabled_env()
@@ -113,7 +114,7 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
     single::SmallBatchConfig cfg;
     if (options.small_engine_path.empty())
     {
-        cfg.engine_path = "model_minibatch.trt";
+        cfg.engine_path = "model.trt";
     }
     else
     {
@@ -129,13 +130,14 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
 class SmallMctsRunner
 {
 public:
-    explicit SmallMctsRunner(MctsOptions options)
+    SmallMctsRunner(MctsOptions options, std::shared_ptr<single::SmallBatchRunner> shared_runner = {})
         : options_(std::move(options))
         , vocab_(small_policy_vocabulary())
         , vocab_index_(build_vocab_index(vocab_))
         , small_batch_config_(make_small_batch_config(options_))
-        , small_batch_runner_(small_batch_config_)
-        , small_batch_flush_threshold_(static_cast<size_t>(small_batch_config_.max_batch_size))
+        , small_batch_runner_(
+              shared_runner ? std::move(shared_runner)
+                            : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
         , rng_(std::random_device{}())
     {
         const chess::Board board = apply_history(options_.request);
@@ -156,7 +158,7 @@ public:
         MctsSummary summary = summarize();
         if (small_batch_config_.enable_telemetry)
         {
-            auto stats = small_batch_runner_.statistics();
+            auto stats = small_batch_runner_->statistics();
             if (stats.batches > 0)
             {
                 std::clog << "[telemetry][small] batches=" << stats.batches
@@ -279,15 +281,7 @@ private:
         }
 
         auto encoded = acquire_small_encoding(node.history, node.board);
-        auto ticket = small_batch_runner_.enqueue(*encoded);
-        if (small_batch_runner_.pending() >= small_batch_flush_threshold_)
-        {
-            small_batch_runner_.process_pending();
-        }
-        while (!ticket.ready())
-        {
-            small_batch_runner_.process_pending();
-        }
+        auto ticket = small_batch_runner_->enqueue(*encoded);
         SmallPolicyValue eval = ticket.get();
         if (eval.policy_logits.size() != chessrl::small_policy_size())
         {
@@ -706,8 +700,7 @@ private:
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
     single::SmallBatchConfig small_batch_config_;
-    single::SmallBatchRunner small_batch_runner_;
-    size_t small_batch_flush_threshold_{0};
+    std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
     mutable std::mutex small_cache_mutex_;
     std::unordered_map<const HistoryEntry*, std::weak_ptr<const single::SmallEncodedPosition>> small_encoding_cache_;
     std::mt19937 rng_;
@@ -719,6 +712,48 @@ MctsSummary run_small_mcts(MctsOptions options)
 {
     SmallMctsRunner runner(std::move(options));
     return runner.run();
+}
+
+std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_options)
+{
+    if (batch_options.empty())
+    {
+        return {};
+    }
+
+    single::SmallBatchConfig shared_config = make_small_batch_config(batch_options.front());
+    for (size_t i = 1; i < batch_options.size(); ++i)
+    {
+        const auto cfg = make_small_batch_config(batch_options[i]);
+        if (cfg.engine_path != shared_config.engine_path)
+        {
+            throw std::invalid_argument("All small MCTS batch requests must use the same engine path.");
+        }
+    }
+
+    auto shared_runner = std::make_shared<single::SmallBatchRunner>(shared_config);
+    std::vector<MctsSummary> summaries(batch_options.size());
+    std::vector<std::thread> workers;
+    workers.reserve(batch_options.size());
+
+    for (size_t i = 0; i < batch_options.size(); ++i)
+    {
+        workers.emplace_back(
+            [runner_options = std::move(batch_options[i]), shared_runner, &summaries, i]() mutable {
+                SmallMctsRunner runner(std::move(runner_options), shared_runner);
+                summaries[i] = runner.run();
+            });
+    }
+
+    for (auto& worker : workers)
+    {
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+
+    return summaries;
 }
 
 #ifndef CHESSRL_MCTS_NO_STANDALONE

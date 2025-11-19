@@ -16,8 +16,6 @@ ext_modules = [
             "inference.cpp",
             "mcts/common.cpp",
             "mcts/mcts_small.cpp",
-            "mcts/mcts_leela.cpp",
-            "mcts/mcts_adversarial.cpp",
             "mcts/single_inference.cpp",
         ],
         include_dirs=[
