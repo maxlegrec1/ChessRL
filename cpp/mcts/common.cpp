@@ -265,10 +265,6 @@ MctsOptions parse_cli(int argc, char** argv)
     {
         options.small_engine_path = *small_engine;
     }
-    if (auto leela_engine = lookup("leela-engine"))
-    {
-        options.leela_engine_path = *leela_engine;
-    }
 
     if (options.simulations <= 0)
     {

@@ -63,10 +63,6 @@ TEST_CASE("policy vocabularies expose expected sizes")
     const auto& small_vocab = chessrl::small_policy_vocabulary();
     CHECK(small_vocab.size() == chessrl::small_policy_size());
     CHECK(std::find(small_vocab.begin(), small_vocab.end(), "e2e4") != small_vocab.end());
-
-    const auto& leela_vocab = chessrl::leela_policy_vocabulary();
-    CHECK(leela_vocab.size() == chessrl::leela_policy_size());
-    CHECK(std::find(leela_vocab.begin(), leela_vocab.end(), "e1h1") != leela_vocab.end());
 }
 
 

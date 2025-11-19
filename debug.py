@@ -7,7 +7,7 @@ fen2 = "6k1/p4ppp/1p6/8/8/1N6/P1r1rPPP/3R2K1 w - - 0 1" # mate in two
 # fen = "r1b2r1k/1pqnbppp/p1n1p3/3pP3/1P3P2/P1N1BN2/2PQB1PP/R4RK1 w - - 5 14"
 # fen = "rn3rk1/p7/bpq1pp1Q/3pP3/P2Nn3/1Pb2NPP/5PB1/3RR1K1 w - - 1 22" # mate in eight
 # fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/5N2/PPP2PPP/R1BQK2R w KQkq - 0 9"
-res = small.run([fen1,fen2]*250, temperature=1, simulations=600, cpuct=1.0)
+res = small.run([fen1,fen2]*256, temperature=1, simulations=600, cpuct=1.0)
 print([res["action"] for res in res])
 
 # import torch
