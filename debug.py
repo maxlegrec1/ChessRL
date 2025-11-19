@@ -1,14 +1,14 @@
 from src.mcts import SmallMCTS
 
-small = SmallMCTS(engine_path="model_minibatch_adversarial.trt", temperature=1, cpuct=1.0)
+small = SmallMCTS(engine_path="model_minibatch_random.trt", temperature=1, cpuct=1.0)
 fen = "5k2/8/3K4/6Q1/8/8/8/8 w - - 11 64"
-fen = "6k1/p4ppp/1p6/8/8/1N6/P1rr1PPP/4R1K1 w - - 0 1" # mate in one
-fen = "6k1/p4ppp/1p6/8/8/1N6/P1r1rPPP/3R2K1 w - - 0 1" # mate in two
-fen = "8/8/6K1/3k4/8/6P1/1r6/4q3 b - - 1 60" # mate in four
-fen = "r1b2r1k/1pqnbppp/p1n1p3/3pP3/1P3P2/P1N1BN2/2PQB1PP/R4RK1 w - - 5 14"
-fen = "rn3rk1/p7/bpq1pp1Q/3pP3/P2Nn3/1Pb2NPP/5PB1/3RR1K1 w - - 1 22" # mate in eight
-fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/5N2/PPP2PPP/R1BQK2R w KQkq - 0 9"
-res = small.run(fen, temperature=1, simulations=1, cpuct=1.0)
+# fen = "rnbqkbnr/pppp1ppp/4p3/8/5PP1/8/PPPPP2P/RNBQKBNR b KQkq - 0 2" # mate in one
+# fen = "6k1/p4ppp/1p6/8/8/1N6/P1r1rPPP/3R2K1 w - - 0 1" # mate in two
+# fen = "8/8/6K1/3k4/8/6P1/1r6/4q3 b - - 1 60" # mate in four
+# fen = "r1b2r1k/1pqnbppp/p1n1p3/3pP3/1P3P2/P1N1BN2/2PQB1PP/R4RK1 w - - 5 14"
+# fen = "rn3rk1/p7/bpq1pp1Q/3pP3/P2Nn3/1Pb2NPP/5PB1/3RR1K1 w - - 1 22" # mate in eight
+# fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/5N2/PPP2PPP/R1BQK2R w KQkq - 0 9"
+res = small.run(fen, temperature=1, simulations=600, cpuct=1.0)
 print(res)
 
 # import torch
