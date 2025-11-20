@@ -42,6 +42,8 @@ TEST_CASE("parse_cli populates options")
         "32",
         "--cpuct",
         "1.2",
+        "--temperature-at-root",
+        "0.25",
         "--temperature",
         "0.5",
     };
@@ -54,6 +56,7 @@ TEST_CASE("parse_cli populates options")
     CHECK(options.request.history[1] == "e7e5");
     CHECK(options.simulations == 32);
     CHECK(options.cpuct == doctest::Approx(1.2F));
+    CHECK(options.temperature_at_root == doctest::Approx(0.25F));
     CHECK(options.temperature == doctest::Approx(0.5F));
     CHECK(!options.use_dirichlet);
 }

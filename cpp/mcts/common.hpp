@@ -25,6 +25,7 @@ struct MctsOptions
     SearchInput request;
     int simulations{800};
     float cpuct{1.5F};
+    float temperature_at_root{0.0F};
     float virtual_loss{1.0F};
     float dirichlet_alpha{0.3F};
     float dirichlet_epsilon{0.25F};

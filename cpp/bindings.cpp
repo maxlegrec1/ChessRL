@@ -59,7 +59,8 @@ PYBIND11_MODULE(_inference_cpp, m)
            int simulations,
            float cpuct,
            float temperature,
-           const std::string& engine_path) {
+           const std::string& engine_path,
+           float temperature_at_root) {
             std::vector<chessrl::mcts::MctsOptions> requests;
             requests.reserve(fens.size());
             for (const auto& fen : fens)
@@ -70,6 +71,7 @@ PYBIND11_MODULE(_inference_cpp, m)
                 options.cpuct = cpuct;
                 options.temperature = temperature;
                 options.small_engine_path = engine_path;
+                options.temperature_at_root = temperature_at_root;
                 requests.push_back(std::move(options));
             }
 
@@ -87,6 +89,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
         py::arg("engine_path") = std::string("model.trt"),
+        py::arg("temperature_at_root") = 0.0F,
         "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
 }
 

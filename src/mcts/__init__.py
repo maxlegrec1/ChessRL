@@ -24,6 +24,7 @@ class _BaseMCTSConfig:
     simulations: int
     cpuct: float
     temperature: float
+    temperature_at_root: float
 
 
 class _BaseMCTS:
@@ -34,12 +35,14 @@ class _BaseMCTS:
         simulations: int = 800,
         cpuct: float = 1.5,
         temperature: float = 1.0,
+        temperature_at_root: float = 0.0,
     ) -> None:
         self._config = _BaseMCTSConfig(
             engine_path=engine_path,
             simulations=simulations,
             cpuct=cpuct,
             temperature=temperature,
+            temperature_at_root=temperature_at_root,
         )
 
     def _prepare_call(
@@ -48,6 +51,7 @@ class _BaseMCTS:
         simulations: int | None,
         cpuct: float | None,
         temperature: float | None,
+        temperature_at_root: float | None,
         engine_path: str | None,
     ) -> _BaseMCTSConfig:
         cfg = self._config
@@ -56,6 +60,9 @@ class _BaseMCTS:
             simulations=simulations if simulations is not None else cfg.simulations,
             cpuct=cpuct if cpuct is not None else cfg.cpuct,
             temperature=temperature if temperature is not None else cfg.temperature,
+            temperature_at_root=(
+                temperature_at_root if temperature_at_root is not None else cfg.temperature_at_root
+            ),
         )
 
     @staticmethod
@@ -89,12 +96,14 @@ class SmallMCTS(_BaseMCTS):
         simulations: int = 800,
         cpuct: float = 1.5,
         temperature: float = 1.0,
+        temperature_at_root: float = 0.0,
     ) -> None:
         super().__init__(
             engine_path,
             simulations=simulations,
             cpuct=cpuct,
             temperature=temperature,
+            temperature_at_root=temperature_at_root,
         )
 
     def run(
@@ -104,6 +113,7 @@ class SmallMCTS(_BaseMCTS):
         simulations: int | None = None,
         cpuct: float | None = None,
         temperature: float | None = None,
+        temperature_at_root: float | None = None,
         engine_path: str | None = None,
     ) -> list[dict[str, object]]:
         if isinstance(fens, str):
@@ -117,6 +127,7 @@ class SmallMCTS(_BaseMCTS):
             simulations=simulations,
             cpuct=cpuct,
             temperature=temperature,
+            temperature_at_root=temperature_at_root,
             engine_path=engine_path,
         )
         payloads = _cpp.small_mcts_search_batch(
@@ -125,6 +136,7 @@ class SmallMCTS(_BaseMCTS):
             cfg.cpuct,
             cfg.temperature,
             cfg.engine_path,
+            cfg.temperature_at_root,
         )
         return [self._format_result(payload) for payload in payloads]
 

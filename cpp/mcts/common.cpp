@@ -261,6 +261,10 @@ MctsOptions parse_cli(int argc, char** argv)
     {
         options.cpuct = parse_float(*cpuct, "--cpuct");
     }
+    if (auto temp_root = lookup("temperature-at-root"))
+    {
+        options.temperature_at_root = parse_float(*temp_root, "--temperature-at-root");
+    }
     if (auto temperature = lookup("temperature"))
     {
         options.temperature = parse_float(*temperature, "--temperature");
@@ -293,6 +297,10 @@ MctsOptions parse_cli(int argc, char** argv)
     if (options.cpuct <= 0.0F)
     {
         throw std::invalid_argument("--cpuct must be positive");
+    }
+    if (options.temperature_at_root < 0.0F)
+    {
+        throw std::invalid_argument("--temperature-at-root must be non-negative");
     }
     if (options.temperature < 0.0F)
     {

@@ -552,7 +552,7 @@ private:
         return node.wdl;
     }
 
-    MctsSummary summarize() const
+    MctsSummary summarize()
     {
         const TreeNode& root = tree_.nodes.front();
 
@@ -642,33 +642,96 @@ private:
             return a.second > b.second;
         });
 
-        size_t best_index = 0;
-        float best_score = -1.0F;
-        if (visit_sum > 0.0F)
-        {
-            for (const auto& entry : aggregated)
+        auto select_argmax = [&]() -> std::string {
+            size_t best_index = 0;
+            float best_score = -1.0F;
+            if (visit_sum > 0.0F)
             {
-                const float visits = static_cast<float>(entry.visit_sum);
-                if (visits > best_score)
+                for (const auto& entry : aggregated)
                 {
-                    best_score = visits;
-                    best_index = index.at(entry.uci);
+                    const float visits = static_cast<float>(entry.visit_sum);
+                    if (visits > best_score)
+                    {
+                        best_score = visits;
+                        best_index = index.at(entry.uci);
+                    }
                 }
             }
+            else
+            {
+                for (const auto& entry : aggregated)
+                {
+                    if (entry.prior_sum > best_score)
+                    {
+                        best_score = entry.prior_sum;
+                        best_index = index.at(entry.uci);
+                    }
+                }
+            }
+            return aggregated[best_index].uci;
+        };
+
+        auto sample_action = [&]() -> std::optional<std::string> {
+            if (distribution.empty())
+            {
+                return std::nullopt;
+            }
+
+            std::vector<double> weights(distribution.size(), 0.0);
+            const double inv_temp = 1.0 / static_cast<double>(options_.temperature_at_root);
+            double total_weight = 0.0;
+
+            for (size_t i = 0; i < distribution.size(); ++i)
+            {
+                const double prob = std::max(0.0, static_cast<double>(distribution[i].second));
+                if (prob <= 0.0)
+                {
+                    continue;
+                }
+
+                double weight = options_.temperature_at_root == 1.0F ? prob : std::pow(prob, inv_temp);
+                if (!std::isfinite(weight) || weight <= 0.0)
+                {
+                    continue;
+                }
+
+                weights[i] = weight;
+                total_weight += weight;
+            }
+
+            if (total_weight <= 0.0)
+            {
+                return std::nullopt;
+            }
+
+            std::uniform_real_distribution<double> dist(0.0, total_weight);
+            double draw = dist(rng_);
+            for (size_t i = 0; i < weights.size(); ++i)
+            {
+                const double weight = weights[i];
+                if (weight <= 0.0)
+                {
+                    continue;
+                }
+                draw -= weight;
+                if (draw <= 0.0)
+                {
+                    return distribution[i].first;
+                }
+            }
+
+            return distribution.back().first;
+        };
+
+        std::string action;
+        if (options_.temperature_at_root <= 1e-5F)
+        {
+            action = select_argmax();
         }
         else
         {
-            for (const auto& entry : aggregated)
-            {
-                if (entry.prior_sum > best_score)
-                {
-                    best_score = entry.prior_sum;
-                    best_index = index.at(entry.uci);
-                }
-            }
+            action = sample_action().value_or(select_argmax());
         }
-
-        const std::string action = aggregated[best_index].uci;
 
         MctsSummary summary;
         summary.action = action;
