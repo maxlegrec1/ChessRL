@@ -1,53 +1,65 @@
 from src.mcts import SmallMCTS
+import time
+import matplotlib.pyplot as plt
+import numpy as np
 
-small = SmallMCTS(engine_path="model.trt", temperature=1, cpuct=1.0)
-fen1 = "rnbqkbnr/pppp1ppp/4p3/8/5PP1/8/PPPPP2P/RNBQKBNR b KQkq - 0 2" # mate in one
-fen2 = "6k1/p4ppp/1p6/8/8/1N6/P1r1rPPP/3R2K1 w - - 0 1" # mate in two
-# fen = "8/8/6K1/3k4/8/6P1/1r6/4q3 b - - 1 60" # mate in four
-# fen = "r1b2r1k/1pqnbppp/p1n1p3/3pP3/1P3P2/P1N1BN2/2PQB1PP/R4RK1 w - - 5 14"
-# fen = "rn3rk1/p7/bpq1pp1Q/3pP3/P2Nn3/1Pb2NPP/5PB1/3RR1K1 w - - 1 22" # mate in eight
-# fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/5N2/PPP2PPP/R1BQK2R w KQkq - 0 9"
-res = small.run([fen1,fen2]*256, temperature=1, simulations=600, cpuct=1.0)
-print([res["action"] for res in res])
+# Initialize MCTS
+small = SmallMCTS(engine_path="model_dynamic.trt", temperature=1, cpuct=1.0)
+fen = "r2qkb1r/1p2pppp/p1n1b3/2nN4/2B5/5N2/PPP2PPP/R1BQK2R w KQkq - 0 9"
 
-# import torch
-# from src.models.small.inference import Inference
-# model = Inference().to("cuda")
-# model.load_state_dict(torch.load("src/models/small/model.pt"),strict=False)
-# fen = "6k1/6p1/2p4r/p2p4/1p4p1/1BP2b2/Pq1B4/4QRK1 w - - 2 41"
-# value = model.get_position_value(fen, device="cuda")
-# print(value)
+# Batch sizes to test
+batch_sizes = [256, 512, 1024]
+num_runs = 2
 
-# # import torch
-# from src.mcts import LeelaMCTS
-# leela = LeelaMCTS(engine_path="leela_minibatch.trt", temperature=1, cpuct=1.0)
+# Store results: batch_size -> list of times per position
+results = {}
 
+print("Benchmarking batch sizes...")
+for batch_size in batch_sizes:
+    print(f"\nTesting batch size: {batch_size}")
+    times_per_pos = []
+    
+    for run in range(num_runs):
+        start_time = time.time()
+        res = small.run([fen] * batch_size, temperature=1, simulations=600, cpuct=1.0)
+        end_time = time.time()
+        
+        total_time = end_time - start_time
+        time_per_position = total_time / batch_size
+        times_per_pos.append(time_per_position)
+        
+        print(f"  Run {run + 1}/{num_runs}: {time_per_position:.4f} s/pos")
+    
+    avg_time_per_pos = np.mean(times_per_pos)
+    results[batch_size] = avg_time_per_pos
+    print(f"  Average: {avg_time_per_pos:.4f} s/pos")
 
-# fen = "6k1/6p1/2p1r1q1/p2p4/1p4p1/1BP2bQ1/PP1B3R/6K1 w - - 6 36"
-# history = ["h2f2","e6f6","d2c1","g6e4","c1d2","e4b1","f2f1","b1b2","g3e1"]
+# Plot results
+print("\nPlotting results...")
+batch_sizes_list = list(results.keys())
+avg_times = list(results.values())
 
-# # # fen = ""
-# # # history = ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5","g8f6","e1g1"]
+plt.figure(figsize=(10, 6))
+plt.plot(batch_sizes_list, avg_times, marker='o', linestyle='-', linewidth=2, markersize=8)
+plt.xlabel('Batch Size', fontsize=12)
+plt.ylabel('Average Time per Position (seconds)', fontsize=12)
+plt.title('MCTS Performance: Average Time per Position vs Batch Size', fontsize=14)
+plt.grid(True, alpha=0.3)
+plt.xscale('log', base=2)
+plt.xticks(batch_sizes_list, batch_sizes_list)
+plt.tight_layout()
 
-# res = leela.run(fen,history, temperature=1, simulations=1000, cpuct=1.0)
-# print(res)
-# from src.models.leela import BT4 as LeelaBT4
-# leela_bt4 = LeelaBT4().to("cuda")
-# leela_bt4.load_state_dict(torch.load("src/models/leela/model.pt"),strict=False)
+# Save the plot
+plt.savefig('batch_size_benchmark.png', dpi=150)
+print("Plot saved as 'batch_size_benchmark.png'")
 
-# fen = "6k1/6p1/2p1r1q1/p2p4/1p4p1/1BP2bQ1/PP1B3R/6K1 w - - 6 36"
-# history = ["h2f2","e6f6","d2c1","g6e4","c1d2","e4b1","f2f1","b1b2","g3e1"]
+# Display the plot
+plt.show()
 
-# moves = leela_bt4.batch_get_moves_from_move_lists([history], T=0.1, device="cuda", fens=[fen], use_fp16=True)
-# print(moves)
+# Print summary
+print("\n" + "="*50)
+print("SUMMARY")
+print("="*50)
+for batch_size in batch_sizes_list:
+    print(f"Batch size {batch_size:4d}: {results[batch_size]:.4f} s/pos")
 
-# import time
-# from src.mcts import AdversarialMCTS
-# adversarial = AdversarialMCTS(attacker_engine_path="model_minibatch.trt", defender_engine_path="leela_minibatch.trt", temperature=1, cpuct=1.0)
-
-
-# fen = "6k1/6p1/2p1r1q1/p2p4/1p4p1/1BP2bQ1/PP1B3R/6K1 w - - 6 36"
-# history = ["h2f2","e6f6","d2c1","g6e4","c1d2","e4b1","f2f1","b1b2","g3e1"]
-
-# res = adversarial.run(fen,history, temperature=1, simulations=10000, cpuct=1.0)
-# print(res)

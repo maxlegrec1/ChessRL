@@ -95,12 +95,30 @@ std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::arra
     return {raw_wdl[2], raw_wdl[1], raw_wdl[0]};
 }
 
-std::vector<std::string> principal_variation(const SearchTree& tree, int node_index)
+std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board)
 {
     std::vector<std::string> line;
     if (node_index < 0 || node_index >= static_cast<int>(tree.nodes.size()))
     {
         return line;
+    }
+
+    // Phase B: Reconstruct board state from root to starting node
+    chess::Board current_board = root_board;
+    std::vector<int> path_to_node;
+    int temp = node_index;
+    while (temp > 0 && temp < static_cast<int>(tree.nodes.size()))
+    {
+        path_to_node.push_back(temp);
+        temp = tree.nodes[temp].parent;
+    }
+    // Apply moves from root to starting node (in reverse order)
+    for (auto it = path_to_node.rbegin(); it != path_to_node.rend(); ++it)
+    {
+        if (*it < static_cast<int>(tree.nodes.size()))
+        {
+            current_board.makeMove(tree.nodes[*it].move_from_parent);
+        }
     }
 
     int current = node_index;
@@ -154,7 +172,9 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
         }
 
         const chess::Move move = node.child_moves[best_index];
-        line.push_back(chess::uci::moveToUci(move, tree.nodes[current].board.chess960()));
+        // Phase B: Use current_board for chess960 flag
+        line.push_back(chess::uci::moveToUci(move, current_board.chess960()));
+        current_board.makeMove(move);
         current = node.children[best_index];
     }
 
@@ -332,10 +352,11 @@ int SearchTree::add_root(const chess::Board& board, const std::vector<std::strin
 {
     nodes.clear();
     TreeNode root;
-    root.board = board;
-    root.terminal = root.board.isGameOver().second != chess::GameResult::NONE;
+    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
+    root.terminal = board.isGameOver().second != chess::GameResult::NONE;
     root.prior = 1.0F;
     root.history = build_history_chain(history);
+    // Root has no parent, so move_from_parent remains NO_MOVE
 
     nodes.push_back(std::move(root));
     return 0;
@@ -361,12 +382,12 @@ int SearchTree::add_child(
     node.parent = parent_index;
     node.move_from_parent = move;
     node.prior = prior;
-    node.board = child_board;
-    node.terminal = node.board.isGameOver().second != chess::GameResult::NONE;
+    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
+    node.terminal = child_board.isGameOver().second != chess::GameResult::NONE;
     if (node.terminal)
     {
         // Initialize terminal node WDL from the perspective of side to move on this node
-        const auto result = node.board.isGameOver().second;
+        const auto result = child_board.isGameOver().second;
         switch (result)
         {
         case chess::GameResult::WIN:
@@ -384,7 +405,11 @@ int SearchTree::add_child(
     }
     node.history = nodes[parent_index].history;
 
-    const bool chess960 = nodes[parent_index].board.chess960();
+    // Phase B: Need chess960 flag from parent board - will be passed separately or reconstructed
+    // For now, we'll need to reconstruct parent board to get chess960 flag
+    // This is a temporary solution - we may need to store chess960 flag separately
+    // But for now, we'll use the child_board which has the correct chess960 setting
+    const bool chess960 = child_board.chess960();
     const std::string move_uci = chess::uci::moveToUci(move, chess960);
     if (!move_uci.empty())
     {

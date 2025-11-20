@@ -41,9 +41,10 @@ chess::Board apply_history(const SearchInput& input);
 
 struct TreeNode
 {
+    // REMOVED: chess::Board board; - Board state is reconstructed during traversal
+    
     int parent{-1};
-    chess::Move move_from_parent{chess::Move::NO_MOVE};
-    chess::Board board{};
+    chess::Move move_from_parent{chess::Move::NO_MOVE}; // The move that led to this node
     bool terminal{false};
     bool expanded{false};
     float prior{0.0F};
@@ -72,7 +73,7 @@ struct SearchTree
 };
 
 std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl);
-std::vector<std::string> principal_variation(const SearchTree& tree, int node_index);
+std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
 std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 
 } // namespace chessrl::mcts

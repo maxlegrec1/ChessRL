@@ -206,7 +206,7 @@ if __name__ == "__main__":
     # model1.load_state_dict(torch.load('checkpoints/checkpoint_step_9000.pt',weights_only=False)["model_state_dict"])
     
     from src.models.small.inference_mcts import SmallMCTSInference
-    model2 = SmallMCTSInference(engine_path="model_minibatch_adversarial.trt",cpuct=1.0, simulations=100)
+    model2 = SmallMCTSInference(engine_path="model_dynamic.trt",cpuct=1.0, simulations=1000)
 
     # from src.models.leela import BT4 as LeelaBT4
     # model2 = LeelaBT4().to("cuda")

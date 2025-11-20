@@ -5,13 +5,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -92,22 +96,19 @@ size_t volume(const nvinfer1::Dims& dims)
     return result;
 }
 
+// Helper to calculate the volume of a single sample (ignoring batch dim)
 size_t normalized_tensor_volume(const nvinfer1::Dims& dims)
 {
-    const size_t total = volume(dims);
-    if (dims.nbDims > 0)
+    if (dims.nbDims == 0) return 0;
+    
+    size_t result = 1;
+    // Start from index 1 to skip the batch dimension (index 0)
+    // This works for both Static [N, C, H, W] and Dynamic [-1, C, H, W]
+    for (int i = 1; i < dims.nbDims; ++i)
     {
-        const int first = dims.d[0];
-        if (first > 0)
-        {
-            const size_t batch = static_cast<size_t>(first);
-            if (batch > 0 && total % batch == 0)
-            {
-                return total / batch;
-            }
-        }
+        result *= static_cast<size_t>(dims.d[i]);
     }
-    return total;
+    return result;
 }
 
 class DeviceBuffer
@@ -163,6 +164,80 @@ public:
 private:
     size_t capacity_{0};
     std::unique_ptr<DeviceBuffer> buffer_;
+};
+
+class PinnedBuffer
+{
+public:
+    PinnedBuffer() = default;
+
+    ~PinnedBuffer()
+    {
+        if (mPtr)
+        {
+            cudaFreeHost(mPtr);
+        }
+    }
+
+    void ensure(size_t bytes)
+    {
+        if (bytes == 0)
+        {
+            if (mPtr)
+            {
+                cudaFreeHost(mPtr);
+                mPtr = nullptr;
+                capacity_ = 0;
+            }
+            return;
+        }
+        if (bytes > capacity_)
+        {
+            if (mPtr)
+            {
+                cudaFreeHost(mPtr);
+            }
+            if (cudaHostAlloc(&mPtr, bytes, cudaHostAllocDefault) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaHostAlloc failed.");
+            }
+            capacity_ = bytes;
+        }
+    }
+
+    void* data() const noexcept { return mPtr; }
+
+    size_t capacity() const noexcept { return capacity_; }
+
+    // Non-copyable, movable
+    PinnedBuffer(const PinnedBuffer&) = delete;
+    PinnedBuffer& operator=(const PinnedBuffer&) = delete;
+    PinnedBuffer(PinnedBuffer&& other) noexcept
+        : mPtr(other.mPtr)
+        , capacity_(other.capacity_)
+    {
+        other.mPtr = nullptr;
+        other.capacity_ = 0;
+    }
+    PinnedBuffer& operator=(PinnedBuffer&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (mPtr)
+            {
+                cudaFreeHost(mPtr);
+            }
+            mPtr = other.mPtr;
+            capacity_ = other.capacity_;
+            other.mPtr = nullptr;
+            other.capacity_ = 0;
+        }
+        return *this;
+    }
+
+private:
+    void* mPtr{nullptr};
+    size_t capacity_{0};
 };
 
 class CudaStream
@@ -692,63 +767,70 @@ struct SmallBatchRunner::Impl
             {
                 throw std::runtime_error("Small-model input tensor has unexpected rank.");
             }
-            if (inputDims.d[0] == -1)
+            
+            // Step A: Enforce dynamic dimensions - throw error if engine is static
+            if (inputDims.d[0] != -1)
             {
-                inputDims.d[0] = static_cast<int>(actualCount);
+                throw std::runtime_error("Loaded engine is static! Please generate a dynamic engine with trtexec --minShapes/--optShapes/--maxShapes.");
             }
-            const size_t engineBatch = inputDims.d[0] == -1 ? actualCount : static_cast<size_t>(inputDims.d[0]);
-            if (engineBatch < actualCount)
-            {
-                throw std::runtime_error("Small-model engine batch is smaller than requested work size.");
-            }
+            
+            // Step B: Remove padding logic - use exact batch size
+            const size_t engineBatch = actualCount;
             inputDims.d[0] = static_cast<int>(engineBatch);
             if (!exec->setInputShape(ctx.inputName().c_str(), inputDims))
             {
                 throw std::runtime_error("Failed to set small-model batch input shape.");
             }
 
-            inputDevice.ensure(engineBatch * inputElements * getElementSize(inputType));
-            policyDevice.ensure(engineBatch * policyElements * getElementSize(policyType));
-            valueDevice.ensure(engineBatch * valueElements * getElementSize(valueType));
+            // Step 2: Use persistent buffers
+            inputDevice_.ensure(engineBatch * inputElements * getElementSize(inputType));
+            policyDevice_.ensure(engineBatch * policyElements * getElementSize(policyType));
+            valueDevice_.ensure(engineBatch * valueElements * getElementSize(valueType));
+            
+            // Step 2: Ensure pinned host buffers
+            const size_t inputBytes = engineBatch * inputElements * getElementSize(inputType);
+            const size_t policyBytes = engineBatch * policyElements * getElementSize(policyType);
+            const size_t valueBytes = engineBatch * valueElements * getElementSize(valueType);
+            hostInputBuffer_.ensure(inputBytes);
+            hostOutputPolicy_.ensure(policyBytes);
+            hostOutputValue_.ensure(valueBytes);
 
-            std::vector<float> concatenated(engineBatch * inputElements, 0.0F);
-            for (size_t i = 0; i < engineBatch; ++i)
+            // Step 3: Input assembly - write directly into pinned buffer
+            // Step C: Simplified copy loops - no padding needed since engineBatch == actualCount
+            float* hostInputFloat = static_cast<float*>(hostInputBuffer_.data());
+            __half* hostInputHalf = static_cast<__half*>(hostInputBuffer_.data());
+            
+            for (size_t i = 0; i < actualCount; ++i)
             {
-                const auto& features = (i < actualCount) ? work[i].position.features : work.back().position.features;
-                std::copy(features.begin(), features.end(), concatenated.begin() + static_cast<ptrdiff_t>(i * inputElements));
-            }
-
-            std::vector<__half> inputHalf;
-            const void* inputHost = nullptr;
-            size_t inputBytes = 0;
-            if (inputType == nvinfer1::DataType::kFLOAT)
-            {
-                inputHost = concatenated.data();
-                inputBytes = concatenated.size() * sizeof(float);
-            }
-            else if (inputType == nvinfer1::DataType::kHALF)
-            {
-                inputHalf.resize(concatenated.size());
-                for (size_t i = 0; i < concatenated.size(); ++i)
+                const auto& features = work[i].position.features;
+                const size_t offset = i * inputElements;
+                
+                if (inputType == nvinfer1::DataType::kFLOAT)
                 {
-                    inputHalf[i] = __float2half(concatenated[i]);
+                    std::memcpy(hostInputFloat + offset, features.data(), inputElements * sizeof(float));
                 }
-                inputHost = inputHalf.data();
-                inputBytes = inputHalf.size() * sizeof(__half);
+                else if (inputType == nvinfer1::DataType::kHALF)
+                {
+                    // Convert directly into pinned buffer
+                    for (size_t j = 0; j < inputElements; ++j)
+                    {
+                        hostInputHalf[offset + j] = __float2half(features[j]);
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("Unsupported small-model batch input tensor type.");
+                }
             }
-            else
-            {
-                throw std::runtime_error("Unsupported small-model batch input tensor type.");
-            }
-
-            if (cudaMemcpyAsync(inputDevice.data(), inputHost, inputBytes, cudaMemcpyHostToDevice, stream->get()) != cudaSuccess)
+            
+            if (cudaMemcpyAsync(inputDevice_.data(), hostInputBuffer_.data(), inputBytes, cudaMemcpyHostToDevice, stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
             }
 
-            if (!exec->setTensorAddress(ctx.inputName().c_str(), inputDevice.data())
-                || !exec->setTensorAddress(ctx.policyName().c_str(), policyDevice.data())
-                || !exec->setTensorAddress(ctx.valueName().c_str(), valueDevice.data()))
+            if (!exec->setTensorAddress(ctx.inputName().c_str(), inputDevice_.data())
+                || !exec->setTensorAddress(ctx.policyName().c_str(), policyDevice_.data())
+                || !exec->setTensorAddress(ctx.valueName().c_str(), valueDevice_.data()))
             {
                 throw std::runtime_error("Failed to set small-model batch tensor addresses.");
             }
@@ -761,52 +843,12 @@ struct SmallBatchRunner::Impl
             const size_t totalPolicy = engineBatch * policyElements;
             const size_t totalValue = engineBatch * valueElements;
 
-            std::vector<float> policyFloat(totalPolicy);
-            std::vector<float> valueFloat(totalValue);
-            std::vector<__half> policyHalf;
-            std::vector<__half> valueHalf;
-
-            void* policyHost = nullptr;
-            size_t policyBytes = 0;
-            if (policyType == nvinfer1::DataType::kFLOAT)
-            {
-                policyHost = policyFloat.data();
-                policyBytes = policyFloat.size() * sizeof(float);
-            }
-            else if (policyType == nvinfer1::DataType::kHALF)
-            {
-                policyHalf.resize(totalPolicy);
-                policyHost = policyHalf.data();
-                policyBytes = policyHalf.size() * sizeof(__half);
-            }
-            else
-            {
-                throw std::runtime_error("Unsupported small-model batch policy tensor type.");
-            }
-
-            void* valueHost = nullptr;
-            size_t valueBytes = 0;
-            if (valueType == nvinfer1::DataType::kFLOAT)
-            {
-                valueHost = valueFloat.data();
-                valueBytes = valueFloat.size() * sizeof(float);
-            }
-            else if (valueType == nvinfer1::DataType::kHALF)
-            {
-                valueHalf.resize(totalValue);
-                valueHost = valueHalf.data();
-                valueBytes = valueHalf.size() * sizeof(__half);
-            }
-            else
-            {
-                throw std::runtime_error("Unsupported small-model batch value tensor type.");
-            }
-
-            if (cudaMemcpyAsync(policyHost, policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            // Step 3: D2H transfer - copy directly into pinned buffers
+            if (cudaMemcpyAsync(hostOutputPolicy_.data(), policyDevice_.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch policy D2H) failed.");
             }
-            if (cudaMemcpyAsync(valueHost, valueDevice.data(), valueBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            if (cudaMemcpyAsync(hostOutputValue_.data(), valueDevice_.data(), valueBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
             }
@@ -827,33 +869,59 @@ struct SmallBatchRunner::Impl
                 total_infer_ms_ += infer_ms;
             }
 
-            if (policyType == nvinfer1::DataType::kHALF)
-            {
-                policyFloat.resize(totalPolicy);
-                for (size_t i = 0; i < totalPolicy; ++i)
-                {
-                    policyFloat[i] = __half2float(policyHalf[i]);
-                }
-            }
-            if (valueType == nvinfer1::DataType::kHALF)
-            {
-                valueFloat.resize(totalValue);
-                for (size_t i = 0; i < totalValue; ++i)
-                {
-                    valueFloat[i] = __half2float(valueHalf[i]);
-                }
-            }
+            // Step 3: Distribution - read directly from pinned buffers
+            float* policyFloat = static_cast<float*>(hostOutputPolicy_.data());
+            __half* policyHalf = static_cast<__half*>(hostOutputPolicy_.data());
+            float* valueFloat = static_cast<float*>(hostOutputValue_.data());
+            __half* valueHalf = static_cast<__half*>(hostOutputValue_.data());
 
             for (size_t i = 0; i < actualCount; ++i)
             {
                 SmallPolicyValue result;
-                result.policy_logits.assign(
-                    policyFloat.begin() + static_cast<ptrdiff_t>(i * policyElements),
-                    policyFloat.begin() + static_cast<ptrdiff_t>((i + 1) * policyElements));
-                for (size_t j = 0; j < valueElements; ++j)
+                const size_t policyOffset = i * policyElements;
+                const size_t valueOffset = i * valueElements;
+                
+                // Read policy logits
+                result.policy_logits.reserve(policyElements);
+                if (policyType == nvinfer1::DataType::kFLOAT)
                 {
-                    result.wdl[j] = valueFloat[i * valueElements + j];
+                    result.policy_logits.assign(
+                        policyFloat + policyOffset,
+                        policyFloat + policyOffset + policyElements);
                 }
+                else if (policyType == nvinfer1::DataType::kHALF)
+                {
+                    result.policy_logits.resize(policyElements);
+                    for (size_t j = 0; j < policyElements; ++j)
+                    {
+                        result.policy_logits[j] = __half2float(policyHalf[policyOffset + j]);
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("Unsupported small-model batch policy tensor type.");
+                }
+                
+                // Read value/WDL
+                if (valueType == nvinfer1::DataType::kFLOAT)
+                {
+                    for (size_t j = 0; j < valueElements; ++j)
+                    {
+                        result.wdl[j] = valueFloat[valueOffset + j];
+                    }
+                }
+                else if (valueType == nvinfer1::DataType::kHALF)
+                {
+                    for (size_t j = 0; j < valueElements; ++j)
+                    {
+                        result.wdl[j] = __half2float(valueHalf[valueOffset + j]);
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("Unsupported small-model batch value tensor type.");
+                }
+                
                 work[i].promise->set_value(std::move(result));
             }
         }
@@ -875,16 +943,28 @@ struct SmallBatchRunner::Impl
         while (true)
         {
             std::unique_lock<std::mutex> lock(mutex);
-            cv.wait_for(lock, flush_timeout_, [this]() { return stop_worker_ || queue.size() >= flush_threshold_; });
+            
+            // Fix A: Two-stage wait strategy to prevent busy-wait
+            // Stage 1: Idle Wait - Sleep indefinitely until we have ANY work or stop signal
+            cv.wait(lock, [this]() { return stop_worker_ || !queue.empty(); });
+            
             if (stop_worker_ && queue.empty())
             {
                 break;
             }
-            if (queue.empty())
+            
+            // Stage 2: Batching Wait - If we have work but haven't filled the batch,
+            // wait a tiny bit more to accumulate efficient batches (latency vs. throughput tradeoff)
+            if (queue.size() < flush_threshold_)
             {
-                continue;
+                cv.wait_for(lock, flush_timeout_, [this]() { 
+                    return stop_worker_ || queue.size() >= flush_threshold_; 
+                });
             }
+            
+            // Stage 3: Process - Unlock before calling process() since it locks internally
             lock.unlock();
+            
             try
             {
                 process();
@@ -907,15 +987,20 @@ struct SmallBatchRunner::Impl
     size_t flush_threshold_{0};
     std::unique_ptr<nvinfer1::IExecutionContext> exec;
     std::unique_ptr<CudaStream> stream;
-    ResizableDeviceBuffer inputDevice;
-    ResizableDeviceBuffer policyDevice;
-    ResizableDeviceBuffer valueDevice;
+    // Step 2: Persistent buffers - moved from process() to avoid allocation overhead
+    ResizableDeviceBuffer inputDevice_;
+    ResizableDeviceBuffer policyDevice_;
+    ResizableDeviceBuffer valueDevice_;
+    PinnedBuffer hostInputBuffer_;
+    PinnedBuffer hostOutputPolicy_;
+    PinnedBuffer hostOutputValue_;
     mutable std::mutex mutex;
     std::condition_variable cv;
     bool stop_worker_{false};
     std::deque<SmallPending> queue;
     std::thread worker;
-    const std::chrono::milliseconds flush_timeout_{1};
+    // Phase C: Remove artificial timeout - set to minimal value to maximize GPU throughput
+    const std::chrono::microseconds flush_timeout_{1};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
     size_t batches_{0};

@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -140,8 +142,9 @@ public:
                             : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
         , rng_(std::random_device{}())
     {
-        const chess::Board board = apply_history(options_.request);
-        tree_.add_root(board, options_.request.history);
+        // Phase B: Store root board for state reconstruction during traversal
+        root_board_ = apply_history(options_.request);
+        tree_.add_root(root_board_, options_.request.history);
         const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
         tree_.reserve(expected_nodes);
         path_buffer_.reserve(64);
@@ -149,12 +152,21 @@ public:
 
     MctsSummary run()
     {
-        evaluate_node(0);
+        // Step B: Instrument MCTS root time to check if CPU board reconstruction is a bottleneck
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        // Phase B: Pass root board to evaluate_node
+        evaluate_node(0, root_board_);
         for (int i = 0; i < options_.simulations; ++i)
         {
             run_simulation();
         }
         refine_wdl_recursive();
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        std::cout << "[DEBUG] MCTS Root Time: " << dur << "ms | Simulations: " << options_.simulations << std::endl;
+        
         MctsSummary summary = summarize();
         if (small_batch_config_.enable_telemetry)
         {
@@ -176,6 +188,9 @@ private:
         path_buffer_.push_back(0);
         std::vector<int>& path = path_buffer_;
         int node_index = 0;
+        
+        // Phase B: Maintain local board state, initialized to root at start of simulation
+        chess::Board current_board = root_board_;
 
         while (true)
         {
@@ -183,14 +198,14 @@ private:
 
             if (node.terminal)
             {
-                float value = terminal_value(node.board).value_or(node.value_prior);
+                float value = terminal_value(current_board).value_or(node.value_prior);
                 backpropagate(path, value);
                 return;
             }
 
             if (!node.expanded || node.children.empty())
             {
-                float value = evaluate_node(node_index);
+                float value = evaluate_node(node_index, current_board);
                 backpropagate(path, value);
                 return;
             }
@@ -198,11 +213,13 @@ private:
             const int child_index = select_child(node_index);
             if (child_index < 0)
             {
-                float value = evaluate_node(node_index);
+                float value = evaluate_node(node_index, current_board);
                 backpropagate(path, value);
                 return;
             }
 
+            // Phase B: Apply the move to our local board tracker when selecting a child
+            current_board.makeMove(tree_.nodes[child_index].move_from_parent);
             node_index = child_index;
             path.push_back(node_index);
         }
@@ -253,7 +270,7 @@ private:
         }
     }
 
-    float evaluate_node(int node_index)
+    float evaluate_node(int node_index, const chess::Board& board_state)
     {
         TreeNode& node = tree_.nodes[node_index];
         if (node.expanded && !node.children.empty())
@@ -261,7 +278,8 @@ private:
             return node.value_prior;
         }
 
-        if (auto terminal = terminal_value(node.board))
+        // Phase B: Use passed board_state instead of node.board
+        if (auto terminal = terminal_value(board_state))
         {
             node.expanded = true;
             node.value_prior = *terminal;
@@ -280,7 +298,8 @@ private:
             return node.value_prior;
         }
 
-        auto encoded = acquire_small_encoding(node.history, node.board);
+        // Phase B: Use passed board_state for encoding
+        auto encoded = acquire_small_encoding(node.history, board_state);
         auto ticket = small_batch_runner_->enqueue(*encoded);
         SmallPolicyValue eval = ticket.get();
         if (eval.policy_logits.size() != chessrl::small_policy_size())
@@ -288,10 +307,12 @@ private:
             throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
         }
 
-        node.wdl = orient_small_wdl(node.board, eval.wdl);
+        // Phase B: Use passed board_state for WDL orientation
+        node.wdl = orient_small_wdl(board_state, eval.wdl);
         node.value_prior = node.wdl[0] - node.wdl[2];
 
-        std::vector<MovePrior> priors = compute_priors(node.board, eval);
+        // Phase B: Use passed board_state for computing priors
+        std::vector<MovePrior> priors = compute_priors(board_state, eval);
         if (priors.empty())
         {
             node.terminal = true;
@@ -304,7 +325,8 @@ private:
             apply_dirichlet_noise(priors);
         }
 
-        const chess::Board parent_board = node.board;
+        // Phase B: Use passed board_state as parent board
+        const chess::Board parent_board = board_state;
         const float value_prior = node.value_prior;
         for (const auto& entry : priors)
         {
@@ -558,7 +580,8 @@ private:
             const int child_index = root.children[i];
             const TreeNode& child = tree_.nodes[child_index];
             const chess::Move move = root.child_moves[i];
-            const std::string uci = chess::uci::moveToUci(move, root.board.chess960());
+            // Phase B: Use root_board_ instead of root.board
+            const std::string uci = chess::uci::moveToUci(move, root_board_.chess960());
 
             auto [it, inserted] = index.emplace(uci, aggregated.size());
             if (inserted)
@@ -665,7 +688,8 @@ private:
             detail.average_value = entry.visit_sum > 0 ? -entry.value_sum / static_cast<float>(entry.visit_sum) : 0.0F;
             if (entry.representative_child >= 0)
             {
-                detail.continuation = principal_variation(tree_, entry.representative_child);
+                // Phase B: Pass root_board_ to principal_variation
+                detail.continuation = principal_variation(tree_, entry.representative_child, root_board_);
             }
             summary.rollouts.push_back(std::move(detail));
         }
@@ -697,6 +721,7 @@ private:
 
     MctsOptions options_;
     SearchTree tree_;
+    chess::Board root_board_; // Phase B: Store root board for state reconstruction
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
     single::SmallBatchConfig small_batch_config_;
@@ -733,18 +758,37 @@ std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_opt
 
     auto shared_runner = std::make_shared<single::SmallBatchRunner>(shared_config);
     std::vector<MctsSummary> summaries(batch_options.size());
+    
+    // Step 1: Oversubscription - Launch 256 workers to keep GPU busy
+    // Since these threads spend 99% of their time sleeping (waiting for GPU),
+    // it is safe to run 256 threads on an 8-core CPU.
+    const size_t num_threads = 256;
+    std::atomic<size_t> next_job_index{0};
     std::vector<std::thread> workers;
-    workers.reserve(batch_options.size());
+    workers.reserve(num_threads);
 
-    for (size_t i = 0; i < batch_options.size(); ++i)
+    // Worker routine: fetch jobs from the queue until all are processed
+    auto worker_routine = [&batch_options, shared_runner, &summaries, &next_job_index]() {
+        while (true)
+        {
+            const size_t job_id = next_job_index.fetch_add(1);
+            if (job_id >= batch_options.size())
+            {
+                break;
+            }
+            
+            SmallMctsRunner runner(batch_options[job_id], shared_runner);
+            summaries[job_id] = runner.run();
+        }
+    };
+
+    // Spawn only num_threads workers
+    for (size_t i = 0; i < num_threads; ++i)
     {
-        workers.emplace_back(
-            [runner_options = std::move(batch_options[i]), shared_runner, &summaries, i]() mutable {
-                SmallMctsRunner runner(std::move(runner_options), shared_runner);
-                summaries[i] = runner.run();
-            });
+        workers.emplace_back(worker_routine);
     }
 
+    // Join all workers
     for (auto& worker : workers)
     {
         if (worker.joinable())
