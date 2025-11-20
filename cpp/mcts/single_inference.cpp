@@ -49,7 +49,7 @@ public:
     {
         if (severity <= Severity::kWARNING)
         {
-            std::cout << "[TensorRT] " << msg << std::endl;
+            std::clog << "[TensorRT] " << msg << std::endl;
         }
     }
 };

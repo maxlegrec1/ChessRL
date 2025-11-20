@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -152,9 +151,6 @@ public:
 
     MctsSummary run()
     {
-        // Step B: Instrument MCTS root time to check if CPU board reconstruction is a bottleneck
-        auto start = std::chrono::high_resolution_clock::now();
-        
         // Phase B: Pass root board to evaluate_node
         evaluate_node(0, root_board_);
         for (int i = 0; i < options_.simulations; ++i)
@@ -162,11 +158,6 @@ public:
             run_simulation();
         }
         refine_wdl_recursive();
-        
-        auto end = std::chrono::high_resolution_clock::now();
-        auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "[DEBUG] MCTS Root Time: " << dur << "ms | Simulations: " << options_.simulations << std::endl;
-        
         MctsSummary summary = summarize();
         if (small_batch_config_.enable_telemetry)
         {
