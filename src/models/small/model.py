@@ -136,7 +136,7 @@ class BT4(torch.nn.Module):
         self.value_head_q = ValueHeadQ(d_model)
         #self.final_decoder = PolicyRefinerDecoder(1929,64*4)
 
-    def forward(self,inp,compute_loss = False,step = None):
+    def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step = None):
         x = inp[0]
         b = x.shape[0]
         seq_len = x.shape[1]
@@ -185,6 +185,8 @@ class BT4(torch.nn.Module):
         policy = policy #+ self.final_decoder(policy+self.positional_policy(policy),board_embeddings+self.positional_board(board_embeddings))
 
 
+        outputs = (policy, value_h, value_h_q)
+
         if compute_loss:
             targets = inp[1]
             true_values = inp[3]
@@ -218,6 +220,8 @@ class BT4(torch.nn.Module):
                 loss_q = torch.tensor(0.0, device=value_h_q.device, requires_grad=True)
             
             return policy, value_h, value_h_q, loss_policy, loss_value,loss_q, targets, z,q
+        if return_all:
+            return outputs
         return policy
 
     def get_move_from_fen_no_thinking(self, fen, T = 1,device = "cuda",force_legal = True,return_probs = False, use_fp16: bool = False):

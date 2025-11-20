@@ -24,6 +24,7 @@ dependencies = [
     "onnxruntime>=1.23.2",
     "pycuda>=2025.1.2",
     "pyarrow>=17.0.0",
+    "pyyaml>=6.0.2",
 ]
 
 [[tool.uv.index]]

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import List
+from uuid import uuid4
 
 import bulletchess
 from bulletchess import CHECKMATE, DRAW
+import chess
+import chess.pgn
 
 from src.mcts import SmallMCTS
 
@@ -24,6 +29,7 @@ TEMPERATURE_AT_ROOT = 1.4
 class BoardSlot:
     board: bulletchess.Board
     ply_count: int = 0
+    move_history: List[str] = field(default_factory=list)
 
 
 class SelfPlayLoop:
@@ -42,6 +48,8 @@ class SelfPlayLoop:
         self.metrics = metrics
         self.engine_watcher = engine_watcher
         self.mcts = SmallMCTS(engine_path=engine_watcher.engine_path or "model.trt")
+        self._pgn_dir = Path("pgns")
+        self._pgn_dir.mkdir(parents=True, exist_ok=True)
 
         self.boards: List[BoardSlot] = [BoardSlot(board=bulletchess.Board()) for _ in range(board_count)]
         self._logger = logging.getLogger(__name__)
@@ -86,24 +94,31 @@ class SelfPlayLoop:
             outcome = results[idx]
 
             value = _coerce_value(outcome.get("value"))
-            move_uci = _policy_argmax(outcome.get("policy"), outcome.get("action"))
+            policy_move = _policy_argmax(outcome.get("policy"))
+            action = outcome.get("action")
+            move_uci = str(action) if action else None
 
             if move_uci is None:
+                self._logger.warning(f"No move found for FEN: {fen}")
                 legal_moves = list(board.legal_moves())
                 if not legal_moves:
                     finished_games += 1
+                    self._write_pgn(slot, board)
                     self.boards[idx] = BoardSlot(board=bulletchess.Board())
                     continue
                 move_uci = legal_moves[0].uci()
 
-            records.append(SelfPlayRecord(fen=fen, value=value, policy=move_uci))
+            record_policy = policy_move or move_uci
+            records.append(SelfPlayRecord(fen=fen, value=value, policy=record_policy))
 
             move = bulletchess.Move.from_uci(move_uci)
             board.apply(move)
             slot.ply_count += 1
+            slot.move_history.append(move_uci)
 
             if board in CHECKMATE or board in DRAW:
                 finished_games += 1
+                self._write_pgn(slot, board)
                 self.boards[idx] = BoardSlot(board=bulletchess.Board())
 
         if records:
@@ -114,30 +129,62 @@ class SelfPlayLoop:
         if finished_games:
             self.metrics.record_game_finished(finished_games)
 
+    # ------------------------------------------------------------------ #
+    # PGN helpers
+    # ------------------------------------------------------------------ #
+    def _write_pgn(self, slot: BoardSlot, final_board: bulletchess.Board) -> None:
+        if not slot.move_history:
+            return
 
-def _coerce_value(value_obj) -> float:
-    if value_obj is None:
-        return 0.0
-    if isinstance(value_obj, (list, tuple)):
-        if not value_obj:
-            return 0.0
-        return float(value_obj[0])
-    return float(value_obj)
+        game = chess.pgn.Game()
+        now = datetime.utcnow()
+        game.headers["Event"] = "Self-Play"
+        game.headers["Site"] = "Local"
+        game.headers["Date"] = now.strftime("%Y.%m.%d")
+        game.headers["Round"] = "-"
+        game.headers["White"] = "SelfPlay"
+        game.headers["Black"] = "SelfPlay"
+        game.headers["Result"] = self._result_from_board(final_board)
 
-
-def _policy_argmax(policy_dict, fallback_action) -> str | None:
-    if isinstance(policy_dict, dict) and policy_dict:
+        node = game
+        chess_board = chess.Board()
         try:
-            return list(policy_dict.keys())[0]
-        except (KeyError, IndexError):
-            return None
-    if isinstance(policy_dict, (list, tuple)) and policy_dict:
-        # handle list of (move, prob)
-        move = policy_dict[0][0]
-        return str(move)
-    if fallback_action:
-        return str(fallback_action)
-    return None
+            for move_uci in slot.move_history:
+                chess_move = chess.Move.from_uci(move_uci)
+                chess_board.push(chess_move)
+                node = node.add_variation(chess_move)
+        except ValueError:
+            self._logger.warning("Failed to encode PGN move %s; skipping PGN export", move_uci)
+            return
+
+        game_id = uuid4().hex
+        pgn_path = self._pgn_dir / f"{game_id}.pgn"
+        try:
+            with pgn_path.open("w", encoding="utf-8") as handle:
+                exporter = chess.pgn.FileExporter(handle)
+                game.accept(exporter)
+        except OSError as exc:
+            self._logger.warning("Failed to write PGN %s: %s", pgn_path, exc)
+
+    def _result_from_board(self, board: bulletchess.Board) -> str:
+        if board in CHECKMATE:
+            return "0-1" if board.turn == bulletchess.WHITE else "1-0"
+        if board in DRAW:
+            return "1/2-1/2"
+        return "*"
+
+
+def _coerce_value(value_obj) -> tuple[float, float, float]:
+
+    vals = list(value_obj)
+    return (float(vals[0]), float(vals[1]), float(vals[2]))
+
+
+
+def _policy_argmax(policy_dict) -> str | None:
+
+    return list(policy_dict.keys())[0]
+
 
 
 __all__ = ["SelfPlayLoop"]

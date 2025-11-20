@@ -1,0 +1,26 @@
+device: cuda
+batch_size: 256
+learning_rate: 1.0e-5
+weight_decay: 0.0
+log_every: 1
+amp_dtype: float16
+run_name: null
+
+checkpoint:
+  dir: checkpoints
+  every_steps: 1000
+  keep_last: 5
+  build_script: build_trt.sh
+  engine_dir: engines
+  iteration_file: src/self_play/.iteration
+
+data:
+  dataset_path: src/self_play/selfplay_buffer.parquet
+  reload_seconds: 60
+
+wandb:
+  project: self_play
+  entity: null
+  run_name: null
+  enabled: true
+

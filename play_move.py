@@ -202,15 +202,15 @@ if __name__ == "__main__":
 
 
     model1 = BT4().to("cuda")
-    model1.load_state_dict(torch.load('src/models/small/model.pt'),strict=False)
-    # model1.load_state_dict(torch.load('checkpoints/checkpoint_step_9000.pt',weights_only=False)["model_state_dict"])
+    # model1.load_state_dict(torch.load('src/models/small/model.pt'),strict=False)
+    model1.load_state_dict(torch.load('checkpoints/step_00001000.pt',weights_only=False)["model"])
     
-    from src.models.small.inference_mcts import SmallMCTSInference
-    model2 = SmallMCTSInference(engine_path="model_dynamic.trt",cpuct=1.0, simulations=1000)
+    # from src.models.small.inference_mcts import SmallMCTSInference
+    # model2 = SmallMCTSInference(engine_path="model_dynamic.trt",cpuct=1.0, simulations=1000)
 
     # from src.models.leela import BT4 as LeelaBT4
     # model2 = LeelaBT4().to("cuda")
     # model2.load_state_dict(torch.load('src/models/leela/model.pt'),strict=False)
 
-    score = main_model_vs_stockfish(model=model2,model1_name="run",device="cuda",num_games=20,temp=1, elo= 2800)
+    score = main_model_vs_stockfish(model=model1,model1_name="run",device="cuda",num_games=20,temp=1, elo= 1400)
     print(score)

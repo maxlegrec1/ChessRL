@@ -14,7 +14,7 @@ class EngineWatcher:
         self.poll_interval = poll_interval
         self._last_check = 0.0
         self._last_mtime = 0.0
-        self._engine_path: str = "model.trt"
+        self._engine_path: str = "model_dynamic_initial.trt"
 
         # Load initial state if possible.
         self._refresh(force=True)
