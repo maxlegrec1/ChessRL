@@ -23,6 +23,7 @@ dependencies = [
     "onnx-graphsurgeon>=0.5.8",
     "onnxruntime>=1.23.2",
     "pycuda>=2025.1.2",
+    "pyarrow>=17.0.0",
 ]
 
 [[tool.uv.index]]
