@@ -2,13 +2,15 @@ device: cuda
 batch_size: 256
 learning_rate: 1.0e-5
 weight_decay: 0.0
+beta1: 0.9
+beta2: 0.999
 log_every: 1
 amp_dtype: float16
 run_name: null
 
 checkpoint:
   dir: checkpoints
-  every_steps: 1000
+  every_steps: 500
   keep_last: 5
   build_script: build_trt.sh
   engine_dir: engines

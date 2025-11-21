@@ -46,6 +46,7 @@ class Trainer:
             self.model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
         )
         self.scaler = amp.GradScaler(device = self.device)
 
@@ -153,7 +154,9 @@ class Trainer:
         )
 
         # Calculate policy entropy: -sum(p * log(p + eps))
-        policy_probs = F.softmax(policy_logits, dim=-1)
+        # Convert to float32 for accurate entropy calculation
+        policy_logits_f32 = policy_logits.float()
+        policy_probs = F.softmax(policy_logits_f32, dim=-1)
         eps = 1e-8
         policy_entropy = -(policy_probs * torch.log(policy_probs + eps)).sum(dim=-1).mean().item()
 

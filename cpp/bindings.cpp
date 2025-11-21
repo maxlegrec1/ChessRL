@@ -60,7 +60,10 @@ PYBIND11_MODULE(_inference_cpp, m)
            float cpuct,
            float temperature,
            const std::string& engine_path,
-           float temperature_at_root) {
+           float temperature_at_root,
+           bool use_dirichlet,
+           float dirichlet_alpha,
+           float dirichlet_epsilon) {
             std::vector<chessrl::mcts::MctsOptions> requests;
             requests.reserve(fens.size());
             for (const auto& fen : fens)
@@ -72,6 +75,9 @@ PYBIND11_MODULE(_inference_cpp, m)
                 options.temperature = temperature;
                 options.small_engine_path = engine_path;
                 options.temperature_at_root = temperature_at_root;
+                options.use_dirichlet = use_dirichlet;
+                options.dirichlet_alpha = dirichlet_alpha;
+                options.dirichlet_epsilon = dirichlet_epsilon;
                 requests.push_back(std::move(options));
             }
 
@@ -90,6 +96,9 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("temperature") = 1.0F,
         py::arg("engine_path") = std::string("model.trt"),
         py::arg("temperature_at_root") = 0.0F,
+        py::arg("use_dirichlet") = false,
+        py::arg("dirichlet_alpha") = 0.3F,
+        py::arg("dirichlet_epsilon") = 0.25F,
         "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
 }
 

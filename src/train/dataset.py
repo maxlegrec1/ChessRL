@@ -61,17 +61,27 @@ class SelfPlayDataset:
                 self._last_load = now
                 return
 
-        table = pq.read_table(self.path)
-        if "fen" not in table.column_names or "value" not in table.column_names:
-            raise RuntimeError(f"Parquet file {self.path} missing required columns.")
+        # Retry loop for reading the parquet file to handle race conditions
+        max_retries = 50
+        for attempt in range(max_retries):
+            try:
+                table = pq.read_table(self.path)
+                if "fen" not in table.column_names or "value" not in table.column_names:
+                    raise RuntimeError(f"Parquet file {self.path} missing required columns.")
 
-        self._fens = table.column("fen").to_pylist()
-        raw_values = table.column("value").to_pylist()
-        self._values = [
-            _ensure_tuple(row) for row in raw_values  # type: ignore[arg-type]
-        ]
-        self._policies = table.column("policy").to_pylist()
-        self._size = len(self._fens)
+                self._fens = table.column("fen").to_pylist()
+                raw_values = table.column("value").to_pylist()
+                self._values = [
+                    _ensure_tuple(row) for row in raw_values  # type: ignore[arg-type]
+                ]
+                self._policies = table.column("policy").to_pylist()
+                self._size = len(self._fens)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"Failed to reload dataset after {max_retries} attempts: {e}")
+                    raise e
+                time.sleep(0.1)
 
         self._last_load = time.monotonic()
         try:

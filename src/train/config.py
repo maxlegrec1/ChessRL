@@ -37,6 +37,8 @@ class TrainingConfig:
     batch_size: int = 256
     learning_rate: float = 1e-5
     weight_decay: float = 0.0
+    beta1: float = 0.9
+    beta2: float = 0.999
     log_every: int = 50
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)

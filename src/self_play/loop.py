@@ -23,6 +23,9 @@ SIMULATIONS = 600
 CPUCT = 1.0
 TEMPERATURE = 1.0
 TEMPERATURE_AT_ROOT = 1.4
+USE_DIRICHLET = True
+DIRICHLET_ALPHA = 0.3
+DIRICHLET_EPSILON = 0.25
 
 
 @dataclass
@@ -72,6 +75,9 @@ class SelfPlayLoop:
                 cpuct=CPUCT,
                 temperature_at_root=TEMPERATURE_AT_ROOT,
                 engine_path=engine_override,
+                use_dirichlet=USE_DIRICHLET,
+                dirichlet_alpha=DIRICHLET_ALPHA,
+                dirichlet_epsilon=DIRICHLET_EPSILON,
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             self._logger.exception("SmallMCTS batch failed: %s", exc)

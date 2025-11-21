@@ -25,6 +25,9 @@ class _BaseMCTSConfig:
     cpuct: float
     temperature: float
     temperature_at_root: float
+    use_dirichlet: bool
+    dirichlet_alpha: float
+    dirichlet_epsilon: float
 
 
 class _BaseMCTS:
@@ -36,6 +39,9 @@ class _BaseMCTS:
         cpuct: float = 1.5,
         temperature: float = 1.0,
         temperature_at_root: float = 0.0,
+        use_dirichlet: bool = False,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
     ) -> None:
         self._config = _BaseMCTSConfig(
             engine_path=engine_path,
@@ -43,6 +49,9 @@ class _BaseMCTS:
             cpuct=cpuct,
             temperature=temperature,
             temperature_at_root=temperature_at_root,
+            use_dirichlet=use_dirichlet,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
         )
 
     def _prepare_call(
@@ -53,6 +62,9 @@ class _BaseMCTS:
         temperature: float | None,
         temperature_at_root: float | None,
         engine_path: str | None,
+        use_dirichlet: bool | None,
+        dirichlet_alpha: float | None,
+        dirichlet_epsilon: float | None,
     ) -> _BaseMCTSConfig:
         cfg = self._config
         return _BaseMCTSConfig(
@@ -63,6 +75,9 @@ class _BaseMCTS:
             temperature_at_root=(
                 temperature_at_root if temperature_at_root is not None else cfg.temperature_at_root
             ),
+            use_dirichlet=use_dirichlet if use_dirichlet is not None else cfg.use_dirichlet,
+            dirichlet_alpha=dirichlet_alpha if dirichlet_alpha is not None else cfg.dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon if dirichlet_epsilon is not None else cfg.dirichlet_epsilon,
         )
 
     @staticmethod
@@ -97,6 +112,9 @@ class SmallMCTS(_BaseMCTS):
         cpuct: float = 1.5,
         temperature: float = 1.0,
         temperature_at_root: float = 0.0,
+        use_dirichlet: bool = False,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
     ) -> None:
         super().__init__(
             engine_path,
@@ -104,6 +122,9 @@ class SmallMCTS(_BaseMCTS):
             cpuct=cpuct,
             temperature=temperature,
             temperature_at_root=temperature_at_root,
+            use_dirichlet=use_dirichlet,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
         )
 
     def run(
@@ -115,6 +136,9 @@ class SmallMCTS(_BaseMCTS):
         temperature: float | None = None,
         temperature_at_root: float | None = None,
         engine_path: str | None = None,
+        use_dirichlet: bool | None = None,
+        dirichlet_alpha: float | None = None,
+        dirichlet_epsilon: float | None = None,
     ) -> list[dict[str, object]]:
         if isinstance(fens, str):
             raise TypeError("SmallMCTS.run requires a sequence of FEN strings, not a single string.")
@@ -129,6 +153,9 @@ class SmallMCTS(_BaseMCTS):
             temperature=temperature,
             temperature_at_root=temperature_at_root,
             engine_path=engine_path,
+            use_dirichlet=use_dirichlet,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
         )
         payloads = _cpp.small_mcts_search_batch(
             fen_list,
@@ -137,6 +164,9 @@ class SmallMCTS(_BaseMCTS):
             cfg.temperature,
             cfg.engine_path,
             cfg.temperature_at_root,
+            cfg.use_dirichlet,
+            cfg.dirichlet_alpha,
+            cfg.dirichlet_epsilon,
         )
         return [self._format_result(payload) for payload in payloads]
 
