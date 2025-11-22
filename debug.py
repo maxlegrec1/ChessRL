@@ -15,12 +15,12 @@ import numpy as np
 from src.models.small.model import BT4
 import torch
 model = BT4().to("cuda")
-ckpt = torch.load("checkpoints/step_00005000.pt",weights_only=False)
+ckpt = torch.load("checkpoints/step_00010000.pt",weights_only=False)
 model.load_state_dict(ckpt["model"])
 model.eval()
 
 
-fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+fen = "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3"
 
 _,probs = model.get_move_from_fen_no_thinking(fen,1,device="cuda",return_probs=True)
 
@@ -37,7 +37,7 @@ for i in range(10):
     print(f"{policy_index[indices[0][i].item()]}: {sorted_probs[0][i].item()}")
 
 
-small = SmallMCTS(engine_path="engines/step_00005000.trt", temperature=1, cpuct=1.0)
+small = SmallMCTS(engine_path="engines/step_00010000.trt", temperature=1, cpuct=1.0)
 
 res = small.run([fen] * 1, temperature=1, simulations=600, cpuct=1.0,temperature_at_root=1.4,use_dirichlet=True,dirichlet_alpha=0.3,dirichlet_epsilon=0.25)
 

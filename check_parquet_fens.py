@@ -8,11 +8,16 @@ print(len(set_fens))
 print(len(fens))
 
 # print(set_fens)
-
+#print table keys
+# print(table.schema.names)
 values = table.column("value").to_pylist()
-# print(values)
+moves = table.column("policy").to_pylist()
+
 
 # print the number of rows where index 0 is highest in values, the number of rows where index 1 is highest in values, and the number of rows where index 2 is highest in values
-print(len([val for val in values if val[0] > val[1] and val[0] > val[2]]))
-print(len([val for val in values if val[1] > val[0] and val[1] > val[2]]))
-print(len([val for val in values if val[2] > val[0] and val[2] > val[1]]))
+val_skewed = [(fen, val, move) for fen, val, move in zip(fens, values, moves) if val[0] > 0.7]
+print(len(val_skewed))
+# print(val_skewed[:10])
+val_skewed = [(fen, val, move) for fen, val, move in zip(fens, values, moves) if val[2] > 0.7]
+print(len(val_skewed))
+print(val_skewed[:10])

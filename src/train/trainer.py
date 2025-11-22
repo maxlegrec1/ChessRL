@@ -140,7 +140,7 @@ class Trainer:
                 value_q_loss = value_logits.sum() * 0.0
                 value_accuracy = torch.tensor(0.0, device=self.device)
 
-            total_loss = policy_loss + value_loss + value_q_loss
+            total_loss = policy_loss + 4*value_loss + 100* value_q_loss
 
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)

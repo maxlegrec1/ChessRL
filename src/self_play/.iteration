@@ -9,3 +9,13 @@ iteration,engine_path
 4000,/mnt/2tb_2/ChessRL/engines/step_00004000.trt
 4500,/mnt/2tb_2/ChessRL/engines/step_00004500.trt
 5000,/mnt/2tb_2/ChessRL/engines/step_00005000.trt
+5500,/mnt/2tb_2/ChessRL/engines/step_00005500.trt
+6000,/mnt/2tb_2/ChessRL/engines/step_00006000.trt
+6500,/mnt/2tb_2/ChessRL/engines/step_00006500.trt
+7000,/mnt/2tb_2/ChessRL/engines/step_00007000.trt
+7500,/mnt/2tb_2/ChessRL/engines/step_00007500.trt
+8000,/mnt/2tb_2/ChessRL/engines/step_00008000.trt
+8500,/mnt/2tb_2/ChessRL/engines/step_00008500.trt
+9000,/mnt/2tb_2/ChessRL/engines/step_00009000.trt
+9500,/mnt/2tb_2/ChessRL/engines/step_00009500.trt
+10000,/mnt/2tb_2/ChessRL/engines/step_00010000.trt

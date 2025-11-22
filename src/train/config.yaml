@@ -1,6 +1,6 @@
 device: cuda
-batch_size: 256
-learning_rate: 1.0e-5
+batch_size: 512
+learning_rate: 5.0e-5
 weight_decay: 0.0
 beta1: 0.9
 beta2: 0.999

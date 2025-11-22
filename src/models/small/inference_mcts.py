@@ -6,7 +6,7 @@ class SmallMCTSInference():
         self.cpuct = cpuct
         self.mcts = SmallMCTS(engine_path=engine_path, temperature=1, cpuct=cpuct)
     def get_move_from_fen_no_thinking(self, fen, T = 1,device = "cuda",force_legal = True,return_probs = False, use_fp16: bool = False):
-        res = self.mcts.run([fen], temperature=T, simulations=self.simulations,cpuct=self.cpuct)
+        res = self.mcts.run([fen], temperature=T, simulations=self.simulations,cpuct=self.cpuct, temperature_at_root=1.4, use_dirichlet=False)
         action = res[0]["action"]
         return action
 
