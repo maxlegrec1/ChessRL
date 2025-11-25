@@ -26,6 +26,7 @@ TEMPERATURE_AT_ROOT = 1.4
 USE_DIRICHLET = True
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPSILON = 0.25
+MAX_PLY = 600
 
 
 @dataclass
@@ -33,6 +34,7 @@ class BoardSlot:
     board: bulletchess.Board
     ply_count: int = 0
     move_history: List[str] = field(default_factory=list)
+    pending_records: List[SelfPlayRecord] = field(default_factory=list)
 
 
 class SelfPlayLoop:
@@ -91,7 +93,7 @@ class SelfPlayLoop:
             )
             return
 
-        records: List[SelfPlayRecord] = []
+        records_to_flush: List[SelfPlayRecord] = []
         finished_games = 0
 
         for idx, slot in enumerate(self.boards):
@@ -99,6 +101,8 @@ class SelfPlayLoop:
             fen = fens[idx]
             outcome = results[idx]
 
+            # We still get value/policy from MCTS for monitoring/debug, 
+            # but we will overwrite value with the game outcome later.
             value = _coerce_value(outcome.get("value"))
             policy_move = _policy_argmax(outcome.get("policy"))
             action = outcome.get("action")
@@ -108,9 +112,10 @@ class SelfPlayLoop:
                 self._logger.warning(f"No move found for FEN: {fen}")
                 legal_moves = list(board.legal_moves())
                 if not legal_moves:
+                    # Game over (stalemate or checkmate not caught?)
+                    # Treat as finished.
+                    self._finish_game(slot, records_to_flush)
                     finished_games += 1
-                    self._write_pgn(slot, board)
-                    self.boards[idx] = BoardSlot(board=bulletchess.Board())
                     continue
                 move_uci = legal_moves[0].uci()
 
@@ -121,25 +126,98 @@ class SelfPlayLoop:
                 record_policy = record_policy[:-1]
             else:
                 record_policy = record_policy
-            records.append(SelfPlayRecord(fen=fen, value=value, policy=record_policy))
+            
+            # Store record in pending list
+            slot.pending_records.append(SelfPlayRecord(fen=fen, value=value, policy=record_policy))
 
             move = bulletchess.Move.from_uci(move_uci)
             board.apply(move)
             slot.ply_count += 1
             slot.move_history.append(move_uci)
 
-            if board in CHECKMATE or board in DRAW:
+            # Check termination
+            is_over = (board in CHECKMATE) or (board in DRAW) or (slot.ply_count >= MAX_PLY)
+            
+            if is_over:
                 finished_games += 1
-                self._write_pgn(slot, board)
-                self.boards[idx] = BoardSlot(board=bulletchess.Board())
+                self._finish_game(slot, records_to_flush)
 
-        if records:
-            self.buffer.add_records(records)
-            self.metrics.record_positions(len(records))
+        if records_to_flush:
+            self.buffer.add_records(records_to_flush)
+            self.metrics.record_positions(len(records_to_flush))
             self.metrics.update_buffer_fill(self.buffer.fill_ratio())
 
         if finished_games:
             self.metrics.record_game_finished(finished_games)
+
+    def _finish_game(self, slot: BoardSlot, flush_list: List[SelfPlayRecord]) -> None:
+        """Process a finished game: determine outcome, backfill values, and reset slot."""
+        board = slot.board
+        
+        # Determine outcome z from perspective of White
+        # 1.0 = White Win, 0.0 = Black Win, 0.5 = Draw
+        if board in CHECKMATE:
+            # If it's checkmate and it's White's turn, White lost (0.0). 
+            # If Black's turn, Black lost (White won, 1.0).
+            # Wait, bulletchess.CHECKMATE means the side to move is in checkmate?
+            # Usually yes.
+            if board.turn == bulletchess.WHITE:
+                z = 0.0 # White lost
+            else:
+                z = 1.0 # White won
+        elif (board in DRAW) or (slot.ply_count >= MAX_PLY):
+            z = 0.5
+        else:
+            # Should not happen unless forced termination
+            z = 0.5
+
+        self._write_pgn(slot, board)
+
+        # Backfill values
+        # Value in SelfPlayRecord is [Win, Draw, Loss] relative to side to move.
+        # If side to move is White:
+        #   Win=1 -> z=1.0
+        #   Loss=1 -> z=0.0
+        #   Draw=1 -> z=0.5
+        # If side to move is Black:
+        #   Win=1 -> z=0.0 (Black wins)
+        #   Loss=1 -> z=1.0 (White wins)
+        #   Draw=1 -> z=0.5
+        
+        for record in slot.pending_records:
+            # Parse FEN to check turn
+            # We can do a quick string check
+            is_white_turn = " w " in record.fen
+            
+            if is_white_turn:
+                if z == 1.0:
+                    new_val = (1.0, 0.0, 0.0) # Win
+                elif z == 0.0:
+                    new_val = (0.0, 0.0, 1.0) # Loss
+                else:
+                    new_val = (0.0, 1.0, 0.0) # Draw
+            else:
+                if z == 0.0:
+                    new_val = (1.0, 0.0, 0.0) # Win (Black wins)
+                elif z == 1.0:
+                    new_val = (0.0, 0.0, 1.0) # Loss (White wins)
+                else:
+                    new_val = (0.0, 1.0, 0.0) # Draw
+            
+            # Create new record since SelfPlayRecord is frozen
+            new_record = SelfPlayRecord(
+                fen=record.fen,
+                value=new_val,
+                policy=record.policy
+            )
+            flush_list.append(new_record)
+            
+        # Reset slot
+        slot.board = bulletchess.Board()
+        slot.ply_count = 0
+        slot.move_history.clear()
+        slot.pending_records.clear()
+
 
     # ------------------------------------------------------------------ #
     # PGN helpers

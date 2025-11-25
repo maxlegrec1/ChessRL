@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--boards", type=int, default=128, help="Number of parallel boards.")
     parser.add_argument("--buffer-path", type=Path, default=DEFAULT_BUFFER, help="Path to parquet buffer.")
     parser.add_argument("--iteration-file", type=Path, default=DEFAULT_ITERATION, help="Path to .iteration CSV.")
-    parser.add_argument("--poll-seconds", type=int, default=600, help="Seconds between iteration file checks.")
+    parser.add_argument("--poll-seconds", type=int, default=300, help="Seconds between iteration file checks.")
     parser.add_argument(
         "--flush-interval",
         type=int,
