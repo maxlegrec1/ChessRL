@@ -11,6 +11,9 @@ import pyarrow.parquet as pq
 from src.models.small.fen_encoder import fen_to_tensor
 from src.models.small.vocab import policy_index, policy_to_idx
 
+import random
+import chess
+
 # Fallback index when a move is not present in the vocabulary.
 NULL_POLICY_INDEX = len(policy_index) - 1
 
@@ -107,17 +110,21 @@ class SelfPlayDataset:
 
         for row, idx in enumerate(indices):
             fen = self._fens[idx]
+            wdl = list(self._values[idx])
+            policy_str = self._policies[idx]
+            if _fen_white_to_move(fen):
+                wdl = mirror_wdl(wdl)
+
+            if random.random() < 0.5:
+                fen = mirror_fen(fen)
+                wdl = mirror_wdl(wdl)
+                policy_str = mirror_policy_str(policy_str)
             fens.append(fen)
             planes[row, 0] = fen_to_tensor(fen)
-            wdl = list(self._values[idx])
-
-            if _fen_white_to_move(fen):
-                wdl = [wdl[2], wdl[1], wdl[0]]
-
             values[row] = wdl
             masks[row] = bool(np.sum(wdl) > 0)
 
-            policy_indices[row] = _policy_str_to_idx(self._policies[idx])
+            policy_indices[row] = _policy_str_to_idx(policy_str)
 
         return SelfPlayBatch(
             planes=planes,
@@ -149,3 +156,15 @@ def _ensure_tuple(row) -> tuple[float, float, float]:
         return (0.0, 0.0, 0.0)
     return (scalar, 0.0, 0.0)
 
+def mirror_wdl(wdl: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (wdl[2], wdl[1], wdl[0])
+
+def mirror_fen(fen: str) -> str:
+    board = chess.Board(fen)
+    board.mirror()
+    return board.fen()
+
+def mirror_policy_str(policy_str: str) -> str:
+    i,j = int(policy_str[1]),int(policy_str[3])
+
+    return f"{policy_str[0]}{9-j}{policy_str[2]}{9-i}{policy_str[4:]}"

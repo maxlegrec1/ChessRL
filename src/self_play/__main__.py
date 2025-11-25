@@ -66,7 +66,7 @@ def main() -> int:
     buffer_path = args.buffer_path.resolve()
     iteration_path = args.iteration_file.resolve()
 
-    buffer = SelfPlayBuffer(buffer_path, capacity=100_000, flush_interval=args.flush_interval)
+    buffer = SelfPlayBuffer(buffer_path, capacity=1_000_000, flush_interval=args.flush_interval)
     existing = buffer.load()
 
     engine_watcher = EngineWatcher(iteration_path, poll_interval=float(args.poll_seconds))

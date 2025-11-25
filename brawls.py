@@ -89,6 +89,7 @@ def play_game(
         temp_turn = temp_white if board.turn == bulletchess.WHITE else temp_black
         move_uci = _safe_get_move(model_to_use, board, move_history, temp_turn, device)
         if move_uci is None:
+            print(f"No move from model {mover_name} in {board.fen()}. Forfeiting.")
             # Forfeit on failure to move
             result = "0-1" if board.turn == bulletchess.WHITE else "1-0"
             game.headers["Result"] = result
@@ -97,12 +98,11 @@ def play_game(
         try:
             move = bulletchess.Move.from_uci(move_uci)
             if move not in board.legal_moves():
-                # Illegal move -> forfeit
-                result = "0-1" if board.turn == bulletchess.WHITE else "1-0"
-                game.headers["Result"] = result
-                return result, game
-        except ValueError:
+                move = bulletchess.Move.from_uci(move_uci+"n")
+                print(f"Converted {move_uci} to {move.uci()} for knight promotion")
+        except ValueError as e:
             # Malformed UCI -> forfeit
+            print(f"Malformed UCI: {move_uci} from model {mover_name} in {board.fen()}: {e}")
             result = "0-1" if board.turn == bulletchess.WHITE else "1-0"
             game.headers["Result"] = result
             return result, game
@@ -121,8 +121,6 @@ def play_game(
     if board in CHECKMATE:
         result = "0-1" if board.turn == bulletchess.WHITE else "1-0"
     elif board in DRAW:
-        result = "1/2-1/2"
-    else:
         result = "1/2-1/2"
     game.headers["Result"] = result
     return result, game
@@ -225,6 +223,8 @@ def _load_small_model(device: str, ckpt_path: Optional[str]):
         # Allow either plain state dict or checkpoint dict with key
         if isinstance(state, dict) and "model_state_dict" in state:
             model.load_state_dict(state["model_state_dict"],strict=False) 
+        elif isinstance(state, dict) and "model" in state:
+            model.load_state_dict(state["model"],strict=False)
         else:
             model.load_state_dict(state,strict=False)
     return model

@@ -78,7 +78,7 @@ class AbsolutePositionalEncoder(torch.nn.Module):
         return self.positional_encoding.expand(batch_size, -1, -1)
 
 class Inference(torch.nn.Module):
-    def __init__(self,num_layers = 10, d_model=512, d_ff=1024, num_heads = 8):
+    def __init__(self,num_layers = 4, d_model=256, d_ff=512, num_heads = 4):
         super().__init__()
         self.is_thinking_model = False
         self.d_model = d_model

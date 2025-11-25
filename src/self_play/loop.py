@@ -115,6 +115,12 @@ class SelfPlayLoop:
                 move_uci = legal_moves[0].uci()
 
             record_policy = policy_move or move_uci
+
+            # knight promotions are considered default promotions
+            if record_policy[-1] == "n":
+                record_policy = record_policy[:-1]
+            else:
+                record_policy = record_policy
             records.append(SelfPlayRecord(fen=fen, value=value, policy=record_policy))
 
             move = bulletchess.Move.from_uci(move_uci)

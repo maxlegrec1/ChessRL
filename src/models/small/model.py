@@ -102,11 +102,12 @@ class LearnedPositionalEncoder(nn.Module):
         return pos_embed
 
 class BT4(torch.nn.Module):
-    def __init__(self,num_layers = 10, d_model=512, d_ff=1024, num_heads = 8):
+    def __init__(self,num_layers = 4, d_model=256, d_ff=512, num_heads = 4):
         super().__init__()
         self.is_thinking_model = False
         self.d_model = d_model
-
+        self.num_heads = num_heads
+        self.d_ff = d_ff
         self.num_layers = num_layers
 
         self.layers = torch.nn.ModuleList([EncoderLayer(d_model,d_ff,num_heads) for _ in range(num_layers)])
@@ -741,8 +742,8 @@ def analyze_model_parameters(model):
     print("="*60)
     print(f"• Model Type: {model.num_layers}-layer Transformer")
     print(f"• Hidden Dimension: {model.d_model}")
-    print(f"• Feed-Forward Dimension: {d_ff}")
-    print(f"• Number of Attention Heads: {num_heads}")
+    print(f"• Feed-Forward Dimension: {model.d_ff}")
+    print(f"• Number of Attention Heads: {model.num_heads}")
     print(f"• Attention-Heavy Design: {attention_params/total_params*100:.1f}% of parameters in attention")
     print(f"• Large Output Capacity: {output_head_params/total_params*100:.1f}% in policy/value heads")
     print(f"• Efficient Normalization: {norm_params/total_params*100:.3f}% in layer norms")
@@ -756,7 +757,7 @@ def analyze_model_parameters(model):
     print("\n" + "="*60)
 
 if __name__ == "__main__":
-    model = BT4().to("cuda")
+    model = BT4(num_layers=4,d_model=256,d_ff=512,num_heads=4).to("cuda")
     # Input tensor shape: (batch_size, sequence_length, board_dim1, board_dim2, embedding_dim)
     # For the model, this becomes (batch_size * sequence_length, board_dim1 * board_dim2, embedding_dim)
     # (4, 64, 8, 8, 19) -> (256, 64, 19)

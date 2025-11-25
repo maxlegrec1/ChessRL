@@ -3,9 +3,10 @@ import onnx
 from src.models.small.inference import Inference
 
 # 1. Load Model
-model = Inference().to("cuda")
-# checkpoint = torch.load("src/models/small/model.pt", map_location="cuda", weights_only=False)
-# model.load_state_dict(checkpoint, strict=False)
+# model = Inference().to("cuda")
+model = Inference(num_layers=10, d_model=512, d_ff=1024, num_heads=8).to("cuda")
+checkpoint = torch.load("src/models/small/model.pt", map_location="cuda", weights_only=False)
+model.load_state_dict(checkpoint, strict=False)
 model.eval()
 
 
@@ -20,7 +21,7 @@ dynamic_axes = {
 dummy_input = torch.randn(1, 8, 8, 19, device="cuda:0")
 
 # 4. Export
-output_file = "model_dynamic_initial.onnx"
+output_file = "model_dynamic_good.onnx"
 print(f"Exporting to {output_file} using Legacy Exporter (Opset 17)...")
 
 # CRITICAL: Do NOT pass dynamo=True. 

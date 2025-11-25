@@ -60,6 +60,30 @@ class Trainer:
         self._current_stockfish_elo = 1400
 
         self._wandb_run = self._init_wandb()
+
+        # Initialize teacher model
+        self.teacher_model = BT4().to(self.device)
+        self.teacher_model.eval()
+        for param in self.teacher_model.parameters():
+            param.requires_grad = False
+
+        # Load or create initial teacher
+        initial_teacher_path = self.checkpoint_dir / "initial_teacher.pt"
+        if initial_teacher_path.exists():
+            self.console.log(f"Loading initial teacher from {initial_teacher_path}")
+            ckpt = torch.load(initial_teacher_path, map_location=self.device,weights_only=False)
+            self.teacher_model.load_state_dict(ckpt["model"])
+        else:
+            self.console.log(f"Creating initial teacher at {initial_teacher_path}")
+            # Initialize teacher with current model weights
+            self.teacher_model.load_state_dict(self.model.state_dict())
+            ckpt = {
+                "model": self.teacher_model.state_dict(),
+                "config": self.config.to_dict(),
+                "step": 0,
+            }
+            torch.save(ckpt, initial_teacher_path)
+
         if config.resume_path:
             self._load_checkpoint(config.resume_path)
 
@@ -123,6 +147,7 @@ class Trainer:
             )
 
             if mask.any():
+                self.console.log(f"Mask detected")
                 masked_value_logits = value_logits[mask]
                 masked_labels = value_labels[mask]
                 value_loss = F.cross_entropy(masked_value_logits, masked_labels)
@@ -198,7 +223,22 @@ class Trainer:
             )
 
     # ------------------------------------------------------------------ #
+    def _update_teacher(self) -> None:
+        """Update teacher model parameters using EMA."""
+        with torch.no_grad():
+            for teacher_param, student_param in zip(self.teacher_model.parameters(), self.model.parameters()):
+                # teacher = decay * teacher + (1 - decay) * student
+                # User requested: teacher = 0.9 * teacher + 0.1 * student
+                # This matches the formula if decay=0.9 and weight=0.1
+                teacher_param.data.mul_(self.config.teacher_decay).add_(
+                    student_param.data, alpha=self.config.teacher_weight
+                )
+
     def _save_checkpoint(self) -> None:
+        # Update teacher before saving
+        self._update_teacher()
+
+        # Save Student Checkpoint (for resuming training)
         ckpt = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -208,12 +248,27 @@ class Trainer:
         }
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
         torch.save(ckpt, path)
-        self.console.log(f"Saved checkpoint to {path}")
-        self._invoke_build_script(path)
+        self.console.log(f"Saved student checkpoint to {path}")
+
+        # Save Teacher Checkpoint (for self-play)
+        teacher_ckpt = {
+            "model": self.teacher_model.state_dict(),
+            "step": self.step,
+            "config": self.config.to_dict(),
+        }
+        teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
+        torch.save(teacher_ckpt, teacher_path)
+        self.console.log(f"Saved teacher checkpoint to {teacher_path}")
+
+        # Build engine from TEACHER checkpoint
+        self._invoke_build_script(teacher_path)
+        
+        # Evaluate STUDENT checkpoint (to see progress)
         self._evaluate_checkpoint(path)
+        
         self._prune_checkpoints()
         self.console.log("Waiting for half an hour before next evaluation...")
-        time.sleep(1800) # half an hour
+        time.sleep(1000) # half an hour
 
     def _load_checkpoint(self, path: Path) -> None:
         ckpt = torch.load(path, map_location=self.device)
@@ -230,6 +285,14 @@ class Trainer:
             return
         files = sorted(self.checkpoint_dir.glob("step_*.pt"))
         for old in files[:-keep]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        
+        # Prune teacher checkpoints
+        teacher_files = sorted(self.checkpoint_dir.glob("teacher_step_*.pt"))
+        for old in teacher_files[:-keep]:
             try:
                 old.unlink()
             except OSError:
