@@ -27,7 +27,7 @@ class CheckpointConfig:
 
 @dataclass
 class DataConfig:
-    dataset_path: Path = Path("src/self_play/selfplay_buffer.parquet")
+    dataset_path: Path = Path("src/self_play/selfplay_buffer.bin")
     reload_seconds: float = 60.0
 
 

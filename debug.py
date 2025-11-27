@@ -1,44 +1,66 @@
 from src.mcts import SmallMCTS
-import time
-import matplotlib.pyplot as plt
-import numpy as np
-
-# # Initialize MCTS
-# small = SmallMCTS(engine_path="model_dynamic_initial.trt", temperature=1, cpuct=1.0)
-# fen = "rnbqkbnr/pppppppp/8/8/P7/8/1PPPPPPP/RNBQKBNR b KQkq - 0 1"
-
-
-# res = small.run([fen] * 128, temperature=1, simulations=600, cpuct=1.0,temperature_at_root=0,use_dirichlet=True,dirichlet_alpha=0.3,dirichlet_epsilon=0.25)
-
-# print([res["action"] for res in res])
-
-from src.models.small.model import BT4
 import torch
-model = BT4().to("cuda")
-ckpt = torch.load("checkpoints/step_00022500.pt",weights_only=False)
+import numpy as np
+from src.models.small.small_model import SmallModel
+from src.models.small.fen_encoder import fen_to_tensor
+from src.models.small.vocab import policy_index
+
+# 1. PyTorch Model Inference
+print("--- PyTorch Model Inference ---")
+model = SmallModel().to("cuda")
+ckpt_path = "checkpoints/last.pt"
+
+ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=False)
 model.load_state_dict(ckpt["model"])
+print(f"Loaded {ckpt_path}")
 model.eval()
 
+# fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+# # Use the new method
+# move, probs = model.get_move_from_fen_no_thinking(fen, T=0.0, device="cuda", return_probs=True)
+# print(f"Selected move: {move}")
 
-_,probs = model.get_move_from_fen_no_thinking(fen,1,device="cuda",return_probs=True)
+# value = model.get_position_value(fen, device="cuda")
+# print(f"Value (WDL): {value}")
 
-value = model.get_position_value(fen,device="cuda")
-print(value)
+# # Top 10 moves
+# print("Top 10 Policy Moves (Masked):")
+# sorted_probs, indices = torch.sort(probs, dim=-1, descending=True)
+# for i in range(10):
+#     idx = indices[0][i].item()
+#     prob = sorted_probs[0][i].item()
+#     if prob > 0:
+#         print(f"{policy_index[idx]}: {prob:.4f}")
+
+# # # 2. MCTS Inference
+# print("\n--- MCTS Inference (TensorRT) ---")
+# small = SmallMCTS(engine_path="model_dynamic_initial.trt", temperature=1, cpuct=1.0)
+# res = small.run([fen], temperature=1, simulations=100000, cpuct=1.0, temperature_at_root=1.4, use_dirichlet=True, dirichlet_alpha=0.3, dirichlet_epsilon=0.25)
+# print("MCTS Result:", res[0])
+
+from mate_in_one_fens import MATE_IN_ONE_FENS
+
+avg_sdm_value = 0
+
+acc = 0
 
 
+for fen in MATE_IN_ONE_FENS:
+    value = model.get_position_value(fen, device="cuda")
+    side = fen.split(" ")[1]
+    print(f"Fen: {fen}\nSide: {side}\nValue (WDL): {value}")
+    if side == "w":
+        if value[2] > value[0]:
+            acc += 1
+        value = value[2]
 
-from src.models.small.model import policy_index
-# order probs descending and print top 10 moves and their probabilities
-sorted_probs, indices = torch.sort(probs,dim=-1,descending=True)
+    else:
+        if value[0] > value[2]:
+            acc += 1
+        value = value[0]
+    avg_sdm_value += value
 
-for i in range(10):
-    print(f"{policy_index[indices[0][i].item()]}: {sorted_probs[0][i].item()}")
+print(f"Average SDM Value: {avg_sdm_value / len(MATE_IN_ONE_FENS)}")
 
-
-small = SmallMCTS(engine_path="engines/teacher_step_00022500.trt", temperature=1, cpuct=1.0)
-
-res = small.run([fen] * 1, temperature=1, simulations=600, cpuct=1.0,temperature_at_root=1.4,use_dirichlet=True,dirichlet_alpha=0.3,dirichlet_epsilon=0.25)
-
-print(res[0])
+print(f"Accuracy: {acc / len(MATE_IN_ONE_FENS)}")

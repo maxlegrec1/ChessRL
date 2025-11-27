@@ -13,6 +13,7 @@ from src.models.small.vocab import policy_index, policy_to_idx
 
 import random
 import chess
+import struct
 
 # Fallback index when a move is not present in the vocabulary.
 NULL_POLICY_INDEX = len(policy_index) - 1
@@ -64,20 +65,25 @@ class SelfPlayDataset:
                 self._last_load = now
                 return
 
-        # Retry loop for reading the parquet file to handle race conditions
+        # Retry loop for reading the file to handle race conditions
         max_retries = 50
         for attempt in range(max_retries):
             try:
-                table = pq.read_table(self.path)
-                if "fen" not in table.column_names or "value" not in table.column_names:
-                    raise RuntimeError(f"Parquet file {self.path} missing required columns.")
+                if self.path.suffix == ".parquet":
+                    table = pq.read_table(self.path)
+                    if "fen" not in table.column_names or "value" not in table.column_names:
+                        raise RuntimeError(f"Parquet file {self.path} missing required columns.")
 
-                self._fens = table.column("fen").to_pylist()
-                raw_values = table.column("value").to_pylist()
-                self._values = [
-                    _ensure_tuple(row) for row in raw_values  # type: ignore[arg-type]
-                ]
-                self._policies = table.column("policy").to_pylist()
+                    self._fens = table.column("fen").to_pylist()
+                    raw_values = table.column("value").to_pylist()
+                    self._values = [
+                        _ensure_tuple(row) for row in raw_values  # type: ignore[arg-type]
+                    ]
+                    self._policies = table.column("policy").to_pylist()
+                else:
+                    # Assume binary format
+                    self._fens, self._policies, self._values = self._read_binary_file()
+                
                 self._size = len(self._fens)
                 break
             except Exception as e:
@@ -91,6 +97,50 @@ class SelfPlayDataset:
             self._last_mtime = self.path.stat().st_mtime
         except FileNotFoundError:
             self._last_mtime = self._last_load
+
+    def _read_binary_file(self):
+        fens = []
+        policies = []
+        values = []
+        try:
+            with self.path.open("rb") as f:
+                content = f.read()
+            
+            offset = 0
+            size = len(content)
+            RECORD_SIZE = 128
+            
+            while offset + RECORD_SIZE <= size:
+                # Read FEN (100 bytes)
+                fen_bytes = content[offset:offset+100]
+                try:
+                    fen = fen_bytes.split(b'\0', 1)[0].decode("utf-8")
+                except:
+                    fen = ""
+                offset += 100
+                
+                # Read Policy (16 bytes)
+                pol_bytes = content[offset:offset+16]
+                try:
+                    policy = pol_bytes.split(b'\0', 1)[0].decode("utf-8")
+                except:
+                    policy = ""
+                offset += 16
+                
+                # Read Value (12 bytes)
+                val = struct.unpack_from("fff", content, offset)
+                offset += 12
+                
+                if fen and policy:
+                    fens.append(fen)
+                    policies.append(policy)
+                    values.append(val)
+        except Exception as e:
+            print(f"Error reading binary file: {e}")
+            # Return partial results or empty
+            return [], [], []
+            
+        return fens, policies, values
 
     # ------------------------------------------------------------------ #
     @property

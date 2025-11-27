@@ -793,24 +793,13 @@ MctsSummary run_small_mcts(MctsOptions options)
     return runner.run();
 }
 
-std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_options)
+std::vector<MctsSummary> run_small_mcts_batch_shared(std::vector<MctsOptions> batch_options, std::shared_ptr<single::SmallBatchRunner> shared_runner)
 {
     if (batch_options.empty())
     {
         return {};
     }
 
-    single::SmallBatchConfig shared_config = make_small_batch_config(batch_options.front());
-    for (size_t i = 1; i < batch_options.size(); ++i)
-    {
-        const auto cfg = make_small_batch_config(batch_options[i]);
-        if (cfg.engine_path != shared_config.engine_path)
-        {
-            throw std::invalid_argument("All small MCTS batch requests must use the same engine path.");
-        }
-    }
-
-    auto shared_runner = std::make_shared<single::SmallBatchRunner>(shared_config);
     std::vector<MctsSummary> summaries(batch_options.size());
     
     // Step 1: Oversubscription - Launch 256 workers to keep GPU busy
@@ -852,6 +841,27 @@ std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_opt
     }
 
     return summaries;
+}
+
+std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_options)
+{
+    if (batch_options.empty())
+    {
+        return {};
+    }
+
+    single::SmallBatchConfig shared_config = make_small_batch_config(batch_options.front());
+    for (size_t i = 1; i < batch_options.size(); ++i)
+    {
+        const auto cfg = make_small_batch_config(batch_options[i]);
+        if (cfg.engine_path != shared_config.engine_path)
+        {
+            throw std::invalid_argument("All small MCTS batch requests must use the same engine path.");
+        }
+    }
+
+    auto shared_runner = std::make_shared<single::SmallBatchRunner>(shared_config);
+    return run_small_mcts_batch_shared(std::move(batch_options), shared_runner);
 }
 
 #ifndef CHESSRL_MCTS_NO_STANDALONE

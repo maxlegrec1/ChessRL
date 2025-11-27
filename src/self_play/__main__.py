@@ -10,10 +10,11 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from .buffer import SelfPlayBuffer
 from .engine_watch import EngineWatcher
-from .loop import SIMULATIONS, SelfPlayLoop
 from .metrics import MetricsTracker
+
+
+SIMULATIONS = 800
 
 
 DEFAULT_BUFFER = Path("src/self_play/selfplay_buffer.parquet")
@@ -32,23 +33,27 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of buffer batches to accumulate before flushing to disk.",
     )
+    parser.add_argument("--threads", type=int, default=1, help="Number of threads.")
+    parser.add_argument("--hash-size", type=int, default=128, help="Hash size in MB.")
+    parser.add_argument("--save-pgn", action="store_true", help="Save games as PGN")
+    parser.add_argument("--pgn-dir", type=str, default="pgns", help="Directory to save PGNs")
     return parser.parse_args()
 
 
-def render_dashboard(loop: SelfPlayLoop, metrics: MetricsTracker) -> Table:
+def render_dashboard_cpp(metrics: MetricsTracker, worker_metrics: dict, board_count: int) -> Table:
     snapshot = metrics.snapshot()
-    table = Table(title="Self-Play Generator", box=box.SIMPLE_HEAVY, expand=True)
+    table = Table(title="Self-Play Generator (C++)", box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Metric", justify="right")
     table.add_column("Value", justify="left")
 
     table.add_row("Positions/hour", f"{snapshot.positions_per_hour:,.0f}")
     table.add_row("Positions/sec", f"{snapshot.positions_per_sec:,.2f}")
-    table.add_row("Nodes/sec", f"{snapshot.nodes_per_sec:,.0f}")
+    table.add_row("Nodes/sec", f"{worker_metrics.get('nodes_per_sec', 0):,.0f}")
     table.add_row("Total positions", f"{snapshot.total_positions:,}")
     table.add_row("Total games", f"{snapshot.total_games:,}")
-    table.add_row("Boards", f"{loop.board_count}")
-    table.add_row("Buffer fill", f"{snapshot.buffer_fill_pct:5.1f}%")
-    table.add_row("Engine", snapshot.engine_path or "unknown")
+    table.add_row("Boards", f"{board_count}")
+    table.add_row("Buffer size", f"{worker_metrics.get('buffer_size', 0):,}")
+    table.add_row("Engine", str(snapshot.engine_path) if snapshot.engine_path else "unknown")
 
     if snapshot.last_engine_swap:
         age_minutes = max(0.0, (time.time() - snapshot.last_engine_swap) / 60.0)
@@ -58,44 +63,109 @@ def render_dashboard(loop: SelfPlayLoop, metrics: MetricsTracker) -> Table:
 
     return table
 
+import _inference_cpp
 
 def main() -> int:
     args = parse_args()
     console = Console()
 
-    buffer_path = args.buffer_path.resolve()
+    # Change default buffer to .bin if it was default
+    buffer_path = args.buffer_path
+    if buffer_path == DEFAULT_BUFFER:
+        buffer_path = Path("src/self_play/selfplay_buffer.bin")
+    
+    buffer_path = buffer_path.resolve()
     iteration_path = args.iteration_file.resolve()
 
-    buffer = SelfPlayBuffer(buffer_path, capacity=1_000_000, flush_interval=args.flush_interval)
-    existing = buffer.load()
+    # Ensure directory exists
+    buffer_path.parent.mkdir(parents=True, exist_ok=True)
 
     engine_watcher = EngineWatcher(iteration_path, poll_interval=float(args.poll_seconds))
     metrics = MetricsTracker(simulations_per_position=SIMULATIONS)
-    metrics.update_buffer_fill(buffer.fill_ratio())
-    metrics.update_engine_path(engine_watcher.engine_path)
-
-    console.log(f"Loaded buffer rows: {existing}")
-    console.log(f"Current engine: {engine_watcher.engine_path}")
-
-    loop = SelfPlayLoop(
-        board_count=args.boards,
-        buffer=buffer,
-        metrics=metrics,
-        engine_watcher=engine_watcher,
-    )
-
+    
+    console.log(f"Starting C++ self-play loop...")
+    console.log(f"Buffer: {buffer_path}")
+    if args.save_pgn:
+        console.log(f"Saving PGNs to: {args.pgn_dir}")
+    
+    worker = None
+    current_engine_path = None
+    
     try:
-        with Live(render_dashboard(loop, metrics), refresh_per_second=1, console=console) as live:
+        with Live(console=console, refresh_per_second=4) as live:
             while True:
-                loop.step()
-                live.update(render_dashboard(loop, metrics))
+                # Check for engine update
+                new_engine = engine_watcher.maybe_refresh()
+                if new_engine:
+                    metrics.update_engine_path(new_engine)
+                    current_engine_path = str(new_engine)
+                    # Re-initialize worker with new engine
+                    worker = _inference_cpp.SelfPlayWorker(
+                        engine_path=current_engine_path,
+                        output_path=str(buffer_path),
+                        batch_size=args.boards,
+                        threads=args.threads,
+                        hash_size=args.hash_size,
+                        max_games=-1,
+                        max_buffer_size=1000000,
+                        save_pgn=args.save_pgn,
+                        pgn_dir=args.pgn_dir,
+                        simulations=SIMULATIONS
+                    )
+                    console.log(f"Initialized worker with engine: {current_engine_path}")
+
+                if not worker:
+                    if not current_engine_path:
+                        current_engine_path = engine_watcher.engine_path
+                    
+                    if current_engine_path:
+                        metrics.update_engine_path(Path(current_engine_path))
+                        worker = _inference_cpp.SelfPlayWorker(
+                            engine_path=str(current_engine_path),
+                            output_path=str(buffer_path),
+                            batch_size=args.boards,
+                            threads=args.threads,
+                            hash_size=args.hash_size,
+                            max_games=-1,
+                            max_buffer_size=1000000,
+                            save_pgn=args.save_pgn,
+                            pgn_dir=args.pgn_dir,
+                            simulations=SIMULATIONS
+                        )
+                        console.log(f"Initialized worker with engine: {current_engine_path}")
+                    else:
+                        live.update(Table(title="Waiting for engine...", box=box.SIMPLE_HEAVY))
+                        time.sleep(5)
+                        continue
+                
+                # Step the worker
+                step_metrics = worker.step()
+                
+                # Update metrics
+                metrics.record_positions(step_metrics.positions_generated)
+                metrics.record_game_finished(step_metrics.games_finished)
+                
+                # Calculate nodes per second for this step
+                nps = 0
+                if step_metrics.runtime_seconds > 0:
+                    nps = step_metrics.nodes_evaluated / step_metrics.runtime_seconds
+                
+                # Get buffer size
+                buffer_size = worker.get_buffer_size()
+                
+                worker_stats = {
+                    "nodes_per_sec": nps,
+                    "buffer_size": buffer_size
+                }
+                
+                live.update(render_dashboard_cpp(metrics, worker_stats, args.boards))
+                
     except KeyboardInterrupt:
         console.log("Stopping self-play loop...")
         return 0
     except Exception:
         console.print_exception()
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

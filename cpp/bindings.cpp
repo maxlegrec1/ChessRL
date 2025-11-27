@@ -4,6 +4,7 @@
 #include "inference.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
+#include "selfplay.hpp"
 
 namespace py = pybind11;
 
@@ -100,5 +101,37 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("dirichlet_alpha") = 0.3F,
         py::arg("dirichlet_epsilon") = 0.25F,
         "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
+
+    py::class_<chessrl::SelfPlayMetrics>(m, "SelfPlayMetrics")
+        .def_readonly("games_finished", &chessrl::SelfPlayMetrics::games_finished)
+        .def_readonly("positions_generated", &chessrl::SelfPlayMetrics::positions_generated)
+        .def_readonly("nodes_evaluated", &chessrl::SelfPlayMetrics::nodes_evaluated)
+        .def_readonly("runtime_seconds", &chessrl::SelfPlayMetrics::runtime_seconds);
+
+    py::class_<chessrl::SelfPlayWorker>(m, "SelfPlayWorker")
+        .def(py::init([](const std::string& engine_path, const std::string& output_path, int batch_size, int threads, int hash_size, int max_games, size_t max_buffer_size, bool save_pgn, std::string pgn_dir, int simulations) {
+            chessrl::SelfPlayConfig config;
+            config.engine_path = engine_path;
+            config.output_path = output_path;
+            config.concurrency = batch_size;
+            config.max_games = max_games;
+            config.max_buffer_size = max_buffer_size;
+            config.save_pgn = save_pgn;
+            config.pgn_dir = pgn_dir;
+            config.simulations = simulations;
+            return new chessrl::SelfPlayWorker(config);
+        }),
+        py::arg("engine_path"),
+        py::arg("output_path"),
+        py::arg("batch_size") = 8,
+        py::arg("threads") = 1,
+        py::arg("hash_size") = 128,
+        py::arg("max_games") = -1,
+        py::arg("max_buffer_size") = 1000000,
+        py::arg("save_pgn") = false,
+        py::arg("pgn_dir") = "pgns",
+        py::arg("simulations") = 800)
+        .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
+        .def("get_buffer_size", &chessrl::SelfPlayWorker::get_buffer_size);
 }
 

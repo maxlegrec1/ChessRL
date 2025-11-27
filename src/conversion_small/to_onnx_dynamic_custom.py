@@ -6,7 +6,7 @@ from pathlib import Path
 import onnx
 import torch
 
-from src.models.small.inference import Inference
+from src.models.small.small_model import SmallModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,11 +26,24 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
     return checkpoint
 
 
+class ExportWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, x):
+        p, v, vq = self.model(x, return_all=True)
+        v_probs = torch.softmax(v, dim=-1)
+        return p, v_probs
+
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
-    model = Inference().to(device)
+    base_model = SmallModel().to(device)
     state_dict = load_state_dict(args.ckpt_path, args.device)
-    model.load_state_dict(state_dict, strict=False)
+    base_model.load_state_dict(state_dict, strict=False)
+    base_model.eval()
+    
+    model = ExportWrapper(base_model).to(device)
     model.eval()
 
     dummy_input = torch.randn(args.batch, 8, 8, 19, device=device, dtype=torch.float32)

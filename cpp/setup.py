@@ -17,6 +17,7 @@ ext_modules = [
             "mcts/common.cpp",
             "mcts/mcts_small.cpp",
             "mcts/single_inference.cpp",
+            "selfplay.cpp",
         ],
         include_dirs=[
             str(ROOT / "include"),

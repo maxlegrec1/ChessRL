@@ -4,8 +4,8 @@ from src.models.small.inference import Inference
 
 # 1. Load Model
 # model = Inference().to("cuda")
-model = Inference(num_layers=10, d_model=512, d_ff=1024, num_heads=8).to("cuda")
-checkpoint = torch.load("src/models/small/model.pt", map_location="cuda", weights_only=False)
+# model = Inference(num_layers=10, d_model=512, d_ff=1024, num_heads=8).to("cuda")
+# checkpoint = torch.load("src/models/small/model.pt", map_location="cuda", weights_only=False)
 model.load_state_dict(checkpoint, strict=False)
 model.eval()
 

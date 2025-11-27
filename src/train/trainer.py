@@ -13,7 +13,7 @@ from torch import amp, optim
 
 import wandb
 
-from src.models.small.model import BT4
+from src.models.small.small_model import SmallModel
 
 from .config import TrainingConfig
 from .dataset import NULL_POLICY_INDEX, SelfPlayBatch, SelfPlayDataset
@@ -39,7 +39,7 @@ class Trainer:
             reload_seconds=config.data.reload_seconds,
         )
 
-        self.model = BT4().to(self.device)
+        self.model = SmallModel().to(self.device)
         self.model.train()
 
         self.optimizer = optim.Adam(
@@ -62,7 +62,7 @@ class Trainer:
         self._wandb_run = self._init_wandb()
 
         # Initialize teacher model
-        self.teacher_model = BT4().to(self.device)
+        self.teacher_model = SmallModel().to(self.device)
         self.teacher_model.eval()
         for param in self.teacher_model.parameters():
             param.requires_grad = False
@@ -107,13 +107,29 @@ class Trainer:
         try:
             while True:
                 self.dataset.reload()
+                t0 = time.time()
                 batch = self.dataset.sample_batch(self.config.batch_size)
                 metrics = self._train_step(batch)
+                t1 = time.time()
+                # sleep (xs - (t1 - t0))
+                time.sleep(max(0, 40 - (t1 - t0)))
                 self.step += 1
                 self.samples_processed += self.config.batch_size
 
                 if self.step % self.config.log_every == 0:
                     self._log(metrics)
+
+                if self.step % 100 == 0:
+                    # Save Student Checkpoint (for resuming training)
+                    ckpt = {
+                        "model": self.model.state_dict(),
+                        "optimizer": self.optimizer.state_dict(),
+                        "scaler": self.scaler.state_dict(),
+                        "step": self.step,
+                        "config": self.config.to_dict(),
+                    }
+                    path = self.checkpoint_dir / f"last.pt"
+                    torch.save(ckpt, path)
 
                 if self.step % self.config.checkpoint.every_steps == 0:
                     self._save_checkpoint()
@@ -165,7 +181,7 @@ class Trainer:
                 value_q_loss = value_logits.sum() * 0.0
                 value_accuracy = torch.tensor(0.0, device=self.device)
 
-            total_loss = policy_loss + 4*value_loss + 100* value_q_loss
+            total_loss = policy_loss + 100* value_q_loss
 
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
@@ -268,7 +284,7 @@ class Trainer:
         
         self._prune_checkpoints()
         self.console.log("Waiting for half an hour before next evaluation...")
-        time.sleep(1000) # half an hour
+        # time.sleep(1000) # half an hour
 
     def _load_checkpoint(self, path: Path) -> None:
         ckpt = torch.load(path, map_location=self.device)
@@ -339,7 +355,7 @@ class Trainer:
             return
         
         # Load a fresh model instance from checkpoint
-        eval_model = BT4().to(self.device)
+        eval_model = SmallModel().to(self.device)
         eval_model.eval()
         try:
             ckpt = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
