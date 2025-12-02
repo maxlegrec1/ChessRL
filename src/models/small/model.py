@@ -272,7 +272,7 @@ class BT4(torch.nn.Module):
     def get_position_value(self, fen, device="cuda"):
         """
         Get the value evaluation for a given FEN position.
-        Returns the value vector [black_win_prob, draw_prob, white_win_prob]
+        Returns the value vector [win_prob, draw_prob, loss_prob] from side-to-move perspective.
         """
         x = torch.from_numpy(fen_to_tensor(fen)).to(device).to(torch.float32)
         x = x.view(1, 1, 8, 8, 19)
@@ -305,7 +305,7 @@ class BT4(torch.nn.Module):
             fens: List of FEN strings
             device: Device to run computations on
         Returns:
-            value_probs: Tensor of shape [batch_size, 3] with [black_win_prob, draw_prob, white_win_prob] for each position
+            value_probs: Tensor of shape [batch_size, 3] with [win_prob, draw_prob, loss_prob] from side-to-move perspective
         """
         if len(fens) == 0:
             return torch.empty(0, 3, device=device)
@@ -344,13 +344,9 @@ class BT4(torch.nn.Module):
     def calculate_move_values(self, fen, device="cuda"):
         """
         Calculate the value for each legal move from the given position efficiently using batching.
-        For white to move, value = 1/2 * draw_prob + white_win_prob
-        For black to move, value = 1/2 * draw_prob + black_win_prob
+        Returns values from current player's perspective (higher = better for current player).
         """
         board = bulletchess.Board.from_fen(fen)
-        
-        # Determine whose turn it is
-        is_white_turn = board.turn == bulletchess.WHITE
         
         legal_moves = list(board.legal_moves())
         if len(legal_moves) == 0:
@@ -366,15 +362,9 @@ class BT4(torch.nn.Module):
         # Batch process all positions in a single inference
         batch_value_q = self.get_batch_position_values(resulting_fens, device)
         
-        # Calculate values from the current player's perspective
-        # batch_value_probs[:, 0] = black_win_prob, [:, 1] = draw_prob, [:, 2] = white_win_prob
-        batch_value_q = batch_value_q[:,2]-batch_value_q[:,0]
-        if is_white_turn:
-            # White's perspective: 1/2 * draw_prob + white_win_prob
-            player_values = batch_value_q
-        else:
-            # Black's perspective: 1/2 * draw_prob + black_win_prob
-            player_values = -batch_value_q
+        # Child positions have opponent to move, WDL is [opp_win, draw, opp_loss]
+        # Current player wants opponent to lose: opp_loss - opp_win
+        player_values = batch_value_q[:,2] - batch_value_q[:,0]
         
         return legal_moves, player_values
 

@@ -160,12 +160,13 @@ class SelfPlayDataset:
             fen = self._fens[idx]
             wdl = list(self._values[idx])
             policy_str = self._policies[idx]
-            if _fen_white_to_move(fen):
-                wdl = mirror_wdl(wdl)
+            # WDL is stored in side-to-move perspective: [win, draw, loss]
+            # No need to reorient based on side to move
 
             if random.random() < 0.5:
                 fen = mirror_fen(fen)
-                wdl = mirror_wdl(wdl)
+                # When mirroring board, side to move changes but strategic situation
+                # is equivalent, so WDL from new side's perspective stays the same
                 policy_str = mirror_policy_str(policy_str)
             fens.append(fen)
             planes[row] = fen_to_tensor(fen)
@@ -180,14 +181,6 @@ class SelfPlayDataset:
         )
 
 
-def _fen_white_to_move(fen: str) -> bool:
-    try:
-        parts = fen.split()
-        return len(parts) > 1 and parts[1].lower() == "w"
-    except Exception:
-        return False
-
-
 def _ensure_tuple(row) -> tuple[float, float, float]:
     if row is None:
         return (0.0, 0.0, 0.0)
@@ -200,9 +193,6 @@ def _ensure_tuple(row) -> tuple[float, float, float]:
     except (TypeError, ValueError):
         return (0.0, 0.0, 0.0)
     return (scalar, 0.0, 0.0)
-
-def mirror_wdl(wdl: tuple[float, float, float]) -> tuple[float, float, float]:
-    return (wdl[2], wdl[1], wdl[0])
 
 def mirror_fen(fen: str) -> str:
     board = chess.Board(fen)

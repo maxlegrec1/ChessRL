@@ -73,7 +73,6 @@ struct SearchTree
         const chess::Board& child_board);
 };
 
-std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl);
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
 std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 

@@ -330,8 +330,8 @@ private:
             throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
         }
 
-        // Phase B: Use passed board_state for WDL orientation
-        node.wdl = orient_small_wdl(board_state, eval.wdl);
+        // WDL is already in side-to-move perspective: [win, draw, loss]
+        node.wdl = eval.wdl;
         node.value_prior = node.wdl[0] - node.wdl[2];
 
         // Phase B: Use passed board_state for computing priors

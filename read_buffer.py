@@ -188,7 +188,7 @@ def read_binary_buffer(path: Path, max_rows: int = 10):
                 print(f"    {i+1}. [{stm}] WDL=[{w:.4f}, {d:.4f}, {l:.4f}]")
 
 if __name__ == "__main__":
-    buffer_path = Path("buffer_value.bin")
+    buffer_path = Path("buffer_value_perspective.bin")
     if len(sys.argv) > 1:
         buffer_path = Path(sys.argv[1])
     

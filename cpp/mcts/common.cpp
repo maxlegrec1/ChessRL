@@ -85,16 +85,6 @@ float parse_float(const std::string& value, const std::string& name)
 
 } // namespace
 
-std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl)
-{
-    if (board.sideToMove() == chess::Color::BLACK)
-    {
-        return raw_wdl;
-    }
-
-    return {raw_wdl[2], raw_wdl[1], raw_wdl[0]};
-}
-
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board)
 {
     std::vector<std::string> line;
