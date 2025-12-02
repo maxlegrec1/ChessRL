@@ -8,21 +8,21 @@ from src.models.small.vocab import policy_index
 # 1. PyTorch Model Inference
 print("--- PyTorch Model Inference ---")
 model = SmallModel().to("cuda")
-ckpt_path = "checkpoints/last.pt"
+ckpt_path = "checkpoints/step_00319850.pt"
 
 ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=False)
 model.load_state_dict(ckpt["model"])
 print(f"Loaded {ckpt_path}")
 model.eval()
 
-# fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+fen = "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2"
 
 # # Use the new method
 # move, probs = model.get_move_from_fen_no_thinking(fen, T=0.0, device="cuda", return_probs=True)
 # print(f"Selected move: {move}")
 
-# value = model.get_position_value(fen, device="cuda")
-# print(f"Value (WDL): {value}")
+value = model.get_position_value(fen, device="cuda")
+print(f"Value (WDL): {value}")
 
 # # Top 10 moves
 # print("Top 10 Policy Moves (Masked):")
@@ -35,8 +35,8 @@ model.eval()
 
 # # # 2. MCTS Inference
 # print("\n--- MCTS Inference (TensorRT) ---")
-# small = SmallMCTS(engine_path="model_dynamic_initial.trt", temperature=1, cpuct=1.0)
-# res = small.run([fen], temperature=1, simulations=100000, cpuct=1.0, temperature_at_root=1.4, use_dirichlet=True, dirichlet_alpha=0.3, dirichlet_epsilon=0.25)
+# small = SmallMCTS(engine_path="model_dynamic_good.trt", temperature=1, cpuct=1.0)
+# res = small.run([fen], temperature=1, simulations=800, cpuct=1.0, temperature_at_root=1.4, use_dirichlet=True, dirichlet_alpha=0.3, dirichlet_epsilon=0.25)
 # print("MCTS Result:", res[0])
 
 from mate_in_one_fens import MATE_IN_ONE_FENS

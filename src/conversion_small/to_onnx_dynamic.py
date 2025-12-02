@@ -1,14 +1,28 @@
 import torch
 import onnx
-from src.models.small.inference import Inference
+from src.models.small.small_model import SmallModel
 
 # 1. Load Model
-# model = Inference().to("cuda")
+ckpt_path = "checkpoints/last_00001200.pt"
+model = SmallModel().to("cuda")
 # model = Inference(num_layers=10, d_model=512, d_ff=1024, num_heads=8).to("cuda")
 # checkpoint = torch.load("src/models/small/model.pt", map_location="cuda", weights_only=False)
-model.load_state_dict(checkpoint, strict=False)
+ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=False)
+model.load_state_dict(ckpt["model"])
+print(f"Loaded {ckpt_path}")
 model.eval()
 
+class ExportWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, x):
+        p, v, vq = self.model(x, return_all=True)
+        v_probs = torch.softmax(v, dim=-1)
+        return p, v_probs
+
+model = ExportWrapper(model).to("cuda")
 
 # 2. Define Dynamic Axes (Works perfectly with Legacy Exporter)
 dynamic_axes = {
@@ -21,7 +35,7 @@ dynamic_axes = {
 dummy_input = torch.randn(1, 8, 8, 19, device="cuda:0")
 
 # 4. Export
-output_file = "model_dynamic_good.onnx"
+output_file = "model_dynamic_last_00001200.onnx"
 print(f"Exporting to {output_file} using Legacy Exporter (Opset 17)...")
 
 # CRITICAL: Do NOT pass dynamo=True. 

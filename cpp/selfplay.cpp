@@ -1,6 +1,7 @@
 #include "selfplay.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/single_inference.hpp"
+#include "mcts/cache.hpp"
 #include "chess-library/include/chess.hpp"
 
 #include <fstream>
@@ -38,6 +39,7 @@ struct SelfPlayWorker::Impl
 {
     SelfPlayConfig config;
     std::shared_ptr<chessrl::mcts::single::SmallBatchRunner> runner;
+    std::shared_ptr<chessrl::mcts::TranspositionTable> cache;
     std::vector<BoardSlot> slots;
     std::fstream outfile;
     size_t current_records = 0;
@@ -46,7 +48,11 @@ struct SelfPlayWorker::Impl
     {
         chessrl::mcts::single::SmallBatchConfig batch_config;
         batch_config.engine_path = config.engine_path;
+        batch_config.enable_telemetry = true;
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
+        
+        // 4GB cache
+        cache = std::make_shared<chessrl::mcts::TranspositionTable>(4096);
 
         slots.resize(config.concurrency);
         for (auto& slot : slots)
@@ -112,7 +118,20 @@ SelfPlayMetrics SelfPlayWorker::step()
     }
 
     // Run MCTS
-    auto summaries = chessrl::mcts::run_small_mcts_batch_shared(options, impl_->runner);
+    double start_infer_ms = impl_->runner->statistics().total_inference_ms;
+    auto summaries = chessrl::mcts::run_small_mcts_batch_shared(options, impl_->runner, impl_->cache);
+    double end_infer_ms = impl_->runner->statistics().total_inference_ms;
+
+    auto current_time = std::chrono::high_resolution_clock::now();
+    double mcts_duration_ms = std::chrono::duration<double, std::milli>(current_time - start_time).count();
+    double trt_duration_ms = end_infer_ms - start_infer_ms;
+
+    static int log_counter = 0;
+    // if (++log_counter % 10 == 0) {
+        std::ofstream logfile("/tmp/profile.log", std::ios::app);
+        logfile << "!!!!! [Profile] MCTS: " << mcts_duration_ms << " ms, TRT: " << trt_duration_ms << " ms" << std::endl;
+        impl_->cache->print_stats();
+    // }
 
     // Process results
     for (size_t i = 0; i < impl_->slots.size(); ++i)
@@ -137,6 +156,11 @@ SelfPlayMetrics SelfPlayWorker::step()
         SelfPlayRecord record;
         record.fen = slot.board.getFen();
         record.policy = summary.action;
+        // If mcts_value is enabled, store the MCTS value directly
+        if (impl_->config.mcts_value)
+        {
+            record.value = summary.value;
+        }
         slot.pending_records.push_back(record);
         metrics.positions_generated++;
 
@@ -193,21 +217,25 @@ SelfPlayMetrics SelfPlayWorker::step()
                     z = 0.0f;
             }
             
-            for (auto& rec : slot.pending_records)
+            // Only set value from game outcome if mcts_value is disabled
+            if (!impl_->config.mcts_value)
             {
-                bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
-                
-                if (white_to_move)
+                for (auto& rec : slot.pending_records)
                 {
-                    if (z == 1.0f) rec.value = {1.0f, 0.0f, 0.0f};
-                    else if (z == 0.0f) rec.value = {0.0f, 0.0f, 1.0f};
-                    else rec.value = {0.0f, 1.0f, 0.0f};
-                }
-                else
-                {
-                    if (z == 0.0f) rec.value = {1.0f, 0.0f, 0.0f};
-                    else if (z == 1.0f) rec.value = {0.0f, 0.0f, 1.0f};
-                    else rec.value = {0.0f, 1.0f, 0.0f};
+                    bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
+                    
+                    if (white_to_move)
+                    {
+                        if (z == 1.0f) rec.value = {1.0f, 0.0f, 0.0f};
+                        else if (z == 0.0f) rec.value = {0.0f, 0.0f, 1.0f};
+                        else rec.value = {0.0f, 1.0f, 0.0f};
+                    }
+                    else
+                    {
+                        if (z == 0.0f) rec.value = {1.0f, 0.0f, 0.0f};
+                        else if (z == 1.0f) rec.value = {0.0f, 0.0f, 1.0f};
+                        else rec.value = {0.0f, 1.0f, 0.0f};
+                    }
                 }
             }
             // Write to buffer

@@ -12,8 +12,10 @@ from rich.console import Console
 from torch import amp, optim
 
 import wandb
+import bulletchess
 
 from src.models.small.small_model import SmallModel
+from src.models.small.vocab import policy_to_idx
 
 from .config import TrainingConfig
 from .dataset import NULL_POLICY_INDEX, SelfPlayBatch, SelfPlayDataset
@@ -88,6 +90,58 @@ class Trainer:
             self._load_checkpoint(config.resume_path)
 
     # ------------------------------------------------------------------ #
+    def _compute_legal_move_mask(self, fen: str, device: torch.device) -> torch.Tensor:
+        """Create a binary mask (1 for legal moves, 0 for illegal) for a given FEN."""
+        board = bulletchess.Board.from_fen(fen)
+        mask = torch.zeros(1929, dtype=torch.float32, device=device)
+        
+        for move in board.legal_moves():
+            uci = move.uci()
+            # Handle knight promotions: strip 'n' suffix
+            if uci.endswith('n'):
+                uci = uci[:-1]
+            
+            if uci in policy_to_idx:
+                idx = policy_to_idx[uci]
+                mask[idx] = 1.0
+        
+        return mask
+
+    # ------------------------------------------------------------------ #
+    def _compute_legal_move_probability(
+        self, policy_probs: torch.Tensor, fens: list[str]
+    ) -> float:
+        """
+        Compute the probability that the network plays a legal move.
+        
+        For each position:
+        1. Compute softmax of logits (already done, passed as policy_probs)
+        2. Create legal moves mask
+        3. Multiply softmax with mask
+        4. Sum to get probability mass on legal moves
+        
+        Returns the average across the batch.
+        """
+        # only compute on the first 10 positions
+        fens = fens[:10]
+        policy_probs = policy_probs[:10]
+        B = policy_probs.shape[0]
+        legal_probs = []
+        
+        for i in range(B):
+            legal_mask = self._compute_legal_move_mask(fens[i], policy_probs.device)
+            # Check if there are any legal moves (should always be true, but safety check)
+            if legal_mask.sum() > 0:
+                # Multiply policy probabilities with legal mask and sum
+                prob_on_legal = (policy_probs[i] * legal_mask).sum().item()
+                legal_probs.append(prob_on_legal)
+            else:
+                # Position with no legal moves (shouldn't happen in training, but handle gracefully)
+                legal_probs.append(0.0)
+        
+        return sum(legal_probs) / len(legal_probs) if legal_probs else 0.0
+
+    # ------------------------------------------------------------------ #
     def _init_wandb(self):
         if not self.config.wandb.enabled:
             return None
@@ -112,24 +166,12 @@ class Trainer:
                 metrics = self._train_step(batch)
                 t1 = time.time()
                 # sleep (xs - (t1 - t0))
-                time.sleep(max(0, 40 - (t1 - t0)))
+                # time.sleep(max(0, 40 - (t1 - t0)))
                 self.step += 1
                 self.samples_processed += self.config.batch_size
 
                 if self.step % self.config.log_every == 0:
                     self._log(metrics)
-
-                if self.step % 100 == 0:
-                    # Save Student Checkpoint (for resuming training)
-                    ckpt = {
-                        "model": self.model.state_dict(),
-                        "optimizer": self.optimizer.state_dict(),
-                        "scaler": self.scaler.state_dict(),
-                        "step": self.step,
-                        "config": self.config.to_dict(),
-                    }
-                    path = self.checkpoint_dir / f"last.pt"
-                    torch.save(ckpt, path)
 
                 if self.step % self.config.checkpoint.every_steps == 0:
                     self._save_checkpoint()
@@ -146,7 +188,6 @@ class Trainer:
         inputs = torch.from_numpy(batch.planes).to(self.device)
         targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
         targets_value = torch.from_numpy(batch.values).to(self.device)
-        mask = torch.from_numpy(batch.mask).to(self.device)
         value_labels = torch.argmax(targets_value, dim=-1)
 
         with amp.autocast(device_type = self.device_type, dtype=self.amp_dtype):
@@ -162,31 +203,28 @@ class Trainer:
                 policy_logits, targets_policy, ignore_index=NULL_POLICY_INDEX
             )
 
-            if mask.any():
-                self.console.log(f"Mask detected")
-                masked_value_logits = value_logits[mask]
-                masked_labels = value_labels[mask]
-                value_loss = F.cross_entropy(masked_value_logits, masked_labels)
+            value_q_loss = F.cross_entropy(value_q_logits, value_labels)
 
-                value_q_probs = torch.softmax(value_q_logits, dim=-1)
-                value_q_loss = F.mse_loss(value_q_probs[mask], targets_value[mask])
+            value_probs = torch.softmax(value_logits, dim=-1)
+            value_loss = F.mse_loss(value_probs, targets_value)
 
-                value_accuracy = (
-                    (value_logits.argmax(dim=-1)[mask] == masked_labels)
-                    .float()
-                    .mean()
-                )
-            else:
-                value_loss = value_logits.sum() * 0.0
-                value_q_loss = value_logits.sum() * 0.0
-                value_accuracy = torch.tensor(0.0, device=self.device)
+            value_accuracy = (
+                (value_logits.argmax(dim=-1) == value_labels)
+                .float()    
+                .mean()
+            )
+            value_q_accuracy = (
+                (value_logits.argmax(dim=-1) == value_labels)
+                .float()
+                .mean()
+            )
 
-            total_loss = policy_loss + 100* value_q_loss
+
+            total_loss = 0.1 * policy_loss + value_q_loss + value_loss
 
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
-
         policy_accuracy = (
             (policy_logits.argmax(dim=-1) == targets_policy)
             .float()
@@ -201,6 +239,12 @@ class Trainer:
         eps = 1e-8
         policy_entropy = -(policy_probs * torch.log(policy_probs + eps)).sum(dim=-1).mean().item()
 
+        # Calculate probability mass on legal moves
+        # Compute softmax of logits, multiply with legal moves mask, then sum
+        legal_move_probs = self._compute_legal_move_probability(
+            policy_probs, batch.fens
+        )
+
         metrics = {
             "loss/total": float(total_loss.detach().item()),
             "loss/policy": float(policy_loss.detach().item()),
@@ -208,7 +252,9 @@ class Trainer:
             "loss/value_q": float(value_q_loss.detach().item()),
             "acc/policy": policy_accuracy,
             "acc/value": float(value_accuracy.detach().item()),
+            "acc/value_q": float(value_q_accuracy.detach().item()),
             "entropy/policy": policy_entropy,
+            "legal_move_prob": legal_move_probs,
         }
         return metrics
 
@@ -272,19 +318,18 @@ class Trainer:
             "step": self.step,
             "config": self.config.to_dict(),
         }
-        teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
+        # teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
+        teacher_path = self.checkpoint_dir / f"last_{self.step:08d}.pt"
         torch.save(teacher_ckpt, teacher_path)
         self.console.log(f"Saved teacher checkpoint to {teacher_path}")
 
         # Build engine from TEACHER checkpoint
-        self._invoke_build_script(teacher_path)
+        # self._invoke_build_script(teacher_path)
         
         # Evaluate STUDENT checkpoint (to see progress)
-        self._evaluate_checkpoint(path)
+        # self._evaluate_checkpoint(path)
         
-        self._prune_checkpoints()
-        self.console.log("Waiting for half an hour before next evaluation...")
-        # time.sleep(1000) # half an hour
+        # self._prune_checkpoints()
 
     def _load_checkpoint(self, path: Path) -> None:
         ckpt = torch.load(path, map_location=self.device)

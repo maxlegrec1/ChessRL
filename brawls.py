@@ -224,6 +224,7 @@ def _load_small_model(device: str, ckpt_path: Optional[str]):
         if isinstance(state, dict) and "model_state_dict" in state:
             model.load_state_dict(state["model_state_dict"],strict=False) 
         elif isinstance(state, dict) and "model" in state:
+            print(f"Loading model from {ckpt_to_load} with key model")
             model.load_state_dict(state["model"],strict=False)
         else:
             model.load_state_dict(state,strict=False)
@@ -280,15 +281,18 @@ if __name__ == "__main__":
     global_temp = 0.1 if args.temp is None else args.temp
     temp1 = args.temp1 if args.temp1 is not None else global_temp
     temp2 = args.temp2 if args.temp2 is not None else global_temp
-
+    
+    from src.models.small.inference_mcts import SmallMCTSInference
     # Load models based on selection
     if args.model1 == "small":
         model1 = _load_small_model(device, args.ckpt1)
+        model1 = SmallMCTSInference(engine_path="model_dynamic_initial.trt",cpuct=1.0, simulations=800)
     else:
         model1 = _load_leela_model(device, args.ckpt1)
 
     if args.model2 == "small":
         model2 = _load_small_model(device, args.ckpt2)
+        model2 = SmallMCTSInference(engine_path="model_dynamic_last_00001200.trt",cpuct=1.0, simulations=800)
     else:
         model2 = _load_leela_model(device, args.ckpt2)
 

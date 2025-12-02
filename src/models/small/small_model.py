@@ -47,6 +47,12 @@ class SmallModel(nn.Module):
         self.value_fc1 = nn.Linear(8 * 8 * 8, 128)
         self.value_fc2 = nn.Linear(128, 3) # WDL
 
+        # Value Head Q
+        self.value_conv_q = nn.Conv2d(64, 8, 1, bias=False)
+        self.value_bn_q = nn.BatchNorm2d(8)
+        self.value_fc1_q = nn.Linear(8 * 8 * 8, 128)
+        self.value_fc2_q = nn.Linear(128, 3)
+
     def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step = None):
         # inp is a list/tuple: [x, targets, ...] OR just x
         if isinstance(inp, (list, tuple)):
@@ -54,14 +60,6 @@ class SmallModel(nn.Module):
         else:
             x = inp
         
-        # Handle sequence dimension if present
-        if x.dim() == 5:
-            b, seq, h, w, c = x.shape
-            x = x.view(b * seq, h, w, c)
-            has_seq = True
-        else:
-            has_seq = False
-            
         # Permute to (B, C, H, W) for Conv2d
         x = x.permute(0, 3, 1, 2)
         
@@ -89,18 +87,16 @@ class SmallModel(nn.Module):
         v = self.value_fc1(v)
         v = F.relu(v)
         value_logits = self.value_fc2(v)
-        
-        # For compatibility with trainer which expects value_q_logits as well
-        # We can just return value_logits twice or zeros
-        value_q_logits = value_logits
-        
-        if has_seq:
-            b = inp[0].shape[0]
-            seq = inp[0].shape[1]
-            policy_logits = policy_logits.view(b, seq, -1)
-            value_logits = value_logits.view(b, seq, -1)
-            value_q_logits = value_q_logits.view(b, seq, -1)
 
+        # Value Head Q
+        v_q = self.value_conv_q(x)
+        v_q = self.value_bn_q(v_q)
+        v_q = F.relu(v_q)
+        v_q = v_q.flatten(1)
+        v_q = self.value_fc1_q(v_q)
+        v_q = F.relu(v_q)
+        value_q_logits = self.value_fc2_q(v_q)
+        
         if return_all:
             return policy_logits, value_logits, value_q_logits
             

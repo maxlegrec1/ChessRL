@@ -109,7 +109,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readonly("runtime_seconds", &chessrl::SelfPlayMetrics::runtime_seconds);
 
     py::class_<chessrl::SelfPlayWorker>(m, "SelfPlayWorker")
-        .def(py::init([](const std::string& engine_path, const std::string& output_path, int batch_size, int threads, int hash_size, int max_games, size_t max_buffer_size, bool save_pgn, std::string pgn_dir, int simulations) {
+        .def(py::init([](const std::string& engine_path, const std::string& output_path, int batch_size, int threads, int hash_size, int max_games, size_t max_buffer_size, bool save_pgn, std::string pgn_dir, int simulations, bool mcts_value) {
             chessrl::SelfPlayConfig config;
             config.engine_path = engine_path;
             config.output_path = output_path;
@@ -119,6 +119,7 @@ PYBIND11_MODULE(_inference_cpp, m)
             config.save_pgn = save_pgn;
             config.pgn_dir = pgn_dir;
             config.simulations = simulations;
+            config.mcts_value = mcts_value;
             return new chessrl::SelfPlayWorker(config);
         }),
         py::arg("engine_path"),
@@ -130,7 +131,8 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("max_buffer_size") = 1000000,
         py::arg("save_pgn") = false,
         py::arg("pgn_dir") = "pgns",
-        py::arg("simulations") = 800)
+        py::arg("simulations") = 800,
+        py::arg("mcts_value") = false)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
         .def("get_buffer_size", &chessrl::SelfPlayWorker::get_buffer_size);
 }

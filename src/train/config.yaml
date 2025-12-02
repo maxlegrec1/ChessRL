@@ -1,6 +1,6 @@
 device: cuda
 batch_size: 4096
-learning_rate: 0.02
+learning_rate: 0.001
 weight_decay: 0.0
 beta1: 0.9
 beta2: 0.999
@@ -10,14 +10,14 @@ run_name: null
 
 checkpoint:
   dir: checkpoints
-  every_steps: 10000
-  keep_last: 5
+  every_steps: 50
+  keep_last: 999999
   build_script: build_trt.sh
   engine_dir: engines
   iteration_file: src/self_play/.iteration
 
 data:
-  dataset_path: src/self_play/selfplay_buffer.bin
+  dataset_path: buffer_value.bin
   reload_seconds: 60
 
 wandb:

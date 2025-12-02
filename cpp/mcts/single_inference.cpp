@@ -1000,7 +1000,10 @@ struct SmallBatchRunner::Impl
     std::deque<SmallPending> queue;
     std::thread worker;
     // Phase C: Remove artificial timeout - set to minimal value to maximize GPU throughput
-    const std::chrono::microseconds flush_timeout_{1};
+    const std::chrono::microseconds flush_timeout_{[](){
+        if (const char* env = std::getenv("CHESSRL_MCTS_FLUSH_US")) return std::atoi(env);
+        return 500;
+    }()};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
     size_t batches_{0};

@@ -14,7 +14,6 @@ def read_binary_buffer(path: Path, max_rows: int = 10):
     with path.open("rb") as f:
         content = f.read()
     
-    offset = 0
     size = len(content)
     
     fens = []
@@ -28,7 +27,7 @@ def read_binary_buffer(path: Path, max_rows: int = 10):
     print("=" * 80)
     
     RECORD_SIZE = 128
-    
+    offset = 0
     row_count = 0
     while offset + RECORD_SIZE <= size:
         # Read FEN (100 bytes)
@@ -79,21 +78,45 @@ def read_binary_buffer(path: Path, max_rows: int = 10):
     print(f"Knight promotions: {len(knight_promotions)}")
     
     # WDL Distribution
-    wins = [v for v in values if v[0] > v[1] and v[0] > v[2]]
-    draws = [v for v in values if v[1] > v[0] and v[1] > v[2]]
-    losses = [v for v in values if v[2] > v[0] and v[2] > v[1]]
-    
-    print(f"Outcomes (Argmax):")
-    print(f"  Wins:   {len(wins):,} ({len(wins)/len(fens)*100:.1f}%)")
-    print(f"  Draws:  {len(draws):,} ({len(draws)/len(fens)*100:.1f}%)")
-    print(f"  Losses: {len(losses):,} ({len(losses)/len(fens)*100:.1f}%)")
+    if len(fens) > 0:
+        wins = [v for v in values if v[0] > v[1] and v[0] > v[2]]
+        draws = [v for v in values if v[1] > v[0] and v[1] > v[2]]
+        losses = [v for v in values if v[2] > v[0] and v[2] > v[1]]
+        
+        print(f"Outcomes (Argmax):")
+        print(f"  Wins:   {len(wins):,} ({len(wins)/len(fens)*100:.1f}%)")
+        print(f"  Draws:  {len(draws):,} ({len(draws)/len(fens)*100:.1f}%)")
+        print(f"  Losses: {len(losses):,} ({len(losses)/len(fens)*100:.1f}%)")
+    else:
+        print("Outcomes (Argmax): No data to analyze")
     
     # High confidence
-    high_wins = [v for v in values if v[0] > 0.7]
-    high_losses = [v for v in values if v[2] > 0.7]
-    print(f"High confidence (>0.7):")
-    print(f"  Wins:   {len(high_wins):,}")
-    print(f"  Losses: {len(high_losses):,}")
+    if len(fens) > 0:
+        high_win_indices = [i for i, v in enumerate(values) if v[0] > 0.7]
+        high_loss_indices = [i for i, v in enumerate(values) if v[2] > 0.7]
+        print(f"High confidence (>0.7):")
+        print(f"  Wins:   {len(high_win_indices):,}")
+        print(f"  Losses: {len(high_loss_indices):,}")
+        
+        # Print sample high-confidence wins
+        print(f"\nSample high-confidence wins (win_prob > 0.7):")
+        print("-" * 60)
+        for i, idx in enumerate(high_win_indices[:10]):
+            fen = fens[idx]
+            w, d, l = values[idx]
+            stm = "White" if " w " in fen else "Black"
+            print(f"  {i+1}. [{stm} to move] WDL=[{w:.3f}, {d:.3f}, {l:.3f}]")
+            print(f"     FEN: {fen}")
+        
+        # Print sample high-confidence losses
+        print(f"\nSample high-confidence losses (loss_prob > 0.7):")
+        print("-" * 60)
+        for i, idx in enumerate(high_loss_indices[:10]):
+            fen = fens[idx]
+            w, d, l = values[idx]
+            stm = "White" if " w " in fen else "Black"
+            print(f"  {i+1}. [{stm} to move] WDL=[{w:.3f}, {d:.3f}, {l:.3f}]")
+            print(f"     FEN: {fen}")
     
     # Color bias in wins/losses
     # Argmax0 (Wins) - check if mostly White or Black to move
@@ -108,9 +131,64 @@ def read_binary_buffer(path: Path, max_rows: int = 10):
         # Actually, if Loss (v[2] high), it means side to move lost.
         # So if Black to move and Loss, Black lost (White won).
         print(f"Loss bias: {black_losses/len(losses_indices)*100:.1f}% Black to move")
+    
+    # Bias breakdown by confidence level
+    print(f"\n" + "=" * 60)
+    print("BIAS BREAKDOWN BY CONFIDENCE LEVEL:")
+    print("=" * 60)
+    
+    # For wins (argmax = 0)
+    if wins_indices:
+        high_conf_wins = [i for i in wins_indices if values[i][0] > 0.5]
+        low_conf_wins = [i for i in wins_indices if values[i][0] <= 0.5]
+        
+        if high_conf_wins:
+            white_high = len([i for i in high_conf_wins if " w " in fens[i]])
+            print(f"\nHigh-confidence wins (WDL[0] > 0.5): {len(high_conf_wins):,}")
+            print(f"  White to move: {white_high:,} ({white_high/len(high_conf_wins)*100:.1f}%)")
+            print(f"  Black to move: {len(high_conf_wins)-white_high:,} ({(len(high_conf_wins)-white_high)/len(high_conf_wins)*100:.1f}%)")
+        
+        if low_conf_wins:
+            white_low = len([i for i in low_conf_wins if " w " in fens[i]])
+            print(f"\nLow-confidence wins (WDL[0] <= 0.5): {len(low_conf_wins):,}")
+            print(f"  White to move: {white_low:,} ({white_low/len(low_conf_wins)*100:.1f}%)")
+            print(f"  Black to move: {len(low_conf_wins)-white_low:,} ({(len(low_conf_wins)-white_low)/len(low_conf_wins)*100:.1f}%)")
+            
+            # Show sample low-confidence wins
+            print(f"\n  Sample low-confidence 'wins' (first 5):")
+            for i, idx in enumerate(low_conf_wins[:5]):
+                fen = fens[idx]
+                w, d, l = values[idx]
+                stm = "White" if " w " in fen else "Black"
+                print(f"    {i+1}. [{stm}] WDL=[{w:.4f}, {d:.4f}, {l:.4f}]")
+    
+    # For losses (argmax = 2)
+    if losses_indices:
+        high_conf_losses = [i for i in losses_indices if values[i][2] > 0.5]
+        low_conf_losses = [i for i in losses_indices if values[i][2] <= 0.5]
+        
+        if high_conf_losses:
+            black_high = len([i for i in high_conf_losses if " b " in fens[i]])
+            print(f"\nHigh-confidence losses (WDL[2] > 0.5): {len(high_conf_losses):,}")
+            print(f"  Black to move: {black_high:,} ({black_high/len(high_conf_losses)*100:.1f}%)")
+            print(f"  White to move: {len(high_conf_losses)-black_high:,} ({(len(high_conf_losses)-black_high)/len(high_conf_losses)*100:.1f}%)")
+        
+        if low_conf_losses:
+            black_low = len([i for i in low_conf_losses if " b " in fens[i]])
+            print(f"\nLow-confidence losses (WDL[2] <= 0.5): {len(low_conf_losses):,}")
+            print(f"  Black to move: {black_low:,} ({black_low/len(low_conf_losses)*100:.1f}%)")
+            print(f"  White to move: {len(low_conf_losses)-black_low:,} ({(len(low_conf_losses)-black_low)/len(low_conf_losses)*100:.1f}%)")
+            
+            # Show sample low-confidence losses
+            print(f"\n  Sample low-confidence 'losses' (first 5):")
+            for i, idx in enumerate(low_conf_losses[:5]):
+                fen = fens[idx]
+                w, d, l = values[idx]
+                stm = "White" if " w " in fen else "Black"
+                print(f"    {i+1}. [{stm}] WDL=[{w:.4f}, {d:.4f}, {l:.4f}]")
 
 if __name__ == "__main__":
-    buffer_path = Path("src/self_play/selfplay_buffer.bin")
+    buffer_path = Path("buffer_value.bin")
     if len(sys.argv) > 1:
         buffer_path = Path(sys.argv[1])
     

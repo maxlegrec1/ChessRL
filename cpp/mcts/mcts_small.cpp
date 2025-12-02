@@ -1,3 +1,4 @@
+#include "mcts/cache.hpp"
 #include "inference.hpp"
 #include "mcts/common.hpp"
 #include "mcts/small_runner.hpp"
@@ -131,7 +132,9 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
 class SmallMctsRunner
 {
 public:
-    SmallMctsRunner(MctsOptions options, std::shared_ptr<single::SmallBatchRunner> shared_runner = {})
+    SmallMctsRunner(MctsOptions options, 
+                    std::shared_ptr<single::SmallBatchRunner> shared_runner = {},
+                    std::shared_ptr<TranspositionTable> cache = {})
         : options_(std::move(options))
         , vocab_(small_policy_vocabulary())
         , vocab_index_(build_vocab_index(vocab_))
@@ -139,6 +142,7 @@ public:
         , small_batch_runner_(
               shared_runner ? std::move(shared_runner)
                             : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
+        , cache_(std::move(cache))
         , rng_(std::random_device{}())
     {
         // Phase B: Store root board for state reconstruction during traversal
@@ -153,12 +157,16 @@ public:
     {
         // Phase B: Pass root board to evaluate_node
         evaluate_node(0, root_board_);
+        
         for (int i = 0; i < options_.simulations; ++i)
         {
             run_simulation();
         }
+
         refine_wdl_recursive();
+
         MctsSummary summary = summarize();
+        
         if (small_batch_config_.enable_telemetry)
         {
             auto stats = small_batch_runner_->statistics();
@@ -215,6 +223,7 @@ private:
             path.push_back(node_index);
         }
     }
+
 
     int select_child(int node_index) const
     {
@@ -290,9 +299,32 @@ private:
         }
 
         // Phase B: Use passed board_state for encoding
-        auto encoded = acquire_small_encoding(node.history, board_state);
-        auto ticket = small_batch_runner_->enqueue(*encoded);
-        SmallPolicyValue eval = ticket.get();
+        // Check cache
+        SmallPolicyValue eval;
+        bool cache_hit = false;
+        uint64_t hash = board_state.zobrist();
+        
+        if (cache_)
+        {
+            if (auto cached = cache_->get(hash))
+            {
+                eval = *cached;
+                cache_hit = true;
+            }
+        }
+
+        if (!cache_hit)
+        {
+            auto encoded = acquire_small_encoding(node.history, board_state);
+            auto ticket = small_batch_runner_->enqueue(*encoded);
+            eval = ticket.get();
+            
+            if (cache_)
+            {
+                cache_->put(hash, eval);
+            }
+        }
+
         if (eval.policy_logits.size() != chessrl::small_policy_size())
         {
             throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
@@ -761,6 +793,7 @@ private:
         const HistoryEntry* key = history.get();
         std::lock_guard<std::mutex> lock(small_cache_mutex_);
         auto it = small_encoding_cache_.find(key);
+
         if (it != small_encoding_cache_.end())
         {
             if (auto existing = it->second.lock())
@@ -780,6 +813,7 @@ private:
     std::unordered_map<std::string, int> vocab_index_;
     single::SmallBatchConfig small_batch_config_;
     std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
+    std::shared_ptr<TranspositionTable> cache_;
     mutable std::mutex small_cache_mutex_;
     std::unordered_map<const HistoryEntry*, std::weak_ptr<const single::SmallEncodedPosition>> small_encoding_cache_;
     std::mt19937 rng_;
@@ -793,7 +827,10 @@ MctsSummary run_small_mcts(MctsOptions options)
     return runner.run();
 }
 
-std::vector<MctsSummary> run_small_mcts_batch_shared(std::vector<MctsOptions> batch_options, std::shared_ptr<single::SmallBatchRunner> shared_runner)
+std::vector<MctsSummary> run_small_mcts_batch_shared(
+    std::vector<MctsOptions> batch_options, 
+    std::shared_ptr<single::SmallBatchRunner> shared_runner,
+    std::shared_ptr<TranspositionTable> cache)
 {
     if (batch_options.empty())
     {
@@ -811,7 +848,7 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(std::vector<MctsOptions> ba
     workers.reserve(num_threads);
 
     // Worker routine: fetch jobs from the queue until all are processed
-    auto worker_routine = [&batch_options, shared_runner, &summaries, &next_job_index]() {
+    auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index]() {
         while (true)
         {
             const size_t job_id = next_job_index.fetch_add(1);
@@ -820,7 +857,7 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(std::vector<MctsOptions> ba
                 break;
             }
             
-            SmallMctsRunner runner(batch_options[job_id], shared_runner);
+            SmallMctsRunner runner(batch_options[job_id], shared_runner, cache);
             summaries[job_id] = runner.run();
         }
     };

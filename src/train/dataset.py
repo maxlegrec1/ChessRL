@@ -31,7 +31,6 @@ class SelfPlayBatch:
     planes: np.ndarray  # [B, 1, 8, 8, 19]
     policy_indices: np.ndarray  # [B]
     values: np.ndarray  # [B, 3]
-    mask: np.ndarray  # [B] bool for valid value targets
     fens: List[str]
 
 
@@ -152,9 +151,8 @@ class SelfPlayDataset:
             raise RuntimeError("Self-play dataset is empty. Run self-play generator first.")
 
         indices = self._rng.integers(0, self._size, size=batch_size, endpoint=False)
-        planes = np.zeros((batch_size, 1, 8, 8, 19), dtype=np.float32)
+        planes = np.zeros((batch_size, 8, 8, 19), dtype=np.float32)
         values = np.zeros((batch_size, 3), dtype=np.float32)
-        masks = np.zeros((batch_size,), dtype=bool)
         policy_indices = np.full((batch_size,), NULL_POLICY_INDEX, dtype=np.int64)
         fens: List[str] = []
 
@@ -170,17 +168,14 @@ class SelfPlayDataset:
                 wdl = mirror_wdl(wdl)
                 policy_str = mirror_policy_str(policy_str)
             fens.append(fen)
-            planes[row, 0] = fen_to_tensor(fen)
+            planes[row] = fen_to_tensor(fen)
             values[row] = wdl
-            masks[row] = bool(np.sum(wdl) > 0)
-
             policy_indices[row] = _policy_str_to_idx(policy_str)
 
         return SelfPlayBatch(
             planes=planes,
             policy_indices=policy_indices,
             values=values,
-            mask=masks,
             fens=fens,
         )
 

@@ -17,7 +17,7 @@ from .metrics import MetricsTracker
 SIMULATIONS = 800
 
 
-DEFAULT_BUFFER = Path("src/self_play/selfplay_buffer.parquet")
+DEFAULT_BUFFER = Path("src/self_play/selfplay_buffer.bin")
 DEFAULT_ITERATION = Path("src/self_play/.iteration")
 
 
@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Self-play data generation loop.")
     parser.add_argument("--boards", type=int, default=128, help="Number of parallel boards.")
     parser.add_argument("--buffer-path", type=Path, default=DEFAULT_BUFFER, help="Path to parquet buffer.")
+    parser.add_argument("--max-buffer-size", type=int, default=10_000_000, help="Maximum buffer size.")
     parser.add_argument("--iteration-file", type=Path, default=DEFAULT_ITERATION, help="Path to .iteration CSV.")
     parser.add_argument("--poll-seconds", type=int, default=300, help="Seconds between iteration file checks.")
     parser.add_argument(
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hash-size", type=int, default=128, help="Hash size in MB.")
     parser.add_argument("--save-pgn", action="store_true", help="Save games as PGN")
     parser.add_argument("--pgn-dir", type=str, default="pgns", help="Directory to save PGNs")
+    parser.add_argument("--mcts-value", action="store_true", help="Use MCTS value instead of game outcome for WDL")
     return parser.parse_args()
 
 
@@ -69,12 +71,7 @@ def main() -> int:
     args = parse_args()
     console = Console()
 
-    # Change default buffer to .bin if it was default
-    buffer_path = args.buffer_path
-    if buffer_path == DEFAULT_BUFFER:
-        buffer_path = Path("src/self_play/selfplay_buffer.bin")
-    
-    buffer_path = buffer_path.resolve()
+    buffer_path = args.buffer_path.resolve()
     iteration_path = args.iteration_file.resolve()
 
     # Ensure directory exists
@@ -107,10 +104,11 @@ def main() -> int:
                         threads=args.threads,
                         hash_size=args.hash_size,
                         max_games=-1,
-                        max_buffer_size=1000000,
+                        max_buffer_size=args.max_buffer_size,
                         save_pgn=args.save_pgn,
                         pgn_dir=args.pgn_dir,
-                        simulations=SIMULATIONS
+                        simulations=SIMULATIONS,
+                        mcts_value=args.mcts_value
                     )
                     console.log(f"Initialized worker with engine: {current_engine_path}")
 
@@ -127,10 +125,11 @@ def main() -> int:
                             threads=args.threads,
                             hash_size=args.hash_size,
                             max_games=-1,
-                            max_buffer_size=1000000,
+                            max_buffer_size=args.max_buffer_size,
                             save_pgn=args.save_pgn,
                             pgn_dir=args.pgn_dir,
-                            simulations=SIMULATIONS
+                            simulations=SIMULATIONS,
+                            mcts_value=args.mcts_value
                         )
                         console.log(f"Initialized worker with engine: {current_engine_path}")
                     else:
