@@ -10,14 +10,14 @@ run_name: null
 
 checkpoint:
   dir: checkpoints
-  every_steps: 50
+  every_steps: 100
   keep_last: 999999
   build_script: build_trt.sh
   engine_dir: engines
   iteration_file: src/self_play/.iteration
 
 data:
-  dataset_path: buffer_value.bin
+  dataset_path: buffer_value_perspective.bin
   reload_seconds: 60
 
 wandb:

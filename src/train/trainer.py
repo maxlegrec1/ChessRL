@@ -318,8 +318,7 @@ class Trainer:
             "step": self.step,
             "config": self.config.to_dict(),
         }
-        # teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
-        teacher_path = self.checkpoint_dir / f"last_{self.step:08d}.pt"
+        teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
         torch.save(teacher_ckpt, teacher_path)
         self.console.log(f"Saved teacher checkpoint to {teacher_path}")
 

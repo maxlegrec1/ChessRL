@@ -152,6 +152,8 @@ def main_model_vs_model(
     pgn_filename = os.path.join(
         "./pgns", datetime.now().strftime("brawls_%Y%m%d_%H%M%S.pgn")
     )
+    # Create/clear the PGN file for progressive writing
+    open(pgn_filename, "w", encoding="utf-8").close()
 
     wins1 = 0
     wins2 = 0
@@ -180,6 +182,12 @@ def main_model_vs_model(
 
         all_games.append(game)
 
+        # Write game to PGN file immediately
+        with open(pgn_filename, "a", encoding="utf-8") as f:
+            exporter = pgn.FileExporter(f)
+            game.accept(exporter)
+            f.write("\n\n")
+
         if result == "1-0":
             if i % 2 == 0:
                 wins1 += 1
@@ -199,12 +207,6 @@ def main_model_vs_model(
         print(
             f"Game {played}/{num_games} done. Score: {model1_name} {score1:.1f} - {score2:.1f} {model2_name}"
         )
-
-    with open(pgn_filename, "w", encoding="utf-8") as f:
-        for g in all_games:
-            exporter = pgn.FileExporter(f)
-            g.accept(exporter)
-            f.write("\n\n")
 
     print(
         f"Final: {model1_name} wins={wins1}, {model2_name} wins={wins2}, draws={draws} (saved {len(all_games)} games to {pgn_filename})"
@@ -285,14 +287,14 @@ if __name__ == "__main__":
     from src.models.small.inference_mcts import SmallMCTSInference
     # Load models based on selection
     if args.model1 == "small":
-        model1 = _load_small_model(device, args.ckpt1)
+        # model1 = _load_small_model(device, args.ckpt1)
         model1 = SmallMCTSInference(engine_path="model_dynamic_initial.trt",cpuct=1.0, simulations=800)
     else:
         model1 = _load_leela_model(device, args.ckpt1)
 
     if args.model2 == "small":
-        model2 = _load_small_model(device, args.ckpt2)
-        model2 = SmallMCTSInference(engine_path="model_dynamic_last_00001200.trt",cpuct=1.0, simulations=800)
+        # model2 = _load_small_model(device, args.ckpt2)
+        model2 = SmallMCTSInference(engine_path="model_dynamic_step_00005000.trt",cpuct=1.0, simulations=800)
     else:
         model2 = _load_leela_model(device, args.ckpt2)
 

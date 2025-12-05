@@ -196,8 +196,8 @@ def _ensure_tuple(row) -> tuple[float, float, float]:
 
 def mirror_fen(fen: str) -> str:
     board = chess.Board(fen)
-    board.mirror()
-    return board.fen()
+    mirrored = board.mirror()  # mirror() returns a NEW board, does not modify in place
+    return mirrored.fen()
 
 def mirror_policy_str(policy_str: str) -> str:
     i,j = int(policy_str[1]),int(policy_str[3])
