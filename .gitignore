@@ -19,7 +19,7 @@ wheels/
 ./runs/
 *.parquet
 wandb/
-
+*bin
 *.lock
 *.so
 
