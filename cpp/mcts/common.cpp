@@ -330,6 +330,11 @@ std::vector<std::string> parse_history_argument(const std::string& raw)
 
 chess::Board apply_history(const SearchInput& input)
 {
+    if (input.board)
+    {
+        return *input.board;
+    }
+
     const std::string fenToUse = input.fen.empty() ? std::string(chess::constants::STARTPOS) : input.fen;
     chess::Board board(fenToUse);
 

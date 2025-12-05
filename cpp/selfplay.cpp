@@ -105,6 +105,8 @@ SelfPlayMetrics SelfPlayWorker::step()
     {
         chessrl::mcts::MctsOptions opt;
         opt.request.fen = slot.board.getFen();
+        opt.request.history = slot.history;
+        opt.request.board = slot.board;
         opt.simulations = impl_->config.simulations;
         opt.cpuct = impl_->config.cpuct;
         opt.temperature = impl_->config.temperature;

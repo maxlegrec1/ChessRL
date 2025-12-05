@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -14,6 +15,7 @@ struct SearchInput
 {
     std::string fen;
     std::vector<std::string> history;
+    std::optional<chess::Board> board;
 };
 
 struct HistoryEntry;
