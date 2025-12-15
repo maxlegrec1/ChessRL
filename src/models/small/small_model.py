@@ -102,7 +102,7 @@ class SmallModel(nn.Module):
             
         return policy_logits
 
-    def get_move_from_fen_no_thinking(self, fen: str, T: float = 0.0, device: str = None, return_probs: bool = False):
+    def get_move_from_fen_no_thinking(self, fen: str, T: float = 0.0, device: str = None, return_probs: bool = False, return_pre_probs: bool = False):
         if device is None:
             device = next(self.parameters()).device
         
@@ -113,7 +113,10 @@ class SmallModel(nn.Module):
         self.eval()
         with torch.no_grad():
             logits = self(x) # [1, 1929]
-            
+        
+        temp = T if T > 0 else 1.0
+        pre_probs = F.softmax(logits / temp, dim=-1) if return_pre_probs else None
+        
         # Mask illegal moves
         board = bulletchess.Board.from_fen(fen)
         legal_mask = torch.full((1, 1929), -float('inf'), device=device)
@@ -144,11 +147,11 @@ class SmallModel(nn.Module):
         if not legal_moves_found:
             # Should not happen for valid FENs unless game over
             return None if not return_probs else (None, None)
-            
-        logits = logits + legal_mask
+        
+        masked_logits = logits + legal_mask
         
         # Softmax
-        probs = F.softmax(logits / (T if T > 0 else 1.0), dim=-1)
+        probs = F.softmax(masked_logits / temp, dim=-1)
         
         if T == 0:
             # Greedy
@@ -160,8 +163,10 @@ class SmallModel(nn.Module):
         move_uci = policy_index[move_idx]
         
         if return_probs:
+            if return_pre_probs:
+                return move_uci, probs, pre_probs
             return move_uci, probs
-            
+        
         return move_uci
 
     def get_position_value(self, fen: str, device: str = None):

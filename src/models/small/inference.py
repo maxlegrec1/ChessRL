@@ -80,7 +80,7 @@ class AbsolutePositionalEncoder(torch.nn.Module):
 class Inference(torch.nn.Module):
     def __init__(self,num_layers = 4, d_model=256, d_ff=512, num_heads = 4):
         super().__init__()
-        self.is_thinking_model = False
+        self.needs_history = False
         self.d_model = d_model
 
         self.num_layers = num_layers

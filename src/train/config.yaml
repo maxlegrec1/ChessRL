@@ -1,5 +1,5 @@
 device: cuda
-batch_size: 4096
+batch_size: 1024
 learning_rate: 0.001
 weight_decay: 0.0
 beta1: 0.9
@@ -7,6 +7,8 @@ beta2: 0.999
 log_every: 1
 amp_dtype: float16
 run_name: null
+teacher_decay: 0.8
+teacher_weight: 0.2
 
 checkpoint:
   dir: checkpoints

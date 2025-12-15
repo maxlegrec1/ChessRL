@@ -104,7 +104,7 @@ class LearnedPositionalEncoder(nn.Module):
 class BT4(torch.nn.Module):
     def __init__(self,num_layers = 4, d_model=256, d_ff=512, num_heads = 4):
         super().__init__()
-        self.is_thinking_model = False
+        self.needs_history = False
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff

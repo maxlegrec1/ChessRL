@@ -46,8 +46,8 @@ class TrainingConfig:
     amp_dtype: str = "float16"
     resume_path: Optional[Path] = None
     run_name: Optional[str] = None
-    teacher_decay: float = 0.9
-    teacher_weight: float = 0.1
+    teacher_decay: float = 0.8
+    teacher_weight: float = 0.2
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

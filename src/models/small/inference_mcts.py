@@ -5,6 +5,8 @@ class SmallMCTSInference():
         self.simulations = simulations
         self.cpuct = cpuct
         self.mcts = SmallMCTS(engine_path=engine_path, temperature=1, cpuct=cpuct)
+        # Flag for callers (like brawls.py) to prefer move-history inputs over FEN.
+        self.prefers_move_history = True
     
     def get_move_from_fen_no_thinking(self, fen, T=1, device="cuda", force_legal=True, return_probs=False, use_fp16: bool = False):
         # Use T for final action selection (temperature_at_root), but keep internal
@@ -21,6 +23,33 @@ class SmallMCTSInference():
         )
         action = res[0]["action"]
         return action
+
+    def get_move_from_history_no_thinking(
+        self,
+        move_history,
+        *,
+        root_fen: str | None = None,
+        T=1,
+        device="cuda",
+        force_legal=True,
+        return_probs=False,
+        use_fp16: bool = False,
+    ):
+        """Return a move using MCTS fed with move history instead of a FEN."""
+        histories = [move_history]
+        fens = [] if root_fen is None else [root_fen]
+        res = self.mcts.run_from_histories(
+            histories,
+            root_fens=fens,
+            temperature=1.0,
+            simulations=self.simulations,
+            cpuct=self.cpuct,
+            temperature_at_root=T,
+            use_dirichlet=False,
+        )
+        if not res:
+            return None
+        return res[0].get("action")
 
 if __name__ == "__main__":
     inference = SmallMCTSInference(engine_path="model.trt",cpuct=1.0, simulations=100)

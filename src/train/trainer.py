@@ -166,7 +166,7 @@ class Trainer:
                 metrics = self._train_step(batch)
                 t1 = time.time()
                 # sleep (xs - (t1 - t0))
-                # time.sleep(max(0, 40 - (t1 - t0)))
+                time.sleep(max(0, 12 - (t1 - t0)))
                 self.step += 1
                 self.samples_processed += self.config.batch_size
 
@@ -225,6 +225,9 @@ class Trainer:
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
+
+        # Keep teacher in sync every step using EMA
+        self._update_teacher()
         policy_accuracy = (
             (policy_logits.argmax(dim=-1) == targets_policy)
             .float()
@@ -297,9 +300,6 @@ class Trainer:
                 )
 
     def _save_checkpoint(self) -> None:
-        # Update teacher before saving
-        self._update_teacher()
-
         # Save Student Checkpoint (for resuming training)
         ckpt = {
             "model": self.model.state_dict(),
@@ -322,13 +322,13 @@ class Trainer:
         torch.save(teacher_ckpt, teacher_path)
         self.console.log(f"Saved teacher checkpoint to {teacher_path}")
 
-        # Build engine from TEACHER checkpoint
-        # self._invoke_build_script(teacher_path)
+        # Build engine from STUDENT checkpoint
+        self._invoke_build_script(path)
         
         # Evaluate STUDENT checkpoint (to see progress)
         # self._evaluate_checkpoint(path)
         
-        # self._prune_checkpoints()
+        self._prune_checkpoints()
 
     def _load_checkpoint(self, path: Path) -> None:
         ckpt = torch.load(path, map_location=self.device)

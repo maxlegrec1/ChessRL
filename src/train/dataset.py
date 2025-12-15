@@ -23,6 +23,9 @@ def _policy_str_to_idx(move: str) -> int:
     if not move:
         return NULL_POLICY_INDEX
     move = move.strip()
+    # Normalize knight promotion suffixes (e.g., e7e8n) to align with vocab
+    if move.endswith("n"):
+        move = move[:-1]
     return policy_to_idx.get(move, NULL_POLICY_INDEX)
 
 

@@ -1,5 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <algorithm>
 
 #include "inference.hpp"
 #include "mcts/small_runner.hpp"
@@ -101,6 +102,60 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("dirichlet_alpha") = 0.3F,
         py::arg("dirichlet_epsilon") = 0.25F,
         "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
+
+    // History-based entry point to avoid reconstructing FEN strings in Python.
+    m.def(
+        "small_mcts_search_batch_with_history",
+        [](const std::vector<std::vector<std::string>>& histories,
+           const std::vector<std::string>& fens,
+           int simulations,
+           float cpuct,
+           float temperature,
+           const std::string& engine_path,
+           float temperature_at_root,
+           bool use_dirichlet,
+           float dirichlet_alpha,
+           float dirichlet_epsilon) {
+            std::vector<chessrl::mcts::MctsOptions> requests;
+            requests.reserve(histories.size());
+            for (size_t i = 0; i < histories.size(); ++i)
+            {
+                const std::vector<std::string>& history = histories[i];
+                const std::string fen = (i < fens.size()) ? fens[i] : std::string();
+                chessrl::mcts::MctsOptions options;
+                options.request.fen = fen;
+                options.request.history = history;
+                options.simulations = simulations;
+                options.cpuct = cpuct;
+                options.temperature = temperature;
+                options.small_engine_path = engine_path;
+                options.temperature_at_root = temperature_at_root;
+                options.use_dirichlet = use_dirichlet;
+                options.dirichlet_alpha = dirichlet_alpha;
+                options.dirichlet_epsilon = dirichlet_epsilon;
+                requests.push_back(std::move(options));
+            }
+
+            auto summaries = chessrl::mcts::run_small_mcts_batch(std::move(requests));
+            std::vector<py::dict> python_results;
+            python_results.reserve(summaries.size());
+            for (const auto& summary : summaries)
+            {
+                python_results.push_back(summary_to_python(summary));
+            }
+            return python_results;
+        },
+        py::arg("histories"),
+        py::arg("fens") = std::vector<std::string>(),
+        py::arg("simulations") = 800,
+        py::arg("cpuct") = 1.5F,
+        py::arg("temperature") = 1.0F,
+        py::arg("engine_path") = std::string("model.trt"),
+        py::arg("temperature_at_root") = 0.0F,
+        py::arg("use_dirichlet") = false,
+        py::arg("dirichlet_alpha") = 0.3F,
+        py::arg("dirichlet_epsilon") = 0.25F,
+        "Execute small-model MCTS searches for a batch of move histories and return per-root action, policy, and Q-values.");
 
     py::class_<chessrl::SelfPlayMetrics>(m, "SelfPlayMetrics")
         .def_readonly("games_finished", &chessrl::SelfPlayMetrics::games_finished)

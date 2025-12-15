@@ -162,6 +162,56 @@ class SmallMCTS(_BaseMCTS):
         )
         return [self._format_result(payload) for payload in payloads]
 
+    def run_from_histories(
+        self,
+        histories: Sequence[Iterable[str]],
+        *,
+        root_fens: Sequence[str | None] | None = None,
+        simulations: int | None = None,
+        cpuct: float | None = None,
+        temperature: float | None = None,
+        temperature_at_root: float | None = None,
+        engine_path: str | None = None,
+        use_dirichlet: bool | None = None,
+        dirichlet_alpha: float | None = None,
+        dirichlet_epsilon: float | None = None,
+    ) -> list[dict[str, object]]:
+        if isinstance(histories, (str, bytes)):
+            raise TypeError("SmallMCTS.run_from_histories requires a sequence of move sequences, not a single string.")
+
+        history_list = [_coerce_history(history) for history in histories]
+        if not history_list:
+            return []
+
+        fen_list: list[str] = []
+        if root_fens is not None:
+            fen_list = ["" if fen is None else str(fen) for fen in root_fens]
+
+        cfg = self._prepare_call(
+            simulations=simulations,
+            cpuct=cpuct,
+            temperature=temperature,
+            temperature_at_root=temperature_at_root,
+            engine_path=engine_path,
+            use_dirichlet=use_dirichlet,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+        )
+
+        payloads = _cpp.small_mcts_search_batch_with_history(
+            history_list,
+            fen_list,
+            cfg.simulations,
+            cfg.cpuct,
+            cfg.temperature,
+            cfg.engine_path,
+            cfg.temperature_at_root,
+            cfg.use_dirichlet,
+            cfg.dirichlet_alpha,
+            cfg.dirichlet_epsilon,
+        )
+        return [self._format_result(payload) for payload in payloads]
+
     __call__ = run
 
 
