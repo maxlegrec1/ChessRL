@@ -1,9 +1,13 @@
 from src.mcts import SmallMCTS
 
 class SmallMCTSInference():
-    def __init__(self, engine_path: str = "model.trt", cpuct: float = 1.0, simulations: int = 100):
+    def __init__(self, engine_path: str = "model.trt", cpuct: float = 1.0, simulations: int = 100, temperature: float = 1.0,temperature_at_root: float = 0.0,use_dirichlet: bool = False,dirichlet_alpha: float = 0.3,dirichlet_epsilon: float = 0.25):
         self.simulations = simulations
         self.cpuct = cpuct
+        self.temperature = temperature
+        self.use_dirichlet = use_dirichlet
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
         self.mcts = SmallMCTS(engine_path=engine_path, temperature=1, cpuct=cpuct)
         # Flag for callers (like brawls.py) to prefer move-history inputs over FEN.
         self.prefers_move_history = True
@@ -15,11 +19,13 @@ class SmallMCTSInference():
         # causes MCTS to miss winning moves like checkmates.
         res = self.mcts.run(
             [fen],
-            temperature=1.0,  # Internal search temperature - keep at 1.0 for exploration
+            temperature=self.temperature,  # Internal search temperature - keep at 1.0 for exploration
             simulations=self.simulations,
             cpuct=self.cpuct,
-            temperature_at_root=T,  # Use T for final action selection
-            use_dirichlet=False
+            temperature_at_root=self.temperature_at_root,  # Use T for final action selection
+            use_dirichlet=self.use_dirichlet,
+            dirichlet_alpha=self.dirichlet_alpha,
+            dirichlet_epsilon=self.dirichlet_epsilon
         )
         action = res[0]["action"]
         return action
