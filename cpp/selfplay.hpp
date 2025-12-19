@@ -13,12 +13,12 @@ struct SelfPlayConfig
     std::string output_path;
     int concurrency = 256;
     int simulations = 800;
-    float cpuct = 1.3f;
-    float temperature = 0.9f;
-    float temperature_at_root = 1.5f;
+    float cpuct = 0.65f;
+    float temperature = 1.3f;
+    float temperature_at_root = 1.0f;
     bool use_dirichlet = true;
-    float dirichlet_alpha = 0.2f;
-    float dirichlet_epsilon = 0.15f;
+    float dirichlet_alpha = 0.12f;
+    float dirichlet_epsilon = 0.05f;
     int max_games = -1; // -1 for infinite
     size_t max_buffer_size = 1000000; // Max number of positions in buffer
     bool save_pgn = false;
