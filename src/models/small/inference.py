@@ -78,7 +78,7 @@ class AbsolutePositionalEncoder(torch.nn.Module):
         return self.positional_encoding.expand(batch_size, -1, -1)
 
 class Inference(torch.nn.Module):
-    def __init__(self,num_layers = 4, d_model=256, d_ff=512, num_heads = 4):
+    def __init__(self,num_layers = 10, d_model=512, d_ff=1024, num_heads = 8):
         super().__init__()
         self.needs_history = False
         self.d_model = d_model
@@ -107,6 +107,10 @@ class Inference(torch.nn.Module):
         self.value_head_q = ValueHeadQ(d_model)
 
     def forward(self,x):
+        # Extract is_white from plane 12 before reshaping
+        # x has shape (b, 8, 8, 19), plane 12 is side to move
+        is_white = x[:, 0, 0, 12] > 0.5  # Shape: (b,)
+        
         x = x.view(-1,64,19)
         #print(x.shape)
         x = self.linear1(x)
@@ -123,6 +127,12 @@ class Inference(torch.nn.Module):
 
         value = self.value_head_q(x)
         value = torch.softmax(value, dim=-1)
+        
+        # Reverse WDL for positions where side to move is white
+        # WDL reversal: [win, draw, loss] -> [loss, draw, win]
+        is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, 1)
+        value_reversed = torch.stack([value[:, 2], value[:, 1], value[:, 0]], dim=-1)
+        value = torch.where(is_white_expanded, value_reversed, value)
 
         policy_tokens = self.policy_tokens_lin(x)
         policy_tokens = torch.nn.GELU()(policy_tokens)
@@ -206,6 +216,9 @@ class Inference(torch.nn.Module):
         x = torch.from_numpy(fen_to_tensor(fen)).to(device).to(torch.float32)
         x = x.view(1, 8, 8, 19)
         
+        # Extract is_white from plane 12
+        is_white = x[:, 0, 0, 12] > 0.5  # Shape: (1,)
+        
         # Forward pass through the model to get value
         with torch.no_grad():
             # We need to run through the model layers to get to value_head
@@ -224,6 +237,11 @@ class Inference(torch.nn.Module):
             value_logits = self.value_head_q(x_processed)
             value_logits = value_logits.view(b, 3)
             value = torch.softmax(value_logits,dim=-1)
+            
+            # Reverse WDL for positions where side to move is white
+            is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, 1)
+            value_reversed = torch.stack([value[:, 2], value[:, 1], value[:, 0]], dim=-1)
+            value = torch.where(is_white_expanded, value_reversed, value)
         return value.squeeze()  # Remove batch and sequence dimensions
 
     def get_batch_position_values(self, fens, device="cuda"):
@@ -247,6 +265,9 @@ class Inference(torch.nn.Module):
         # Stack to create batch: [batch_size, 8, 8, 19]
         batch_x = torch.stack(position_tensors, dim=0)
         
+        # Extract is_white from plane 12
+        is_white = batch_x[:, 0, 0, 12] > 0.5  # Shape: (batch_size,)
+        
         # Forward pass through the model to get values
         with torch.no_grad():
             b = batch_x.shape[0]
@@ -264,7 +285,12 @@ class Inference(torch.nn.Module):
             value_logits = self.value_head_q(x_processed)
             value_logits = value_logits.view(b, 3)
             value_logits = torch.softmax(value_logits,dim=-1)
-        return value_logits.squeeze(1)  # Remove sequence dimension, keep batch dimension
+            
+            # Reverse WDL for positions where side to move is white
+            is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, 1)
+            value_reversed = torch.stack([value_logits[:, 2], value_logits[:, 1], value_logits[:, 0]], dim=-1)
+            value_logits = torch.where(is_white_expanded, value_reversed, value_logits)
+        return value_logits  # Return with batch dimension
 
     def calculate_move_values(self, fen, device="cuda"):
         """

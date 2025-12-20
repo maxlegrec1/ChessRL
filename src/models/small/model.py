@@ -142,6 +142,11 @@ class BT4(torch.nn.Module):
         b = x.shape[0]
         seq_len = x.shape[1]
         emb = x.shape[-1]  # Last dimension (should be 19)
+        
+        # Extract is_white from plane 12 before reshaping
+        # x has shape (b, seq_len, 8, 8, 19), plane 12 is side to move
+        is_white = x[:, :, 0, 0, 12] > 0.5  # Shape: (b, seq_len)
+        
         x = x.view(b*seq_len,64,emb)
         #print(x.shape)
         x = self.linear1(x)
@@ -162,6 +167,15 @@ class BT4(torch.nn.Module):
         value_h = value_h.view(b,seq_len,3)
         value_h_q = self.value_head_q(x)
         value_h_q = value_h_q.view(b,seq_len,3)
+        
+        # Reverse WDL for positions where side to move is white
+        # WDL reversal: [win, draw, loss] -> [loss, draw, win]
+        # Use ONNX-compatible operations
+        is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, seq_len, 1)
+        value_h_reversed = torch.stack([value_h[:, :, 2], value_h[:, :, 1], value_h[:, :, 0]], dim=-1)
+        value_h = torch.where(is_white_expanded, value_h_reversed, value_h)
+        value_h_q_reversed = torch.stack([value_h_q[:, :, 2], value_h_q[:, :, 1], value_h_q[:, :, 0]], dim=-1)
+        value_h_q = torch.where(is_white_expanded, value_h_q_reversed, value_h_q)
         policy_tokens = self.policy_tokens_lin(x)
         policy_tokens = torch.nn.GELU()(policy_tokens)
         policy_tokens = policy_tokens + pos_enc
@@ -277,6 +291,9 @@ class BT4(torch.nn.Module):
         x = torch.from_numpy(fen_to_tensor(fen)).to(device).to(torch.float32)
         x = x.view(1, 1, 8, 8, 19)
         
+        # Extract is_white from plane 12
+        is_white = x[:, :, 0, 0, 12] > 0.5  # Shape: (1, 1)
+        
         # Forward pass through the model to get value
         with torch.no_grad():
             # We need to run through the model layers to get to value_head
@@ -296,6 +313,11 @@ class BT4(torch.nn.Module):
             value_logits = self.value_head_q(x_processed)
             value_logits = value_logits.view(b, seq_len, 3)
             value = torch.softmax(value_logits,dim=-1)
+            
+            # Reverse WDL for positions where side to move is white
+            is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, seq_len, 1)
+            value_reversed = torch.stack([value[:, :, 2], value[:, :, 1], value[:, :, 0]], dim=-1)
+            value = torch.where(is_white_expanded, value_reversed, value)
         return value.squeeze()  # Remove batch and sequence dimensions
 
     def get_batch_position_values(self, fens, device="cuda"):
@@ -321,6 +343,9 @@ class BT4(torch.nn.Module):
         # Reshape to [batch_size, 1, 8, 8, 19] for the model
         batch_x = batch_x.unsqueeze(1)
         
+        # Extract is_white from plane 12
+        is_white = batch_x[:, :, 0, 0, 12] > 0.5  # Shape: (batch_size, 1)
+        
         # Forward pass through the model to get values
         with torch.no_grad():
             b = batch_x.shape[0]
@@ -339,6 +364,11 @@ class BT4(torch.nn.Module):
             value_logits = self.value_head_q(x_processed)
             value_logits = value_logits.view(b, seq_len, 3)
             value_logits = torch.softmax(value_logits,dim=-1)
+            
+            # Reverse WDL for positions where side to move is white
+            is_white_expanded = is_white.unsqueeze(-1)  # Shape: (b, seq_len, 1)
+            value_reversed = torch.stack([value_logits[:, :, 2], value_logits[:, :, 1], value_logits[:, :, 0]], dim=-1)
+            value_logits = torch.where(is_white_expanded, value_reversed, value_logits)
         return value_logits.squeeze(1)  # Remove sequence dimension, keep batch dimension
 
     def calculate_move_values(self, fen, device="cuda"):
