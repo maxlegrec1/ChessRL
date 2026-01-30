@@ -213,10 +213,10 @@ def main_model_vs_model(
     )
 
 
-def _load_small_model(device: str, ckpt_path: Optional[str]):
-    from src.models.small import BT4
+def _load_small_model(device: str, ckpt_path: Optional[str] = None):
+    from src.models.small.inference import Inference
 
-    model = BT4().to(device)
+    model = Inference().to(device)
     # Default checkpoint for small model
     default_ckpt = "src/models/small/model.pt"
     ckpt_to_load = ckpt_path if ckpt_path else default_ckpt
@@ -287,14 +287,14 @@ if __name__ == "__main__":
     from src.models.small.inference_mcts import SmallMCTSInference
     # Load models based on selection
     if args.model1 == "small":
-        # model1 = _load_small_model(device, args.ckpt1)
-        model1 = SmallMCTSInference(engine_path="model_dynamic_initial.trt",cpuct=1.0, simulations=800)
+        model1 = _load_small_model(device)
+        # model1 = SmallMCTSInference(engine_path="model_dynamic_transformer.trt",cpuct=0.65, simulations=800,temperature=1,temperature_at_root=1.3,use_dirichlet=True,dirichlet_alpha=0.12,dirichlet_epsilon=0.05)
     else:
         model1 = _load_leela_model(device, args.ckpt1)
 
     if args.model2 == "small":
         # model2 = _load_small_model(device, args.ckpt2)
-        model2 = SmallMCTSInference(engine_path="model_dynamic_step_00005000.trt",cpuct=1.0, simulations=800)
+        model2 = SmallMCTSInference(engine_path="model_dynamic_transformer.trt",cpuct=0.65, simulations=800,temperature=1,temperature_at_root=1,use_dirichlet=True,dirichlet_alpha=0.12,dirichlet_epsilon=0.05)
     else:
         model2 = _load_leela_model(device, args.ckpt2)
 

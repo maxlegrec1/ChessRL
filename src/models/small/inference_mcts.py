@@ -8,7 +8,8 @@ class SmallMCTSInference():
         self.use_dirichlet = use_dirichlet
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
-        self.mcts = SmallMCTS(engine_path=engine_path, temperature=1, cpuct=cpuct)
+        self.temperature_at_root = temperature_at_root
+        self.mcts = SmallMCTS(engine_path=engine_path, temperature=self.temperature, cpuct=cpuct)
         # Flag for callers (like brawls.py) to prefer move-history inputs over FEN.
         self.prefers_move_history = True
     
@@ -47,11 +48,13 @@ class SmallMCTSInference():
         res = self.mcts.run_from_histories(
             histories,
             root_fens=fens,
-            temperature=1.0,
+            temperature=self.temperature,
             simulations=self.simulations,
             cpuct=self.cpuct,
-            temperature_at_root=T,
-            use_dirichlet=False,
+            temperature_at_root=self.temperature_at_root,
+            use_dirichlet=self.use_dirichlet,
+            dirichlet_alpha=self.dirichlet_alpha,
+            dirichlet_epsilon=self.dirichlet_epsilon,
         )
         if not res:
             return None
