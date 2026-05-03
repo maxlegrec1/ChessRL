@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import subprocess
+from collections import deque
 from pathlib import Path
 from typing import Dict
 
@@ -195,9 +196,6 @@ class Trainer:
         )
 
         target_k = max(0.1, float(self.config.data.target_k))
-        # EMA over (Δrecords, Δseconds) to smooth out the noisy per-step
-        # measurement of the self-play insertion rate.
-        ema_alpha = 0.2
         # Probe the on-disk file size for a fresh-to-the-second record count;
         # the in-memory dataset.size only updates at reload boundaries.
         buffer_path = self.config.data.dataset_path
@@ -208,9 +206,19 @@ class Trainer:
             except FileNotFoundError:
                 return self.dataset.size
 
-        prev_size = _live_record_count()
-        prev_wall = time.time()
-        g_ema: float = 1.0  # records/sec; safe non-zero seed
+        # Sliding-window measurement of g. Records are flushed to the buffer
+        # in BURSTS (every game-end across 1024 boards), so per-step instant
+        # rates can be 0 or 10x truth depending on whether the step window
+        # caught a flush. EMA-on-instant chases those bursts and produces
+        # both initial overshoot (~500 rec/s false reading) and later
+        # collapse (g=9.8). Instead, keep a deque of (time, size) snapshots
+        # spanning ~30s and compute g over the whole window — same as what
+        # `iostat`-style tools do.
+        g_window_seconds = 30.0
+        g_history: deque = deque()  # (time, file_size)
+        # Seed with one snapshot so the first measurement has a baseline.
+        _t0 = time.time()
+        g_history.append((_t0, _live_record_count()))
 
         try:
             while True:
@@ -220,16 +228,25 @@ class Trainer:
                 metrics = self._train_step(batch)
                 t1 = time.time()
 
-                # Measure self-play insertion rate g = Δrecords / Δwall.
+                # Update sliding window.
                 cur_size = _live_record_count()
-                dwall = max(1e-3, t1 - prev_wall)
-                g_inst = max(0.0, (cur_size - prev_size) / dwall)
-                g_ema = (1 - ema_alpha) * g_ema + ema_alpha * g_inst if g_inst > 0 else g_ema
-                prev_size = cur_size
-                prev_wall = t1
+                g_history.append((t1, cur_size))
+                # Drop snapshots older than the window (but always keep at least one).
+                while len(g_history) > 1 and (t1 - g_history[0][0]) > g_window_seconds:
+                    g_history.popleft()
+                t_oldest, size_oldest = g_history[0]
+                window_dt = max(1e-3, t1 - t_oldest)
+                g = max(0.0, (cur_size - size_oldest) / window_dt)
 
                 # Pace: sleep so that s = batch_size / step_interval = target_k * g.
-                target_step_interval = self.config.batch_size / max(1e-3, target_k * g_ema)
+                # Until the window is fully populated (first ~30s of training)
+                # we conservatively cap the inferred g at a small value so the
+                # trainer doesn't burst on a single 1s burst-flush reading.
+                if window_dt < g_window_seconds * 0.5:
+                    g_for_pacing = min(g, 50.0)
+                else:
+                    g_for_pacing = g
+                target_step_interval = self.config.batch_size / max(1e-3, target_k * max(g_for_pacing, 1.0))
                 step_dt = t1 - t0
                 sleep_for = max(0.0, target_step_interval - step_dt)
                 time.sleep(sleep_for)
@@ -240,12 +257,13 @@ class Trainer:
                 # Effective sample rate after pacing.
                 effective_step_interval = max(step_dt, target_step_interval)
                 s_eff = self.config.batch_size / max(1e-6, effective_step_interval)
-                k_actual = s_eff / max(1e-6, g_ema)
-                metrics["pacing/g_records_per_sec"] = float(g_ema)
+                k_actual = s_eff / max(1e-6, g)
+                metrics["pacing/g_records_per_sec"] = float(g)
                 metrics["pacing/s_records_per_sec"] = float(s_eff)
                 metrics["pacing/k_actual"] = float(k_actual)
                 metrics["pacing/sleep_s"] = float(sleep_for)
                 metrics["pacing/step_time_s"] = float(step_dt)
+                metrics["pacing/g_window_s"] = float(window_dt)
 
                 if self.step % self.config.log_every == 0:
                     self._log(metrics)
