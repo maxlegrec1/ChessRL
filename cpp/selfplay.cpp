@@ -92,7 +92,13 @@ struct SelfPlayWorker::Impl
         batch_config.enable_telemetry = true;
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
 
-        cache = std::make_shared<chessrl::mcts::TranspositionTable>(config.hash_size);
+        // hash_size <= 0 disables the TT entirely (skips lock+hash+lookup on
+        // every leaf). At <2% hit rate the cache is net-negative, so leaving
+        // this off is a real perf win for self-play with few transpositions.
+        if (config.hash_size > 0)
+        {
+            cache = std::make_shared<chessrl::mcts::TranspositionTable>(config.hash_size);
+        }
 
         slots.resize(config.concurrency);
         for (auto& slot : slots)

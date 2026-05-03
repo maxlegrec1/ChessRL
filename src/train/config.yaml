@@ -37,8 +37,11 @@ selfplay:
   # Each thread blocks on futures most of the time so 16x oversubscription
   # is fine; 256+ on an 8-core CPU has been measured to cause scheduler
   # thrash. 0 = legacy hardcoded 256.
-  threads: 128
-  hash_size: 4096
+  threads: 64
+  # 0 disables the TT entirely. Profile measured ~1.5% hit rate during
+  # self-play (with random-opening plies), making the per-leaf lock+hash
+  # overhead net-negative. Re-enable (e.g. 4096) only if hit rate climbs.
+  hash_size: 0
   simulations: 800
   cpuct: 0.65
   temperature: 1.3
