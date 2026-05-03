@@ -23,7 +23,7 @@ struct SelfPlayConfig
     size_t max_buffer_size = 1000000; // Max number of positions in buffer
     bool save_pgn = false;
     std::string pgn_dir = "pgns";
-    bool mcts_value = false; // If true, use MCTS value instead of game outcome
+    int random_opening_plies = 0; // 0 = always start from the standard startpos
 };
 
 struct SelfPlayMetrics

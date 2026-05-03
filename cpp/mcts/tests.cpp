@@ -253,3 +253,155 @@ TEST_CASE("TranspositionTable concurrent put/get does not corrupt entries")
 
     CHECK(errors.load() == 0);
 }
+
+// -----------------------------------------------------------------------------
+// MCTS value-handling: terminal_value, wdl_from_terminal,
+// detail::backpropagate, detail::refine_wdl_node
+// -----------------------------------------------------------------------------
+
+namespace mcts = chessrl::mcts;
+
+TEST_CASE("wdl_from_terminal: side-to-move perspective")
+{
+    const auto win  = mcts::wdl_from_terminal(+1.0F);
+    const auto loss = mcts::wdl_from_terminal(-1.0F);
+    const auto draw = mcts::wdl_from_terminal(0.0F);
+    CHECK(win[0]  == doctest::Approx(1.0F)); CHECK(win[1]  == doctest::Approx(0.0F)); CHECK(win[2]  == doctest::Approx(0.0F));
+    CHECK(draw[0] == doctest::Approx(0.0F)); CHECK(draw[1] == doctest::Approx(1.0F)); CHECK(draw[2] == doctest::Approx(0.0F));
+    CHECK(loss[0] == doctest::Approx(0.0F)); CHECK(loss[1] == doctest::Approx(0.0F)); CHECK(loss[2] == doctest::Approx(1.0F));
+}
+
+namespace
+{
+// Apply a sequence of UCI moves to a board.
+chess::Board play_moves(const std::vector<std::string>& uci)
+{
+    chess::Board b{std::string{chess::constants::STARTPOS}};
+    for (const auto& m : uci) { b.makeMove(chess::uci::uciToMove(b, m)); }
+    return b;
+}
+} // namespace
+
+TEST_CASE("terminal_value: Fool's mate is LOSE for side to move (white)")
+{
+    // 1.f3 e5 2.g4 Qh4#  — after black's third move, white is to move and checkmated.
+    chess::Board b = play_moves({"f2f3", "e7e5", "g2g4", "d8h4"});
+    REQUIRE(b.isGameOver().second == chess::GameResult::LOSE);
+    auto v = mcts::terminal_value(b);
+    REQUIRE(v.has_value());
+    CHECK(*v == doctest::Approx(-1.0F));
+}
+
+TEST_CASE("terminal_value: stalemate is DRAW (0)")
+{
+    // K vs K+Q stalemate: black to move, no legal move, not in check.
+    // Black king a8, white king c6, white queen c7.
+    chess::Board b{std::string{"k7/2Q5/2K5/8/8/8/8/8 b - - 0 1"}};
+    REQUIRE(b.isGameOver().second == chess::GameResult::DRAW);
+    auto v = mcts::terminal_value(b);
+    REQUIRE(v.has_value());
+    CHECK(*v == doctest::Approx(0.0F));
+}
+
+TEST_CASE("terminal_value: insufficient material (K vs K) is DRAW")
+{
+    chess::Board b{std::string{"k7/8/8/8/8/8/8/K7 w - - 0 1"}};
+    REQUIRE(b.isGameOver().second == chess::GameResult::DRAW);
+    CHECK(*mcts::terminal_value(b) == doctest::Approx(0.0F));
+}
+
+TEST_CASE("terminal_value: startpos is non-terminal (nullopt)")
+{
+    chess::Board b{std::string{chess::constants::STARTPOS}};
+    CHECK(!mcts::terminal_value(b).has_value());
+}
+
+TEST_CASE("detail::backpropagate flips the sign at every ply")
+{
+    // Build a 3-deep linear path: root -> child -> grandchild.
+    mcts::SearchTree tree;
+    chess::Board root_board{std::string{chess::constants::STARTPOS}};
+    const int root = tree.add_root(root_board, {});
+
+    chess::Board after_e2e4 = root_board;
+    chess::Move e2e4 = chess::uci::uciToMove(after_e2e4, "e2e4");
+    after_e2e4.makeMove(e2e4);
+    const int child = tree.add_child(root, e2e4, /*prior=*/0.5F, after_e2e4);
+
+    chess::Board after_e7e5 = after_e2e4;
+    chess::Move e7e5 = chess::uci::uciToMove(after_e7e5, "e7e5");
+    after_e7e5.makeMove(e7e5);
+    const int grand = tree.add_child(child, e7e5, /*prior=*/0.5F, after_e7e5);
+
+    mcts::detail::backpropagate(tree, {root, child, grand}, +0.4F);
+
+    // path is iterated in reverse, so the leaf gets +value, child gets -value,
+    // root gets +value.
+    CHECK(tree.nodes[grand].value_sum == doctest::Approx(+0.4F));
+    CHECK(tree.nodes[child].value_sum == doctest::Approx(-0.4F));
+    CHECK(tree.nodes[root].value_sum  == doctest::Approx(+0.4F));
+    CHECK(tree.nodes[root].visit_count == 1);
+    CHECK(tree.nodes[child].visit_count == 1);
+    CHECK(tree.nodes[grand].visit_count == 1);
+}
+
+TEST_CASE("detail::refine_wdl_node flips child WDL into parent and visit-weights")
+{
+    // Synthetic two-child tree.
+    //   root (no terminal)
+    //    ├── child A: visits=3, terminal LOSS for A → wdl={0,0,1}; flips into root as a WIN.
+    //    └── child B: visits=1, terminal DRAW → wdl={0,1,0}; flips into root as DRAW.
+    // Expected root.wdl = (3*[1,0,0] + 1*[0,1,0]) / 4 = [0.75, 0.25, 0.0]
+    mcts::SearchTree tree;
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    const int root = tree.add_root(startpos, {});
+
+    // Add a placeholder child by playing e2e4.
+    chess::Board ba = startpos;
+    chess::Move e2e4 = chess::uci::uciToMove(ba, "e2e4");
+    ba.makeMove(e2e4);
+    const int a = tree.add_child(root, e2e4, 0.5F, ba);
+    chess::Board bb = startpos;
+    chess::Move d2d4 = chess::uci::uciToMove(bb, "d2d4");
+    bb.makeMove(d2d4);
+    const int b = tree.add_child(root, d2d4, 0.5F, bb);
+
+    // Manually set children to look like terminal leaves for the test.
+    tree.nodes[a].terminal = true;
+    tree.nodes[a].wdl = {0.0F, 0.0F, 1.0F};  // LOSE for child A
+    tree.nodes[a].visit_count = 3;
+    tree.nodes[b].terminal = true;
+    tree.nodes[b].wdl = {0.0F, 1.0F, 0.0F};  // DRAW
+    tree.nodes[b].visit_count = 1;
+
+    std::vector<bool> visited(tree.nodes.size(), false);
+    auto refined = mcts::detail::refine_wdl_node(tree, root, visited);
+
+    CHECK(refined[0] == doctest::Approx(0.75F));
+    CHECK(refined[1] == doctest::Approx(0.25F));
+    CHECK(refined[2] == doctest::Approx(0.0F));
+    CHECK(tree.nodes[root].wdl[0] == doctest::Approx(0.75F));
+}
+
+TEST_CASE("detail::refine_wdl_node leaves unvisited subtrees alone")
+{
+    mcts::SearchTree tree;
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    const int root = tree.add_root(startpos, {});
+    tree.nodes[root].wdl = {0.4F, 0.3F, 0.3F};  // NN prior
+
+    // Add a child but keep visit_count = 0 → root should NOT update from it.
+    chess::Board ba = startpos;
+    chess::Move e2e4 = chess::uci::uciToMove(ba, "e2e4");
+    ba.makeMove(e2e4);
+    const int a = tree.add_child(root, e2e4, 0.5F, ba);
+    tree.nodes[a].wdl = {0.9F, 0.05F, 0.05F};
+    tree.nodes[a].visit_count = 0;
+
+    std::vector<bool> visited(tree.nodes.size(), false);
+    auto refined = mcts::detail::refine_wdl_node(tree, root, visited);
+
+    CHECK(refined[0] == doctest::Approx(0.4F));
+    CHECK(refined[1] == doctest::Approx(0.3F));
+    CHECK(refined[2] == doctest::Approx(0.3F));
+}

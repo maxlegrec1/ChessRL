@@ -27,14 +27,17 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
 
 
 class ExportWrapper(torch.nn.Module):
+    """Routes the `value_q` head (trained against MCTS-backed-up WDL) into the
+    engine's "value" output, since that is what the C++ MCTS consumes during
+    self-play search."""
+
     def __init__(self, model):
         super().__init__()
         self.model = model
-        
+
     def forward(self, x):
-        p, v, vq = self.model(x, return_all=True)
-        v_probs = torch.softmax(v, dim=-1)
-        return p, v_probs
+        p, _v, vq = self.model(x, return_all=True)
+        return p, torch.softmax(vq, dim=-1)
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)

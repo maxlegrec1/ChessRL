@@ -434,6 +434,88 @@ int SearchTree::add_child(
     return child_index;
 }
 
+std::optional<float> terminal_value(const chess::Board& board)
+{
+    const auto result = board.isGameOver().second;
+    switch (result)
+    {
+    case chess::GameResult::WIN:    return 1.0F;
+    case chess::GameResult::LOSE:   return -1.0F;
+    case chess::GameResult::DRAW:   return 0.0F;
+    default:                        return std::nullopt;
+    }
+}
+
+std::array<float, 3> wdl_from_terminal(float v)
+{
+    if (v > 0.0F) return {1.0F, 0.0F, 0.0F};   // win for side to move (unreachable today)
+    if (v < 0.0F) return {0.0F, 0.0F, 1.0F};   // loss for side to move (checkmate)
+    return {0.0F, 1.0F, 0.0F};                 // draw
+}
+
+namespace detail
+{
+
+void backpropagate(SearchTree& tree, const std::vector<int>& path, float value)
+{
+    float current = value;
+    for (auto it = path.rbegin(); it != path.rend(); ++it)
+    {
+        TreeNode& node = tree.nodes[*it];
+        node.visit_count += 1;
+        node.value_sum += current;
+        current = -current;
+    }
+}
+
+std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vector<bool>& visited)
+{
+    TreeNode& node = tree.nodes[node_index];
+
+    if (visited[static_cast<size_t>(node_index)])
+    {
+        return node.wdl;
+    }
+    visited[static_cast<size_t>(node_index)] = true;
+
+    if (node.terminal || node.children.empty())
+    {
+        return node.wdl;
+    }
+
+    std::array<float, 3> wdl_sum{0.0F, 0.0F, 0.0F};
+    int total_visits = 0;
+    for (const int child_index : node.children)
+    {
+        if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
+        {
+            continue;
+        }
+        const TreeNode& child = tree.nodes[child_index];
+        if (child.visit_count > 0)
+        {
+            std::array<float, 3> child_refined = refine_wdl_node(tree, child_index, visited);
+            const float visits = static_cast<float>(child.visit_count);
+            // child WDL is in opponent's perspective; flip into ours.
+            wdl_sum[0] += visits * child_refined[2];
+            wdl_sum[1] += visits * child_refined[1];
+            wdl_sum[2] += visits * child_refined[0];
+            total_visits += child.visit_count;
+        }
+    }
+
+    if (total_visits > 0)
+    {
+        const float inv = 1.0F / static_cast<float>(total_visits);
+        node.wdl[0] = wdl_sum[0] * inv;
+        node.wdl[1] = wdl_sum[1] * inv;
+        node.wdl[2] = wdl_sum[2] * inv;
+    }
+    return node.wdl;
+}
+
+} // namespace detail
+
 } // namespace chessrl::mcts
 
 

@@ -47,22 +47,6 @@ std::string move_to_vocab_key(const chess::Board& board, const chess::Move& move
     return uci;
 }
 
-std::optional<float> terminal_value(const chess::Board& board)
-{
-    const auto result = board.isGameOver().second;
-    switch (result)
-    {
-    case chess::GameResult::WIN:
-        return 1.0F;
-    case chess::GameResult::LOSE:
-        return -1.0F;
-    case chess::GameResult::DRAW:
-        return 0.0F;
-    default:
-        return std::nullopt;
-    }
-}
-
 std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::string>& vocab)
 {
     std::unordered_map<std::string, int> index;
@@ -260,14 +244,7 @@ private:
 
     void backpropagate(const std::vector<int>& path, float value)
     {
-        float current = value;
-        for (auto it = path.rbegin(); it != path.rend(); ++it)
-        {
-            TreeNode& node = tree_.nodes[*it];
-            node.visit_count += 1;
-            node.value_sum += current;
-            current = -current;
-        }
+        detail::backpropagate(tree_, path, value);
     }
 
     float evaluate_node(int node_index, const chess::Board& board_state)
@@ -283,18 +260,7 @@ private:
         {
             node.expanded = true;
             node.value_prior = *terminal;
-            if (*terminal > 0.0F)
-            {
-                node.wdl = {1.0F, 0.0F, 0.0F};
-            }
-            else if (*terminal < 0.0F)
-            {
-                node.wdl = {0.0F, 0.0F, 1.0F};
-            }
-            else
-            {
-                node.wdl = {0.0F, 1.0F, 0.0F};
-            }
+            node.wdl = wdl_from_terminal(*terminal);
             return node.value_prior;
         }
 
@@ -509,70 +475,8 @@ private:
 
     void refine_wdl_recursive()
     {
-        // Post-order traversal to refine WDL from bottom up
         std::vector<bool> visited(tree_.nodes.size(), false);
-        refine_wdl_node(0, visited);
-    }
-
-    std::array<float, 3> refine_wdl_node(int node_index, std::vector<bool>& visited)
-    {
-        TreeNode& node = tree_.nodes[node_index];
-        
-        // If already visited, return current refined WDL
-        if (visited[static_cast<size_t>(node_index)])
-        {
-            return node.wdl;
-        }
-        
-        visited[static_cast<size_t>(node_index)] = true;
-        
-        // For terminal nodes or nodes without children, use original WDL
-        if (node.terminal || node.children.empty())
-        {
-            return node.wdl;
-        }
-        
-        // Recursively refine children first, then aggregate
-        std::array<float, 3> wdl_sum{0.0F, 0.0F, 0.0F};
-        int total_visits = 0;
-        
-        for (const int child_index : node.children)
-        {
-            if (child_index < 0 || child_index >= static_cast<int>(tree_.nodes.size()))
-            {
-                continue;
-            }
-            
-            const TreeNode& child = tree_.nodes[child_index];
-            
-            // Only aggregate if child has been visited
-            if (child.visit_count > 0)
-            {
-                // Recursively refine child's WDL
-                std::array<float, 3> child_refined_wdl = refine_wdl_node(child_index, visited);
-                
-                // Child's WDL is from opponent's perspective, flip it for parent's perspective
-                // [Win, Draw, Loss] from child -> [Loss, Draw, Win] for parent
-                const float visits = static_cast<float>(child.visit_count);
-                wdl_sum[0] += visits * child_refined_wdl[2];  // Opponent loss = our win
-                wdl_sum[1] += visits * child_refined_wdl[1];  // Draw stays draw
-                wdl_sum[2] += visits * child_refined_wdl[0];  // Opponent win = our loss
-                
-                total_visits += child.visit_count;
-            }
-        }
-        
-        // If we have aggregated visits, compute weighted average
-        if (total_visits > 0)
-        {
-            const float inv_visits = 1.0F / static_cast<float>(total_visits);
-            node.wdl[0] = wdl_sum[0] * inv_visits;
-            node.wdl[1] = wdl_sum[1] * inv_visits;
-            node.wdl[2] = wdl_sum[2] * inv_visits;
-        }
-        // Otherwise keep original WDL from neural network
-        
-        return node.wdl;
+        detail::refine_wdl_node(tree_, 0, visited);
     }
 
     MctsSummary summarize()

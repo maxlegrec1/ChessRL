@@ -64,13 +64,13 @@ def _build_worker(engine_path: str, buffer_path: Path, sp: SelfPlayConfig):
         save_pgn=sp.save_pgn,
         pgn_dir=str(sp.pgn_dir),
         simulations=sp.simulations,
-        mcts_value=sp.mcts_value,
         cpuct=sp.cpuct,
         temperature=sp.temperature,
         temperature_at_root=sp.temperature_at_root,
         use_dirichlet=sp.use_dirichlet,
         dirichlet_alpha=sp.dirichlet_alpha,
         dirichlet_epsilon=sp.dirichlet_epsilon,
+        random_opening_plies=sp.random_opening_plies,
     )
 
 
@@ -93,7 +93,8 @@ def main() -> int:
     console.log(
         f"MCTS: simulations={sp.simulations} cpuct={sp.cpuct} "
         f"temperature={sp.temperature} root_temp={sp.temperature_at_root} "
-        f"dirichlet={sp.use_dirichlet}(alpha={sp.dirichlet_alpha}, eps={sp.dirichlet_epsilon})"
+        f"dirichlet={sp.use_dirichlet}(alpha={sp.dirichlet_alpha}, eps={sp.dirichlet_epsilon}) "
+        f"random_opening_plies={sp.random_opening_plies}"
     )
     if sp.save_pgn:
         console.log(f"Saving PGNs to: {sp.pgn_dir}")

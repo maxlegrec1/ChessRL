@@ -145,11 +145,15 @@ class Trainer:
     def _init_wandb(self):
         if not self.config.wandb.enabled:
             return None
+        wandb_dir = self.config.wandb.dir
+        if wandb_dir is not None:
+            Path(wandb_dir).mkdir(parents=True, exist_ok=True)
         run = wandb.init(
             project=self.config.wandb.project,
             entity=self.config.wandb.entity,
             name=self.config.wandb.run_name or self.config.run_name,
             config=self.config.to_dict(),
+            dir=str(wandb_dir) if wandb_dir is not None else None,
         )
         return run
 
@@ -178,6 +182,15 @@ class Trainer:
         self.console.log(
             f"Starting training on {self.device} with dataset size {self.dataset.size}"
         )
+
+        target_k = max(0.1, float(self.config.data.target_k))
+        # EMA over (Δrecords, Δseconds) to smooth out the noisy per-step
+        # measurement of the self-play insertion rate.
+        ema_alpha = 0.2
+        prev_size = self.dataset.size
+        prev_wall = time.time()
+        g_ema: float = 1.0  # records/sec; safe non-zero seed
+
         try:
             while True:
                 self.dataset.reload()
@@ -185,10 +198,33 @@ class Trainer:
                 batch = self.dataset.sample_batch(self.config.batch_size)
                 metrics = self._train_step(batch)
                 t1 = time.time()
-                # sleep (xs - (t1 - t0))
-                time.sleep(max(0, 12 - (t1 - t0)))
+
+                # Measure self-play insertion rate g = Δrecords / Δwall.
+                cur_size = self.dataset.size
+                dwall = max(1e-3, t1 - prev_wall)
+                g_inst = max(0.0, (cur_size - prev_size) / dwall)
+                g_ema = (1 - ema_alpha) * g_ema + ema_alpha * g_inst if g_inst > 0 else g_ema
+                prev_size = cur_size
+                prev_wall = t1
+
+                # Pace: sleep so that s = batch_size / step_interval = target_k * g.
+                target_step_interval = self.config.batch_size / max(1e-3, target_k * g_ema)
+                step_dt = t1 - t0
+                sleep_for = max(0.0, target_step_interval - step_dt)
+                time.sleep(sleep_for)
+
                 self.step += 1
                 self.samples_processed += self.config.batch_size
+
+                # Effective sample rate after pacing.
+                effective_step_interval = max(step_dt, target_step_interval)
+                s_eff = self.config.batch_size / max(1e-6, effective_step_interval)
+                k_actual = s_eff / max(1e-6, g_ema)
+                metrics["pacing/g_records_per_sec"] = float(g_ema)
+                metrics["pacing/s_records_per_sec"] = float(s_eff)
+                metrics["pacing/k_actual"] = float(k_actual)
+                metrics["pacing/sleep_s"] = float(sleep_for)
+                metrics["pacing/step_time_s"] = float(step_dt)
 
                 if self.step % self.config.log_every == 0:
                     self._log(metrics)
@@ -207,10 +243,12 @@ class Trainer:
 
         inputs = torch.from_numpy(batch.planes).to(self.device)
         targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
-        targets_value = torch.from_numpy(batch.values).to(self.device)
-        value_labels = torch.argmax(targets_value, dim=-1)
+        target_value_outcome = torch.from_numpy(batch.value_outcomes).to(self.device)  # one-hot
+        target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)         # dense
+        value_labels = torch.argmax(target_value_outcome, dim=-1)
+        value_q_labels = torch.argmax(target_value_mcts, dim=-1)
 
-        with amp.autocast(device_type = self.device_type, dtype=self.amp_dtype):
+        with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
             policy_logits, value_logits, value_q_logits = self.model(
                 [inputs, None], return_all=True
             )
@@ -223,22 +261,17 @@ class Trainer:
                 policy_logits, targets_policy, ignore_index=NULL_POLICY_INDEX
             )
 
-            value_q_loss = F.cross_entropy(value_q_logits, value_labels)
-
-            value_probs = torch.softmax(value_logits, dim=-1)
-            value_loss = F.mse_loss(value_probs, targets_value)
+            # value head ← sparse one-hot game-outcome WDL (cross-entropy on soft labels).
+            value_loss = F.cross_entropy(value_logits, target_value_outcome)
+            # value_q head ← dense MCTS-backed-up WDL (cross-entropy on soft labels).
+            value_q_loss = F.cross_entropy(value_q_logits, target_value_mcts)
 
             value_accuracy = (
-                (value_logits.argmax(dim=-1) == value_labels)
-                .float()    
-                .mean()
+                (value_logits.argmax(dim=-1) == value_labels).float().mean()
             )
             value_q_accuracy = (
-                (value_logits.argmax(dim=-1) == value_labels)
-                .float()
-                .mean()
+                (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
             )
-
 
             total_loss = 0.1 * policy_loss + value_q_loss + value_loss
 
@@ -289,12 +322,15 @@ class Trainer:
         positions_per_sec = (self.config.batch_size * self.config.log_every) / elapsed
         self.last_log_time = time.time()
 
+        g = metrics.get("pacing/g_records_per_sec", 0.0)
+        k = metrics.get("pacing/k_actual", 0.0)
         log_line = (
             f"[step {self.step}] "
             f"loss={metrics['loss/total']:.4f} "
             f"policy_acc={metrics['acc/policy']:.3f} "
             f"value_acc={metrics['acc/value']:.3f} "
-            f"pps={positions_per_sec:,.0f}"
+            f"pps={positions_per_sec:,.0f} "
+            f"g={g:.1f}/s k={k:.2f}"
         )
         self.console.log(log_line)
 

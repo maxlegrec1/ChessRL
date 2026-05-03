@@ -23,8 +23,22 @@ struct SelfPlayRecord
 {
     std::string fen;
     std::string policy;
-    std::array<float, 3> value; // Win, Draw, Loss (relative to side to move)
+    // Both WDLs are stored from the side-to-move's perspective.
+    std::array<float, 3> value_outcome; // sparse one-hot, set at game end from z
+    std::array<float, 3> value_mcts;    // dense WDL from MCTS root after refine
 };
+
+// On-disk record layout (144 bytes, fixed):
+//   [0..100)   FEN (null-padded)
+//   [100..116) policy UCI (null-padded)
+//   [116..128) value_outcome (3 x float32)
+//   [128..140) value_mcts    (3 x float32)
+//   [140..144) reserved padding
+constexpr size_t kRecordSize = 144;
+constexpr size_t kFenOffset = 0;
+constexpr size_t kPolicyOffset = 100;
+constexpr size_t kValueOutcomeOffset = 116;
+constexpr size_t kValueMctsOffset = 128;
 
 struct BoardSlot
 {
@@ -44,6 +58,32 @@ struct SelfPlayWorker::Impl
     std::vector<BoardSlot> slots;
     std::fstream outfile;
     size_t current_records = 0;
+    std::mt19937 opening_rng{std::random_device{}()};
+
+    // Reset a slot to a fresh starting position, optionally seeded with N
+    // random legal plies for opening diversity. The random plies are added to
+    // slot.history (so MCTS gets the correct move context) but no
+    // SelfPlayRecord entries are produced for them.
+    void reset_slot(BoardSlot& slot)
+    {
+        slot.board = chess::Board();
+        slot.history.clear();
+        slot.pending_records.clear();
+        slot.ply_count = 0;
+
+        const int n = config.random_opening_plies;
+        for (int i = 0; i < n; ++i)
+        {
+            if (slot.board.isGameOver().second != chess::GameResult::NONE) break;
+            chess::Movelist moves;
+            chess::movegen::legalmoves(moves, slot.board);
+            if (moves.size() == 0) break;
+            std::uniform_int_distribution<size_t> dist(0, moves.size() - 1);
+            const auto& m = moves[dist(opening_rng)];
+            slot.history.push_back(chess::uci::moveToUci(m, slot.board.chess960()));
+            slot.board.makeMove(m);
+        }
+    }
 
     Impl(const SelfPlayConfig& c) : config(c)
     {
@@ -51,14 +91,14 @@ struct SelfPlayWorker::Impl
         batch_config.engine_path = config.engine_path;
         batch_config.enable_telemetry = true;
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
-        
+
         // 4GB cache
         cache = std::make_shared<chessrl::mcts::TranspositionTable>(4096);
 
         slots.resize(config.concurrency);
         for (auto& slot : slots)
         {
-            slot.board = chess::Board();
+            reset_slot(slot);
         }
 
         // Open in read/write mode. Create if not exists.
@@ -78,7 +118,7 @@ struct SelfPlayWorker::Impl
         {
             outfile.seekp(0, std::ios::end);
             size_t size = outfile.tellp();
-            current_records = size / 128; // 128 bytes per record
+            current_records = size / kRecordSize;
         }
     }
 };
@@ -147,10 +187,7 @@ SelfPlayMetrics SelfPlayWorker::step()
 
         if (summary.action.empty())
         {
-            slot.board = chess::Board();
-            slot.pending_records.clear();
-            slot.history.clear();
-            slot.ply_count = 0;
+            impl_->reset_slot(slot);
             metrics.games_finished++;
             continue;
         }
@@ -159,11 +196,10 @@ SelfPlayMetrics SelfPlayWorker::step()
         SelfPlayRecord record;
         record.fen = slot.board.getFen();
         record.policy = summary.action;
-        // If mcts_value is enabled, store the MCTS value directly
-        if (impl_->config.mcts_value)
-        {
-            record.value = summary.value;
-        }
+        // value_mcts is the MCTS-backed-up WDL (always populated).
+        // value_outcome is filled in at game end below; default to zero for now.
+        record.value_mcts = summary.value;
+        record.value_outcome = {0.0f, 0.0f, 0.0f};
         slot.pending_records.push_back(record);
         metrics.positions_generated++;
 
@@ -186,10 +222,7 @@ SelfPlayMetrics SelfPlayWorker::step()
         if (!move_found)
         {
             std::cerr << "Move not found: " << summary.action << " in " << slot.board.getFen() << std::endl;
-            slot.board = chess::Board();
-            slot.pending_records.clear();
-            slot.history.clear();
-            slot.ply_count = 0;
+            impl_->reset_slot(slot);
             continue;
         }
 
@@ -220,52 +253,40 @@ SelfPlayMetrics SelfPlayWorker::step()
                     z = 0.0f;
             }
             
-            // Only set value from game outcome if mcts_value is disabled
-            if (!impl_->config.mcts_value)
+            // Always derive sparse one-hot game-outcome WDL for every pending record.
+            for (auto& rec : slot.pending_records)
             {
-                for (auto& rec : slot.pending_records)
+                bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
+
+                if (white_to_move)
                 {
-                    bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
-                    
-                    if (white_to_move)
-                    {
-                        if (z == 1.0f) rec.value = {1.0f, 0.0f, 0.0f};
-                        else if (z == 0.0f) rec.value = {0.0f, 0.0f, 1.0f};
-                        else rec.value = {0.0f, 1.0f, 0.0f};
-                    }
-                    else
-                    {
-                        if (z == 0.0f) rec.value = {1.0f, 0.0f, 0.0f};
-                        else if (z == 1.0f) rec.value = {0.0f, 0.0f, 1.0f};
-                        else rec.value = {0.0f, 1.0f, 0.0f};
-                    }
+                    if (z == 1.0f) rec.value_outcome = {1.0f, 0.0f, 0.0f};
+                    else if (z == 0.0f) rec.value_outcome = {0.0f, 0.0f, 1.0f};
+                    else rec.value_outcome = {0.0f, 1.0f, 0.0f};
+                }
+                else
+                {
+                    if (z == 0.0f) rec.value_outcome = {1.0f, 0.0f, 0.0f};
+                    else if (z == 1.0f) rec.value_outcome = {0.0f, 0.0f, 1.0f};
+                    else rec.value_outcome = {0.0f, 1.0f, 0.0f};
                 }
             }
             // Write to buffer
             for (const auto& rec : slot.pending_records)
             {
-                // Fixed record format (128 bytes)
-                // FEN: 100 bytes
-                // Policy: 16 bytes
-                // Value: 12 bytes
-                
-                char buffer[128];
-                std::memset(buffer, 0, 128);
-                
-                // Copy FEN
-                std::strncpy(buffer, rec.fen.c_str(), 99);
-                
-                // Copy Policy (at offset 100)
-                std::strncpy(buffer + 100, rec.policy.c_str(), 15);
-                
-                // Copy Value (at offset 116)
-                std::memcpy(buffer + 116, rec.value.data(), 12);
-                
+                char buffer[kRecordSize];
+                std::memset(buffer, 0, kRecordSize);
+
+                std::strncpy(buffer + kFenOffset,    rec.fen.c_str(),    99);
+                std::strncpy(buffer + kPolicyOffset, rec.policy.c_str(), 15);
+                std::memcpy(buffer + kValueOutcomeOffset, rec.value_outcome.data(), 12);
+                std::memcpy(buffer + kValueMctsOffset,    rec.value_mcts.data(),    12);
+
                 if (impl_->current_records < impl_->config.max_buffer_size)
                 {
                     // Append
                     impl_->outfile.seekp(0, std::ios::end);
-                    impl_->outfile.write(buffer, 128);
+                    impl_->outfile.write(buffer, kRecordSize);
                     impl_->current_records++;
                 }
                 else
@@ -361,10 +382,7 @@ SelfPlayMetrics SelfPlayWorker::step()
                 }
             }
 
-            slot.board = chess::Board();
-            slot.pending_records.clear();
-            slot.history.clear();
-            slot.ply_count = 0;
+            impl_->reset_slot(slot);
             metrics.games_finished++;
         }
     }
@@ -389,11 +407,8 @@ size_t SelfPlayWorker::get_buffer_size() const
         return 0;
     }
     
-    // Approximate: file_size / record_size
-    // Record size is 128 bytes (100 FEN + 16 Policy + 12 Value)
-    const size_t record_size = 128;
     size_t file_size = std::filesystem::file_size(p);
-    return file_size / record_size;
+    return file_size / kRecordSize;
 }
 
 } // namespace chessrl

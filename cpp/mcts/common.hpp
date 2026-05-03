@@ -1,10 +1,10 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
-#include <memory>
 
 #include "chess-library/include/chess.hpp"
 
@@ -75,6 +75,32 @@ struct SearchTree
 
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
 std::vector<std::string> history_to_vector(const HistoryHandle& tail);
+
+// Returns the terminal value of `board` from the side-to-move's perspective:
+// +1 = win, -1 = loss (checkmate), 0 = draw, nullopt = non-terminal. Note that
+// chess::Board::isGameOver() never returns GameResult::WIN through standard
+// rules (a side-to-move that is checkmated has lost), so the +1 path is
+// defensive only.
+std::optional<float> terminal_value(const chess::Board& board);
+
+// Map a scalar terminal value (in side-to-move perspective: +1 win, -1 loss,
+// 0 draw) to a one-hot WDL triple.
+std::array<float, 3> wdl_from_terminal(float v);
+
+namespace detail
+{
+
+// Backpropagate a side-to-move-relative scalar value up `path`, flipping the
+// sign at every ply. Exposed for unit tests; production code calls the same
+// logic from inside the MCTS runner.
+void backpropagate(SearchTree& tree, const std::vector<int>& path, float value);
+
+// Post-order WDL aggregation starting at `node_index`. Children's WDL is
+// flipped to the parent's perspective and visit-weighted-averaged. Terminal
+// and unvisited nodes keep their existing WDL. Exposed for unit tests.
+std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vector<bool>& visited);
+
+} // namespace detail
 
 } // namespace chessrl::mcts
 

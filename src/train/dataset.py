@@ -31,9 +31,10 @@ def _policy_str_to_idx(move: str) -> int:
 
 @dataclass
 class SelfPlayBatch:
-    planes: np.ndarray  # [B, 1, 8, 8, 19]
-    policy_indices: np.ndarray  # [B]
-    values: np.ndarray  # [B, 3]
+    planes: np.ndarray            # [B, 8, 8, 19]
+    policy_indices: np.ndarray    # [B]
+    value_outcomes: np.ndarray    # [B, 3] sparse one-hot (game outcome from side to move)
+    value_mcts: np.ndarray        # [B, 3] dense WDL backed up from MCTS root
     fens: List[str]
 
 
@@ -44,7 +45,8 @@ class SelfPlayDataset:
         self.path = path
         self.reload_seconds = reload_seconds
         self._fens: List[str] = []
-        self._values: List[tuple[float, float, float]] = []
+        self._value_outcomes: List[tuple[float, float, float]] = []
+        self._value_mcts: List[tuple[float, float, float]] = []
         self._policies: List[str] = []
         self._size = 0
         self._last_load = 0.0
@@ -78,13 +80,19 @@ class SelfPlayDataset:
 
                     self._fens = table.column("fen").to_pylist()
                     raw_values = table.column("value").to_pylist()
-                    self._values = [
-                        _ensure_tuple(row) for row in raw_values  # type: ignore[arg-type]
-                    ]
+                    self._value_outcomes = [_ensure_tuple(row) for row in raw_values]
+                    # Parquet path predates the dual-target schema; supply zero
+                    # value_mcts so the value_q head sees a no-op target.
+                    self._value_mcts = [(0.0, 0.0, 0.0)] * len(self._fens)
                     self._policies = table.column("policy").to_pylist()
                 else:
                     # Assume binary format
-                    self._fens, self._policies, self._values = self._read_binary_file()
+                    (
+                        self._fens,
+                        self._policies,
+                        self._value_outcomes,
+                        self._value_mcts,
+                    ) = self._read_binary_file()
                 
                 self._size = len(self._fens)
                 break
@@ -101,48 +109,46 @@ class SelfPlayDataset:
             self._last_mtime = self._last_load
 
     def _read_binary_file(self):
-        fens = []
-        policies = []
-        values = []
+        # On-disk record layout (144 bytes, fixed). Mirrors cpp/selfplay.cpp.
+        RECORD_SIZE = 144
+        FEN_OFFSET = 0
+        POLICY_OFFSET = 100
+        VALUE_OUTCOME_OFFSET = 116
+        VALUE_MCTS_OFFSET = 128
+
+        fens: List[str] = []
+        policies: List[str] = []
+        value_outcomes: List[tuple[float, float, float]] = []
+        value_mcts: List[tuple[float, float, float]] = []
         try:
             with self.path.open("rb") as f:
                 content = f.read()
-            
-            offset = 0
+
             size = len(content)
-            RECORD_SIZE = 128
-            
+            offset = 0
             while offset + RECORD_SIZE <= size:
-                # Read FEN (100 bytes)
-                fen_bytes = content[offset:offset+100]
+                fen_bytes = content[offset + FEN_OFFSET : offset + POLICY_OFFSET]
+                pol_bytes = content[offset + POLICY_OFFSET : offset + VALUE_OUTCOME_OFFSET]
                 try:
-                    fen = fen_bytes.split(b'\0', 1)[0].decode("utf-8")
-                except:
-                    fen = ""
-                offset += 100
-                
-                # Read Policy (16 bytes)
-                pol_bytes = content[offset:offset+16]
-                try:
-                    policy = pol_bytes.split(b'\0', 1)[0].decode("utf-8")
-                except:
-                    policy = ""
-                offset += 16
-                
-                # Read Value (12 bytes)
-                val = struct.unpack_from("fff", content, offset)
-                offset += 12
-                
+                    fen = fen_bytes.split(b"\0", 1)[0].decode("utf-8")
+                    policy = pol_bytes.split(b"\0", 1)[0].decode("utf-8")
+                except Exception:
+                    fen = policy = ""
+
+                val_out = struct.unpack_from("fff", content, offset + VALUE_OUTCOME_OFFSET)
+                val_mcts = struct.unpack_from("fff", content, offset + VALUE_MCTS_OFFSET)
+                offset += RECORD_SIZE
+
                 if fen and policy:
                     fens.append(fen)
                     policies.append(policy)
-                    values.append(val)
+                    value_outcomes.append(val_out)
+                    value_mcts.append(val_mcts)
         except Exception as e:
             print(f"Error reading binary file: {e}")
-            # Return partial results or empty
-            return [], [], []
-            
-        return fens, policies, values
+            return [], [], [], []
+
+        return fens, policies, value_outcomes, value_mcts
 
     # ------------------------------------------------------------------ #
     @property
@@ -155,31 +161,32 @@ class SelfPlayDataset:
 
         indices = self._rng.integers(0, self._size, size=batch_size, endpoint=False)
         planes = np.zeros((batch_size, 8, 8, 19), dtype=np.float32)
-        values = np.zeros((batch_size, 3), dtype=np.float32)
+        value_outcomes = np.zeros((batch_size, 3), dtype=np.float32)
+        value_mcts = np.zeros((batch_size, 3), dtype=np.float32)
         policy_indices = np.full((batch_size,), NULL_POLICY_INDEX, dtype=np.int64)
         fens: List[str] = []
 
         for row, idx in enumerate(indices):
             fen = self._fens[idx]
-            wdl = list(self._values[idx])
+            wdl_outcome = list(self._value_outcomes[idx])
+            wdl_mcts = list(self._value_mcts[idx])
             policy_str = self._policies[idx]
-            # WDL is stored in side-to-move perspective: [win, draw, loss]
-            # No need to reorient based on side to move
-
+            # Both WDLs are already in side-to-move perspective; mirroring the board
+            # swaps colors AND swaps the side to move, so the WDL stays valid as-is.
             if random.random() < 0.5:
                 fen = mirror_fen(fen)
-                # When mirroring board, side to move changes but strategic situation
-                # is equivalent, so WDL from new side's perspective stays the same
                 policy_str = mirror_policy_str(policy_str)
             fens.append(fen)
             planes[row] = fen_to_tensor(fen)
-            values[row] = wdl
+            value_outcomes[row] = wdl_outcome
+            value_mcts[row] = wdl_mcts
             policy_indices[row] = _policy_str_to_idx(policy_str)
 
         return SelfPlayBatch(
             planes=planes,
             policy_indices=policy_indices,
-            values=values,
+            value_outcomes=value_outcomes,
+            value_mcts=value_mcts,
             fens=fens,
         )
 

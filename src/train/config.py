@@ -13,6 +13,7 @@ class WandbConfig:
     entity: Optional[str] = None
     run_name: Optional[str] = None
     enabled: bool = True
+    dir: Optional[Path] = None
 
 
 @dataclass
@@ -31,6 +32,12 @@ class DataConfig:
     reload_seconds: float = 60.0
     min_samples_to_start: int = 8192
     warmup_poll_seconds: float = 10.0
+    # Dynamic-throttle target: number of times each self-play record is sampled
+    # on average before churning out of the buffer. The trainer paces itself
+    # with sleep(batch_size / (target_k * g) - step_time), where g is the
+    # measured self-play insertion rate. AZ-conservative ≈ 3, LC0-typical ≈ 5,
+    # aggressive ≈ 10+.
+    target_k: float = 5.0
 
 
 @dataclass
@@ -53,7 +60,10 @@ class SelfPlayConfig:
     poll_seconds: int = 300
     save_pgn: bool = False
     pgn_dir: Path = Path("artifacts/pgns")
-    mcts_value: bool = False
+    # Optional opening diversity: at the start of every self-play game, play
+    # this many uniform-random legal plies before MCTS takes over. 0 = always
+    # start from the standard startpos (current behavior).
+    random_opening_plies: int = 0
 
 
 @dataclass
@@ -105,6 +115,8 @@ def load_config(path: Path | str) -> TrainingConfig:
     cfg.checkpoint.engine_dir = Path(cfg.checkpoint.engine_dir)
     cfg.checkpoint.iteration_file = Path(cfg.checkpoint.iteration_file)
     cfg.selfplay.pgn_dir = Path(cfg.selfplay.pgn_dir)
+    if cfg.wandb.dir is not None:
+        cfg.wandb.dir = Path(cfg.wandb.dir)
     cfg.data.dataset_path = Path(cfg.data.dataset_path)
     if cfg.resume_path:
         cfg.resume_path = Path(cfg.resume_path)

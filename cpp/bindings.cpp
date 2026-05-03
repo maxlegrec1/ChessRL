@@ -174,13 +174,13 @@ PYBIND11_MODULE(_inference_cpp, m)
                          bool save_pgn,
                          std::string pgn_dir,
                          int simulations,
-                         bool mcts_value,
                          float cpuct,
                          float temperature,
                          float temperature_at_root,
                          bool use_dirichlet,
                          float dirichlet_alpha,
-                         float dirichlet_epsilon) {
+                         float dirichlet_epsilon,
+                         int random_opening_plies) {
             chessrl::SelfPlayConfig config;
             config.engine_path = engine_path;
             config.output_path = output_path;
@@ -190,13 +190,13 @@ PYBIND11_MODULE(_inference_cpp, m)
             config.save_pgn = save_pgn;
             config.pgn_dir = pgn_dir;
             config.simulations = simulations;
-            config.mcts_value = mcts_value;
             config.cpuct = cpuct;
             config.temperature = temperature;
             config.temperature_at_root = temperature_at_root;
             config.use_dirichlet = use_dirichlet;
             config.dirichlet_alpha = dirichlet_alpha;
             config.dirichlet_epsilon = dirichlet_epsilon;
+            config.random_opening_plies = random_opening_plies;
             return new chessrl::SelfPlayWorker(config);
         }),
         py::arg("engine_path"),
@@ -209,13 +209,13 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("save_pgn") = false,
         py::arg("pgn_dir") = "pgns",
         py::arg("simulations") = 800,
-        py::arg("mcts_value") = false,
         py::arg("cpuct") = 0.65f,
         py::arg("temperature") = 1.3f,
         py::arg("temperature_at_root") = 1.0f,
         py::arg("use_dirichlet") = true,
         py::arg("dirichlet_alpha") = 0.12f,
-        py::arg("dirichlet_epsilon") = 0.05f)
+        py::arg("dirichlet_epsilon") = 0.05f,
+        py::arg("random_opening_plies") = 0)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
         .def("get_buffer_size", &chessrl::SelfPlayWorker::get_buffer_size);
 }
