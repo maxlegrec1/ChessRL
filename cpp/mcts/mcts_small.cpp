@@ -58,6 +58,71 @@ std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::st
     return index;
 }
 
+// Flat LUT keyed by (from_sq * 64 + to_sq) * 5 + promo. promo: 0=none, 1=Q,
+// 2=R, 3=B, 4=N. Knight promos in self-play are stripped to no-promo to mirror
+// the existing string-key behavior. -1 means "not in vocab".
+//
+// Castling moves and chess960 boards fall back to the string path because the
+// chess::Move encoding for castling stores the rook square as the destination,
+// not the king's final square (which is what the UCI vocab uses).
+constexpr size_t kVocabLutSize = 64 * 64 * 5;
+
+const std::array<int32_t, kVocabLutSize>& vocab_lut()
+{
+    static const std::array<int32_t, kVocabLutSize> lut = []() {
+        std::array<int32_t, kVocabLutSize> table;
+        table.fill(-1);
+        const auto& vocab = small_policy_vocabulary();
+        for (size_t i = 0; i < vocab.size(); ++i)
+        {
+            const auto& s = vocab[i];
+            if (s.size() < 4) continue;
+            int from_file = s[0] - 'a';
+            int from_rank = s[1] - '1';
+            int to_file   = s[2] - 'a';
+            int to_rank   = s[3] - '1';
+            if (from_file < 0 || from_file > 7 || from_rank < 0 || from_rank > 7) continue;
+            if (to_file < 0 || to_file > 7 || to_rank < 0 || to_rank > 7) continue;
+            int from = from_rank * 8 + from_file;
+            int to   = to_rank   * 8 + to_file;
+            int promo = 0;
+            if (s.size() == 5)
+            {
+                switch (s[4])
+                {
+                    case 'q': promo = 1; break;
+                    case 'r': promo = 2; break;
+                    case 'b': promo = 3; break;
+                    case 'n': promo = 4; break;
+                    default: continue;
+                }
+            }
+            table[(from * 64 + to) * 5 + promo] = static_cast<int32_t>(i);
+        }
+        return table;
+    }();
+    return lut;
+}
+
+inline int vocab_index_for_move_fast(const chess::Move& move) noexcept
+{
+    const int from = static_cast<int>(move.from().index());
+    const int to   = static_cast<int>(move.to().index());
+    int promo = 0;
+    if (move.typeOf() == chess::Move::PROMOTION)
+    {
+        switch (move.promotionType().internal())
+        {
+            case chess::PieceType::underlying::QUEEN:  promo = 1; break;
+            case chess::PieceType::underlying::ROOK:   promo = 2; break;
+            case chess::PieceType::underlying::BISHOP: promo = 3; break;
+            case chess::PieceType::underlying::KNIGHT: promo = 0; break;
+            default: return -1;
+        }
+    }
+    return vocab_lut()[(from * 64 + to) * 5 + promo];
+}
+
 int read_batch_size_env(const char* specific)
 {
     if (specific)
@@ -343,19 +408,33 @@ private:
         bool has_logit = false;
         int mapped_count = 0;
 
+        const bool use_fast_lut = !board.chess960();
         for (const auto& move : legal_moves)
         {
             MovePrior entry;
             entry.move = move;
             entry.logit = -std::numeric_limits<float>::infinity();
 
-            const std::string key = move_to_vocab_key(board, move);
-            auto it = vocab_index_.find(key);
-            if (it != vocab_index_.end())
+            // Fast path: O(1) array lookup keyed on Move bits. Falls back to
+            // the string-keyed map for chess960 (different castling UCI) and
+            // for any move the LUT couldn't resolve directly (castling under
+            // standard rules — chess::Move stores the rook square, not the
+            // king's destination, so the LUT misses it).
+            int policy_index = -1;
+            if (use_fast_lut && move.typeOf() != chess::Move::CASTLING)
             {
-                entry.policy_index = it->second;
-                if (entry.policy_index >= 0 && entry.policy_index < static_cast<int>(eval.policy_logits.size()))
-                {
+                policy_index = vocab_index_for_move_fast(move);
+            }
+            if (policy_index < 0)
+            {
+                const std::string key = move_to_vocab_key(board, move);
+                auto it = vocab_index_.find(key);
+                if (it != vocab_index_.end()) policy_index = it->second;
+            }
+            if (policy_index >= 0)
+            {
+                entry.policy_index = policy_index;
+                if (entry.policy_index < static_cast<int>(eval.policy_logits.size())) {
                     entry.logit = eval.policy_logits[static_cast<size_t>(entry.policy_index)];
                     if (!has_logit || entry.logit > max_logit)
                     {
@@ -687,27 +766,13 @@ private:
     }
 
     std::shared_ptr<const single::SmallEncodedPosition> acquire_small_encoding(
-        const HistoryHandle& history,
+        const HistoryHandle& /*history*/,
         const chess::Board& board)
     {
-        if (!history)
-        {
-            return std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
-        }
-        const HistoryEntry* key = history.get();
-        std::lock_guard<std::mutex> lock(small_cache_mutex_);
-        auto it = small_encoding_cache_.find(key);
-
-        if (it != small_encoding_cache_.end())
-        {
-            if (auto existing = it->second.lock())
-            {
-                return existing;
-            }
-        }
-        auto fresh = std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
-        small_encoding_cache_[key] = fresh;
-        return fresh;
+        // Each leaf in MCTS is by definition unvisited; the prior encoding cache
+        // (keyed on HistoryEntry*) had near-zero hit rate but locked a mutex on
+        // every leaf, serializing the worker threads of a single board. Drop it.
+        return std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
     }
 
     MctsOptions options_;
@@ -718,8 +783,6 @@ private:
     single::SmallBatchConfig small_batch_config_;
     std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
     std::shared_ptr<TranspositionTable> cache_;
-    mutable std::mutex small_cache_mutex_;
-    std::unordered_map<const HistoryEntry*, std::weak_ptr<const single::SmallEncodedPosition>> small_encoding_cache_;
     std::mt19937 rng_;
     std::vector<int> path_buffer_;
     std::vector<float> dirichlet_noise_;

@@ -90,6 +90,15 @@ struct SelfPlayWorker::Impl
         chessrl::mcts::single::SmallBatchConfig batch_config;
         batch_config.engine_path = config.engine_path;
         batch_config.enable_telemetry = true;
+        // Cap max_batch_size to the realistic concurrency. The runner uses this
+        // value as its flush threshold: with N MCTS workers, the queue can never
+        // hold more than N pending requests, so a 1024-cap forces every batch
+        // through a 100us flush timeout. Sizing the threshold to the worker
+        // count lets a fully-populated queue dispatch immediately.
+        const int realistic_concurrency = (config.threads > 0)
+            ? config.threads
+            : std::min(config.concurrency, 256);
+        batch_config.max_batch_size = std::max(1, realistic_concurrency);
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
 
         // hash_size <= 0 disables the TT entirely (skips lock+hash+lookup on

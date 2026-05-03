@@ -34,6 +34,8 @@ ext_modules = [
         libraries=["nvinfer", "cudart"],
         extra_compile_args=[
             "-O3",
+            "-march=native",
+            "-DNDEBUG",
             "-std=c++17",
             "-DCHESSRL_MCTS_NO_STANDALONE",
         ],
