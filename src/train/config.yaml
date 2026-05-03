@@ -20,13 +20,13 @@ checkpoint:
 
 data:
   dataset_path: artifacts/buffers/buffer.bin
-  reload_seconds: 60
+  reload_seconds: 20
   # Half of selfplay.max_buffer_size below — wait until the replay buffer is
   # half full before training starts, so the first batches are drawn from
   # diverse data and the steady-state samples-per-insertion ratio is the
   # constraint rather than the initial transient.
-  min_samples_to_start: 5000000
-  warmup_poll_seconds: 30
+  min_samples_to_start: 100000
+  warmup_poll_seconds: 5
   # Trainer pacing: each record gets sampled this many times on average over its
   # buffer lifetime. Sleep auto-adjusts to track the live self-play rate.
   target_k: 5.0
@@ -34,7 +34,7 @@ data:
 selfplay:
   boards: 512
   threads: 8
-  hash_size: 128
+  hash_size: 4096
   simulations: 800
   cpuct: 0.65
   temperature: 1.3

@@ -185,6 +185,7 @@ PYBIND11_MODULE(_inference_cpp, m)
             config.engine_path = engine_path;
             config.output_path = output_path;
             config.concurrency = batch_size;
+            config.hash_size = hash_size;
             config.max_games = max_games;
             config.max_buffer_size = max_buffer_size;
             config.save_pgn = save_pgn;
@@ -203,7 +204,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("output_path"),
         py::arg("batch_size") = 8,
         py::arg("threads") = 1,
-        py::arg("hash_size") = 128,
+        py::arg("hash_size") = 4096,
         py::arg("max_games") = -1,
         py::arg("max_buffer_size") = 1000000,
         py::arg("save_pgn") = false,

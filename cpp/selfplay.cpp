@@ -92,8 +92,7 @@ struct SelfPlayWorker::Impl
         batch_config.enable_telemetry = true;
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
 
-        // 4GB cache
-        cache = std::make_shared<chessrl::mcts::TranspositionTable>(4096);
+        cache = std::make_shared<chessrl::mcts::TranspositionTable>(config.hash_size);
 
         slots.resize(config.concurrency);
         for (auto& slot : slots)
@@ -107,6 +106,21 @@ struct SelfPlayWorker::Impl
         if (!std::filesystem::exists(config.output_path))
         {
             std::ofstream tmp(config.output_path);
+        }
+
+        // Truncate to a record boundary if a prior run left a partial trailing
+        // record, so subsequent appends don't produce a misaligned record.
+        {
+            std::error_code ec;
+            auto fsize = std::filesystem::file_size(config.output_path, ec);
+            if (!ec)
+            {
+                size_t aligned = (fsize / kRecordSize) * kRecordSize;
+                if (aligned != fsize)
+                {
+                    std::filesystem::resize_file(config.output_path, aligned, ec);
+                }
+            }
         }
 
         outfile.open(config.output_path, std::ios::in | std::ios::out | std::ios::binary);
@@ -297,8 +311,8 @@ SelfPlayMetrics SelfPlayWorker::step()
                     std::uniform_int_distribution<size_t> dist(0, impl_->config.max_buffer_size - 1);
                     size_t idx = dist(rng);
                     
-                    impl_->outfile.seekp(idx * 128, std::ios::beg);
-                    impl_->outfile.write(buffer, 128);
+                    impl_->outfile.seekp(idx * kRecordSize, std::ios::beg);
+                    impl_->outfile.write(buffer, kRecordSize);
                 }
             }
             
