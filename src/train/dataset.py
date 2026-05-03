@@ -18,6 +18,9 @@ import struct
 # Fallback index when a move is not present in the vocabulary.
 NULL_POLICY_INDEX = len(policy_index) - 1
 
+# On-disk record size (bytes). Mirrors cpp/selfplay.cpp's kRecordSize.
+RECORD_SIZE = 144
+
 
 def _policy_str_to_idx(move: str) -> int:
     if not move:
@@ -110,7 +113,6 @@ class SelfPlayDataset:
 
     def _read_binary_file(self):
         # On-disk record layout (144 bytes, fixed). Mirrors cpp/selfplay.cpp.
-        RECORD_SIZE = 144
         FEN_OFFSET = 0
         POLICY_OFFSET = 100
         VALUE_OUTCOME_OFFSET = 116

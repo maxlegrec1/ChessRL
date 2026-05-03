@@ -18,7 +18,7 @@ from src.models.small.small_model import SmallModel
 from src.models.small.vocab import policy_to_idx
 
 from .config import TrainingConfig
-from .dataset import NULL_POLICY_INDEX, SelfPlayBatch, SelfPlayDataset
+from .dataset import NULL_POLICY_INDEX, RECORD_SIZE, SelfPlayBatch, SelfPlayDataset
 
 
 AMP_DTYPES: Dict[str, torch.dtype] = {
@@ -163,19 +163,30 @@ class Trainer:
         if threshold <= 0:
             return
         poll = max(1.0, float(self.config.data.warmup_poll_seconds))
-        if self.dataset.size >= threshold:
+        buffer_path = self.config.data.dataset_path
+
+        def _live_size() -> int:
+            try:
+                return buffer_path.stat().st_size // RECORD_SIZE
+            except FileNotFoundError:
+                return 0
+
+        if _live_size() >= threshold:
+            self.dataset.reload(force=True)
             return
         self.console.log(
             f"[warmup] waiting for buffer to reach {threshold:,} samples "
-            f"(currently {self.dataset.size:,})"
+            f"(currently {_live_size():,})"
         )
-        while self.dataset.size < threshold:
+        # Cheap file-size probe — avoids re-parsing the entire 5 GB buffer
+        # every poll. We only do a real reload once the threshold is hit.
+        while _live_size() < threshold:
             time.sleep(poll)
-            self.dataset.reload(force=True)
             self.console.log(
-                f"[warmup] buffer at {self.dataset.size:,}/{threshold:,}"
+                f"[warmup] buffer at {_live_size():,}/{threshold:,}"
             )
-        self.console.log(f"[warmup] threshold reached; starting training")
+        self.dataset.reload(force=True)
+        self.console.log("[warmup] threshold reached; starting training")
 
     def run(self) -> None:
         self._wait_for_warmup()
@@ -187,7 +198,17 @@ class Trainer:
         # EMA over (Δrecords, Δseconds) to smooth out the noisy per-step
         # measurement of the self-play insertion rate.
         ema_alpha = 0.2
-        prev_size = self.dataset.size
+        # Probe the on-disk file size for a fresh-to-the-second record count;
+        # the in-memory dataset.size only updates at reload boundaries.
+        buffer_path = self.config.data.dataset_path
+
+        def _live_record_count() -> int:
+            try:
+                return buffer_path.stat().st_size // RECORD_SIZE
+            except FileNotFoundError:
+                return self.dataset.size
+
+        prev_size = _live_record_count()
         prev_wall = time.time()
         g_ema: float = 1.0  # records/sec; safe non-zero seed
 
@@ -200,7 +221,7 @@ class Trainer:
                 t1 = time.time()
 
                 # Measure self-play insertion rate g = Δrecords / Δwall.
-                cur_size = self.dataset.size
+                cur_size = _live_record_count()
                 dwall = max(1e-3, t1 - prev_wall)
                 g_inst = max(0.0, (cur_size - prev_size) / dwall)
                 g_ema = (1 - ema_alpha) * g_ema + ema_alpha * g_inst if g_inst > 0 else g_ema
