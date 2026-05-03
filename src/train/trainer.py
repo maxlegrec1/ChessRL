@@ -154,7 +154,27 @@ class Trainer:
         return run
 
     # ------------------------------------------------------------------ #
+    def _wait_for_warmup(self) -> None:
+        threshold = self.config.data.min_samples_to_start
+        if threshold <= 0:
+            return
+        poll = max(1.0, float(self.config.data.warmup_poll_seconds))
+        if self.dataset.size >= threshold:
+            return
+        self.console.log(
+            f"[warmup] waiting for buffer to reach {threshold:,} samples "
+            f"(currently {self.dataset.size:,})"
+        )
+        while self.dataset.size < threshold:
+            time.sleep(poll)
+            self.dataset.reload(force=True)
+            self.console.log(
+                f"[warmup] buffer at {self.dataset.size:,}/{threshold:,}"
+            )
+        self.console.log(f"[warmup] threshold reached; starting training")
+
     def run(self) -> None:
+        self._wait_for_warmup()
         self.console.log(
             f"Starting training on {self.device} with dataset size {self.dataset.size}"
         )

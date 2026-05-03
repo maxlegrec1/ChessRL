@@ -16,13 +16,20 @@ uv workspace member. Override the native paths via environment variables:
 
 All commands assume the repo root as the working directory.
 
-    # Self-play (writes artifacts/selfplay_buffer.bin, watches artifacts/engines/.iteration)
-    uv run python -m src.self_play --boards 128
+    # Start (or resume) the full training loop. This launches self-play and the
+    # trainer in parallel; the trainer waits for the buffer to fill (see
+    # data.min_samples_to_start in config.yaml) before its first step.
+    uv run python -m src.run
 
-    # Train (reads artifacts/buffers/buffer.bin, writes artifacts/checkpoints/)
-    uv run python -m src.train --config src/train/config.yaml
+    # Watch the per-process logs:
+    tail -f artifacts/runs/selfplay.log
+    tail -f artifacts/runs/training.log
 
-    # Convert a checkpoint to a TensorRT engine
+    # Run only one side (useful for resume / debugging)
+    uv run python -m src.run --no-train      # self-play only
+    uv run python -m src.run --no-selfplay   # trainer only
+
+    # Manually convert a checkpoint to a TensorRT engine
     scripts/build_trt.sh artifacts/checkpoints/step_00043900.pt 43900
 
     # Head-to-head evaluation between two checkpoints

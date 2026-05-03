@@ -148,9 +148,10 @@ def main_model_vs_model(
             from data.generate.openings import hf_fen_generator  # type: ignore
         openings_gen = hf_fen_generator(split="train", seed=seed)
 
-    os.makedirs("./pgns", exist_ok=True)
+    pgn_dir = "artifacts/pgns"
+    os.makedirs(pgn_dir, exist_ok=True)
     pgn_filename = os.path.join(
-        "./pgns", datetime.now().strftime("brawls_%Y%m%d_%H%M%S.pgn")
+        pgn_dir, datetime.now().strftime("brawls_%Y%m%d_%H%M%S.pgn")
     )
     # Create/clear the PGN file for progressive writing
     open(pgn_filename, "w", encoding="utf-8").close()
@@ -214,22 +215,20 @@ def main_model_vs_model(
 
 
 def _load_small_model(device: str, ckpt_path: Optional[str] = None):
-    from src.models.small.inference import Inference
+    from src.models.small.small_model import SmallModel
 
-    model = Inference().to(device)
-    # Default checkpoint for small model
-    default_ckpt = "src/models/small/model.pt"
-    ckpt_to_load = ckpt_path if ckpt_path else default_ckpt
-    if ckpt_to_load and os.path.exists(ckpt_to_load):
-        state = torch.load(ckpt_to_load, weights_only=False)
-        # Allow either plain state dict or checkpoint dict with key
-        if isinstance(state, dict) and "model_state_dict" in state:
-            model.load_state_dict(state["model_state_dict"],strict=False) 
-        elif isinstance(state, dict) and "model" in state:
-            print(f"Loading model from {ckpt_to_load} with key model")
-            model.load_state_dict(state["model"],strict=False)
+    model = SmallModel().to(device)
+    if ckpt_path and os.path.exists(ckpt_path):
+        state = torch.load(ckpt_path, weights_only=False, map_location=device)
+        if isinstance(state, dict) and "model" in state:
+            model.load_state_dict(state["model"], strict=False)
+        elif isinstance(state, dict) and "model_state_dict" in state:
+            model.load_state_dict(state["model_state_dict"], strict=False)
         else:
-            model.load_state_dict(state,strict=False)
+            model.load_state_dict(state, strict=False)
+    elif ckpt_path:
+        raise FileNotFoundError(f"SmallModel checkpoint not found: {ckpt_path}")
+    model.eval()
     return model
 
 
@@ -284,17 +283,13 @@ if __name__ == "__main__":
     temp1 = args.temp1 if args.temp1 is not None else global_temp
     temp2 = args.temp2 if args.temp2 is not None else global_temp
     
-    from src.models.small.inference_mcts import SmallMCTSInference
-    # Load models based on selection
     if args.model1 == "small":
-        model1 = _load_small_model(device)
-        # model1 = SmallMCTSInference(engine_path="model_dynamic_transformer.trt",cpuct=0.65, simulations=800,temperature=1,temperature_at_root=1.3,use_dirichlet=True,dirichlet_alpha=0.12,dirichlet_epsilon=0.05)
+        model1 = _load_small_model(device, args.ckpt1)
     else:
         model1 = _load_leela_model(device, args.ckpt1)
 
     if args.model2 == "small":
-        # model2 = _load_small_model(device, args.ckpt2)
-        model2 = SmallMCTSInference(engine_path="model_dynamic_transformer.trt",cpuct=0.65, simulations=800,temperature=1,temperature_at_root=1,use_dirichlet=True,dirichlet_alpha=0.12,dirichlet_epsilon=0.05)
+        model2 = _load_small_model(device, args.ckpt2)
     else:
         model2 = _load_leela_model(device, args.ckpt2)
 

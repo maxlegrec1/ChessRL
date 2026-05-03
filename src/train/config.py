@@ -17,18 +17,43 @@ class WandbConfig:
 
 @dataclass
 class CheckpointConfig:
-    dir: Path = Path("checkpoints")
+    dir: Path = Path("artifacts/checkpoints")
     every_steps: int = 1000
     keep_last: int = 5
-    build_script: Path | None = Path("build_trt.sh")
-    engine_dir: Path = Path("engines")
-    iteration_file: Path = Path("src/self_play/.iteration")
+    build_script: Path | None = Path("scripts/build_trt.sh")
+    engine_dir: Path = Path("artifacts/engines")
+    iteration_file: Path = Path("artifacts/engines/.iteration")
 
 
 @dataclass
 class DataConfig:
-    dataset_path: Path = Path("src/self_play/selfplay_buffer.bin")
+    dataset_path: Path = Path("artifacts/buffers/buffer.bin")
     reload_seconds: float = 60.0
+    min_samples_to_start: int = 8192
+    warmup_poll_seconds: float = 10.0
+
+
+@dataclass
+class SelfPlayConfig:
+    # parallelism / batching
+    boards: int = 128
+    threads: int = 1
+    hash_size: int = 128
+    # MCTS hyperparameters (mirror cpp/selfplay.hpp defaults)
+    simulations: int = 800
+    cpuct: float = 0.65
+    temperature: float = 1.3
+    temperature_at_root: float = 1.0
+    use_dirichlet: bool = True
+    dirichlet_alpha: float = 0.12
+    dirichlet_epsilon: float = 0.05
+    # buffer / output
+    max_buffer_size: int = 10_000_000
+    flush_interval: int = 1
+    poll_seconds: int = 300
+    save_pgn: bool = False
+    pgn_dir: Path = Path("artifacts/pgns")
+    mcts_value: bool = False
 
 
 @dataclass
@@ -43,6 +68,7 @@ class TrainingConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     amp_dtype: str = "float16"
     resume_path: Optional[Path] = None
     run_name: Optional[str] = None
@@ -66,7 +92,8 @@ def _merge_dataclass(instance, updates: Dict[str, Any]):
             setattr(instance, key, value)
 
 
-def load_config(path: Path) -> TrainingConfig:
+def load_config(path: Path | str) -> TrainingConfig:
+    path = Path(path)
     cfg = TrainingConfig()
     if path.is_file():
         with path.open("r", encoding="utf-8") as fh:
@@ -77,6 +104,7 @@ def load_config(path: Path) -> TrainingConfig:
         cfg.checkpoint.build_script = Path(cfg.checkpoint.build_script)
     cfg.checkpoint.engine_dir = Path(cfg.checkpoint.engine_dir)
     cfg.checkpoint.iteration_file = Path(cfg.checkpoint.iteration_file)
+    cfg.selfplay.pgn_dir = Path(cfg.selfplay.pgn_dir)
     cfg.data.dataset_path = Path(cfg.data.dataset_path)
     if cfg.resume_path:
         cfg.resume_path = Path(cfg.resume_path)

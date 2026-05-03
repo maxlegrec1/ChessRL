@@ -3,13 +3,17 @@ Quick command reference (run from repo root).
 # Install / build
 uv sync                                # installs deps and builds the cpp extension
 
-# Self-play (writes artifacts/selfplay_buffer.bin, watches artifacts/engines/.iteration)
-uv run python -m src.self_play --boards 128 --threads 1
+# Start (or resume) the full training loop
+uv run python -m src.run               # spawns self-play + trainer together
+uv run python -m src.run --boards 256  # tune self-play parallelism
+uv run python -m src.run --no-train      # self-play only
+uv run python -m src.run --no-selfplay   # trainer only (replay an existing buffer)
 
-# Train (reads artifacts/buffers/buffer.bin, saves to artifacts/checkpoints/, ships engines via scripts/build_trt.sh)
-uv run python -m src.train --config src/train/config.yaml
+# Watch per-process logs
+tail -f artifacts/runs/selfplay.log
+tail -f artifacts/runs/training.log
 
-# Head-to-head evaluation
+# Head-to-head evaluation between two checkpoints
 uv run python -m src.eval.brawls \
   --num_games 100 \
   --model1 small --model2 small \
@@ -25,5 +29,5 @@ uv run pytest                          # full
 uv run pytest -m "not gpu and not trt" # CPU-only
 
 # Prune old checkpoints/engines (default keeps last 5; dry-run by default)
-uv run python scripts/prune_artifacts.py            # dry-run
+uv run python scripts/prune_artifacts.py
 uv run python scripts/prune_artifacts.py --apply

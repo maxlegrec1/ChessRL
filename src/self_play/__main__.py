@@ -5,40 +5,26 @@ import sys
 import time
 from pathlib import Path
 
+import _inference_cpp
 from rich import box
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
+from src.train.config import SelfPlayConfig, TrainingConfig, load_config
+
 from .engine_watch import EngineWatcher
 from .metrics import MetricsTracker
 
 
-SIMULATIONS = 800
-
-
-DEFAULT_BUFFER = Path("artifacts/selfplay_buffer.bin")
-DEFAULT_ITERATION = Path("artifacts/engines/.iteration")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Self-play data generation loop.")
-    parser.add_argument("--boards", type=int, default=128, help="Number of parallel boards.")
-    parser.add_argument("--buffer-path", type=Path, default=DEFAULT_BUFFER, help="Path to parquet buffer.")
-    parser.add_argument("--max-buffer-size", type=int, default=10_000_000, help="Maximum buffer size.")
-    parser.add_argument("--iteration-file", type=Path, default=DEFAULT_ITERATION, help="Path to .iteration CSV.")
-    parser.add_argument("--poll-seconds", type=int, default=300, help="Seconds between iteration file checks.")
     parser.add_argument(
-        "--flush-interval",
-        type=int,
-        default=1,
-        help="Number of buffer batches to accumulate before flushing to disk.",
+        "--config",
+        type=Path,
+        default=Path("src/train/config.yaml"),
+        help="YAML config (selfplay + checkpoint + data sections).",
     )
-    parser.add_argument("--threads", type=int, default=1, help="Number of threads.")
-    parser.add_argument("--hash-size", type=int, default=128, help="Hash size in MB.")
-    parser.add_argument("--save-pgn", action="store_true", help="Save games as PGN")
-    parser.add_argument("--pgn-dir", type=str, default="pgns", help="Directory to save PGNs")
-    parser.add_argument("--mcts-value", action="store_true", help="Use MCTS value instead of game outcome for WDL")
     return parser.parse_args()
 
 
@@ -65,100 +51,91 @@ def render_dashboard_cpp(metrics: MetricsTracker, worker_metrics: dict, board_co
 
     return table
 
-import _inference_cpp
+
+def _build_worker(engine_path: str, buffer_path: Path, sp: SelfPlayConfig):
+    return _inference_cpp.SelfPlayWorker(
+        engine_path=engine_path,
+        output_path=str(buffer_path),
+        batch_size=sp.boards,
+        threads=sp.threads,
+        hash_size=sp.hash_size,
+        max_games=-1,
+        max_buffer_size=sp.max_buffer_size,
+        save_pgn=sp.save_pgn,
+        pgn_dir=str(sp.pgn_dir),
+        simulations=sp.simulations,
+        mcts_value=sp.mcts_value,
+        cpuct=sp.cpuct,
+        temperature=sp.temperature,
+        temperature_at_root=sp.temperature_at_root,
+        use_dirichlet=sp.use_dirichlet,
+        dirichlet_alpha=sp.dirichlet_alpha,
+        dirichlet_epsilon=sp.dirichlet_epsilon,
+    )
+
 
 def main() -> int:
     args = parse_args()
     console = Console()
 
-    buffer_path = args.buffer_path.resolve()
-    iteration_path = args.iteration_file.resolve()
+    config: TrainingConfig = load_config(args.config)
+    sp = config.selfplay
 
-    # Ensure directory exists
+    buffer_path = config.data.dataset_path.resolve()
+    iteration_path = config.checkpoint.iteration_file.resolve()
     buffer_path.parent.mkdir(parents=True, exist_ok=True)
 
-    engine_watcher = EngineWatcher(iteration_path, poll_interval=float(args.poll_seconds))
-    metrics = MetricsTracker(simulations_per_position=SIMULATIONS)
-    
-    console.log(f"Starting C++ self-play loop...")
+    engine_watcher = EngineWatcher(iteration_path, poll_interval=float(sp.poll_seconds))
+    metrics = MetricsTracker(simulations_per_position=sp.simulations)
+
+    console.log("Starting C++ self-play loop...")
     console.log(f"Buffer: {buffer_path}")
-    if args.save_pgn:
-        console.log(f"Saving PGNs to: {args.pgn_dir}")
-    
+    console.log(
+        f"MCTS: simulations={sp.simulations} cpuct={sp.cpuct} "
+        f"temperature={sp.temperature} root_temp={sp.temperature_at_root} "
+        f"dirichlet={sp.use_dirichlet}(alpha={sp.dirichlet_alpha}, eps={sp.dirichlet_epsilon})"
+    )
+    if sp.save_pgn:
+        console.log(f"Saving PGNs to: {sp.pgn_dir}")
+
     worker = None
-    current_engine_path = None
-    
+    current_engine_path: str | None = None
+
     try:
         with Live(console=console, refresh_per_second=4) as live:
             while True:
-                # Check for engine update
                 new_engine = engine_watcher.maybe_refresh()
                 if new_engine:
                     metrics.update_engine_path(new_engine)
                     current_engine_path = str(new_engine)
-                    # Re-initialize worker with new engine
-                    worker = _inference_cpp.SelfPlayWorker(
-                        engine_path=current_engine_path,
-                        output_path=str(buffer_path),
-                        batch_size=args.boards,
-                        threads=args.threads,
-                        hash_size=args.hash_size,
-                        max_games=-1,
-                        max_buffer_size=args.max_buffer_size,
-                        save_pgn=args.save_pgn,
-                        pgn_dir=args.pgn_dir,
-                        simulations=SIMULATIONS,
-                        mcts_value=args.mcts_value
-                    )
+                    worker = _build_worker(current_engine_path, buffer_path, sp)
                     console.log(f"Initialized worker with engine: {current_engine_path}")
 
                 if not worker:
                     if not current_engine_path:
                         current_engine_path = engine_watcher.engine_path
-                    
                     if current_engine_path:
                         metrics.update_engine_path(Path(current_engine_path))
-                        worker = _inference_cpp.SelfPlayWorker(
-                            engine_path=str(current_engine_path),
-                            output_path=str(buffer_path),
-                            batch_size=args.boards,
-                            threads=args.threads,
-                            hash_size=args.hash_size,
-                            max_games=-1,
-                            max_buffer_size=args.max_buffer_size,
-                            save_pgn=args.save_pgn,
-                            pgn_dir=args.pgn_dir,
-                            simulations=SIMULATIONS,
-                            mcts_value=args.mcts_value
-                        )
+                        worker = _build_worker(str(current_engine_path), buffer_path, sp)
                         console.log(f"Initialized worker with engine: {current_engine_path}")
                     else:
                         live.update(Table(title="Waiting for engine...", box=box.SIMPLE_HEAVY))
                         time.sleep(5)
                         continue
-                
-                # Step the worker
+
                 step_metrics = worker.step()
-                
-                # Update metrics
                 metrics.record_positions(step_metrics.positions_generated)
                 metrics.record_game_finished(step_metrics.games_finished)
-                
-                # Calculate nodes per second for this step
+
                 nps = 0
                 if step_metrics.runtime_seconds > 0:
                     nps = step_metrics.nodes_evaluated / step_metrics.runtime_seconds
-                
-                # Get buffer size
+
                 buffer_size = worker.get_buffer_size()
-                
-                worker_stats = {
-                    "nodes_per_sec": nps,
-                    "buffer_size": buffer_size
-                }
-                
-                live.update(render_dashboard_cpp(metrics, worker_stats, args.boards))
-                
+                worker_stats = {"nodes_per_sec": nps, "buffer_size": buffer_size}
+
+                live.update(render_dashboard_cpp(metrics, worker_stats, sp.boards))
+
     except KeyboardInterrupt:
         console.log("Stopping self-play loop...")
         return 0
@@ -166,6 +143,6 @@ def main() -> int:
         console.print_exception()
         return 1
 
+
 if __name__ == "__main__":
     sys.exit(main())
-

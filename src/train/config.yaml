@@ -21,6 +21,26 @@ checkpoint:
 data:
   dataset_path: artifacts/buffers/buffer.bin
   reload_seconds: 60
+  min_samples_to_start: 8192
+  warmup_poll_seconds: 10
+
+selfplay:
+  boards: 128
+  threads: 1
+  hash_size: 128
+  simulations: 800
+  cpuct: 0.65
+  temperature: 1.3
+  temperature_at_root: 1.0
+  use_dirichlet: true
+  dirichlet_alpha: 0.12
+  dirichlet_epsilon: 0.05
+  max_buffer_size: 10000000
+  flush_interval: 1
+  poll_seconds: 300
+  save_pgn: false
+  pgn_dir: artifacts/pgns
+  mcts_value: false
 
 wandb:
   project: self_play
