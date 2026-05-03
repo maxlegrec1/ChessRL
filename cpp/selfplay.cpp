@@ -4,15 +4,16 @@
 #include "mcts/cache.hpp"
 #include "chess-library/include/chess.hpp"
 
+#include <array>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <vector>
-#include <thread>
-#include <chrono>
 #include <mutex>
-#include <array>
-#include <filesystem>
 #include <random>
+#include <thread>
+#include <vector>
 #include <cstring>
 
 namespace chessrl
@@ -128,12 +129,12 @@ SelfPlayMetrics SelfPlayWorker::step()
     double mcts_duration_ms = std::chrono::duration<double, std::milli>(current_time - start_time).count();
     double trt_duration_ms = end_infer_ms - start_infer_ms;
 
-    static int log_counter = 0;
-    // if (++log_counter % 10 == 0) {
-        std::ofstream logfile("/tmp/profile.log", std::ios::app);
-        logfile << "!!!!! [Profile] MCTS: " << mcts_duration_ms << " ms, TRT: " << trt_duration_ms << " ms" << std::endl;
+    if (std::getenv("CHESSRL_PROFILE_LOG") != nullptr)
+    {
+        std::cerr << "[Profile] MCTS=" << mcts_duration_ms << "ms"
+                  << " TRT=" << trt_duration_ms << "ms\n";
         impl_->cache->print_stats();
-    // }
+    }
 
     // Process results
     for (size_t i = 0; i < impl_->slots.size(); ++i)

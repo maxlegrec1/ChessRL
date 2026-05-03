@@ -2,13 +2,12 @@
 
 #include "inference.hpp"
 #include <atomic>
+#include <cstdint>
+#include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <vector>
-#include <cstdint>
-#include <memory>
-#include <iostream>
-#include <fstream>
 
 namespace chessrl::mcts
 {
@@ -22,38 +21,17 @@ struct CacheEntry
 class TranspositionTable
 {
 public:
+    // Each entry stores a SmallPolicyValue (1929 float logits + 3 WDL floats); entries are
+    // sharded into 1024-bucket lock groups for low-contention concurrent access.
     explicit TranspositionTable(size_t size_mb)
     {
-        // Calculate number of entries
-        // Each entry is roughly 8 + sizeof(SmallPolicyValue) bytes
-        // SmallPolicyValue has vector<float> policy_logits (1929 * 4 bytes) and array<float, 3> wdl (12 bytes)
-        // Wait, vector is dynamic. We can't store it directly in a fixed array easily without pointers.
-        // But we want a simple TT.
-        // If we store full objects, we need to be careful about memory.
-        // 1929 floats = ~7.7 KB.
-        // If we want a large TT, we might need to store just the logits array, or use a shared pointer?
-        // But SmallPolicyValue uses std::vector.
-        // Let's use a simple vector of entries with a mutex for now, or a sharded map.
-        // Given the size (7KB per entry), 128MB can store ~16,000 entries.
-        // That's not a lot.
-        // But maybe enough for a batch?
-        // Actually, we can just use a large LRU cache or a simple hash table with replacement.
-        
-        // Let's use a simple vector of buckets.
-        // To avoid storing 7KB in the entry, we can store a shared_ptr?
-        // But we want to avoid allocations if possible.
-        // However, SmallPolicyValue already has a vector.
-        
-        // Let's just use a simple implementation first.
-        // We can optimize memory layout later.
-        
-        size_t entry_size = sizeof(CacheEntry) + 1929 * sizeof(float); // Approx
-        num_entries_ = (size_mb * 1024 * 1024) / entry_size;
-        if (num_entries_ < 1024) num_entries_ = 1024;
-        
+        const size_t entry_size = sizeof(CacheEntry) + 1929 * sizeof(float);
+        num_entries_ = std::max<size_t>(1024, (size_mb * 1024 * 1024) / entry_size);
+
         entries_.resize(num_entries_);
-        locks_.reserve(num_entries_ / 1024 + 1);
-        for (size_t i = 0; i < num_entries_ / 1024 + 1; ++i)
+        const size_t num_locks = num_entries_ / 1024 + 1;
+        locks_.reserve(num_locks);
+        for (size_t i = 0; i < num_locks; ++i)
         {
             locks_.push_back(std::make_unique<std::mutex>());
         }
@@ -90,10 +68,14 @@ public:
 
     void print_stats() const
     {
-        std::ofstream logfile("/tmp/profile.log", std::ios::app);
-        logfile << "[Cache] Hits: " << hits_ << ", Misses: " << misses_ 
-                << ", Ratio: " << (hits_ * 100.0 / (hits_ + misses_ + 1)) << "%" << std::endl;
+        const size_t h = hits_.load();
+        const size_t m = misses_.load();
+        std::cerr << "[Cache] hits=" << h << " misses=" << m
+                  << " ratio=" << (h * 100.0 / (h + m + 1)) << "%\n";
     }
+
+    size_t hits() const { return hits_.load(); }
+    size_t misses() const { return misses_.load(); }
 
 private:
     std::vector<CacheEntry> entries_;

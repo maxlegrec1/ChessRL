@@ -17,8 +17,8 @@ from .metrics import MetricsTracker
 SIMULATIONS = 800
 
 
-DEFAULT_BUFFER = Path("src/self_play/selfplay_buffer.bin")
-DEFAULT_ITERATION = Path("src/self_play/.iteration")
+DEFAULT_BUFFER = Path("artifacts/selfplay_buffer.bin")
+DEFAULT_ITERATION = Path("artifacts/engines/.iteration")
 
 
 def parse_args() -> argparse.Namespace:

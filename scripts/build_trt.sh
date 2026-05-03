@@ -8,11 +8,11 @@ fi
 
 CKPT_PATH="$1"
 STEP="$2"
-ENGINE_DIR="${3:-engines}"
-ITERATION_FILE="${4:-src/self_play/.iteration}"
+ENGINE_DIR="${3:-artifacts/engines}"
+ITERATION_FILE="${4:-artifacts/engines/.iteration}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/.."
 
 mkdir -p "$ENGINE_DIR"
 
@@ -23,7 +23,7 @@ ONNX_PATH="${ENGINE_DIR_ABS}/${MODEL_NAME}.onnx"
 TRT_PATH="${ENGINE_DIR_ABS}/${MODEL_NAME}.trt"
 
 echo "[build_trt] Exporting ${CKPT_ABS} -> ${ONNX_PATH}"
-uv run python -m src.conversion_small.to_onnx_dynamic_custom \
+uv run python -m src.export.to_onnx \
   --ckpt_path "$CKPT_ABS" \
   --onnx_path "$ONNX_PATH"
 

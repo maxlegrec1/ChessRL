@@ -44,8 +44,6 @@ chess::Board apply_history(const SearchInput& input);
 
 struct TreeNode
 {
-    // REMOVED: chess::Board board; - Board state is reconstructed during traversal
-    
     int parent{-1};
     chess::Move move_from_parent{chess::Move::NO_MOVE}; // The move that led to this node
     bool terminal{false};

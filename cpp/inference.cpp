@@ -28,11 +28,17 @@
 
 #include "chess-library/include/chess.hpp"
 #include "cuda_fp16.h"
+#include "include/trt_utils.hpp"
 
 namespace chessrl
 {
 namespace
 {
+
+using chessrl::trt::Logger;
+using chessrl::trt::element_size;
+using chessrl::trt::volume;
+using chessrl::trt::resolve_engine_path;
 
 constexpr int kSmallBoardSize = 8;
 constexpr int kSmallFeaturePlanes = 19;
@@ -41,43 +47,6 @@ constexpr int kSmallBatchSize = 1024;
 constexpr int kSmallValueSize = 3;
 
 constexpr float kIllegalScore = -1e9F;
-
-class Logger : public nvinfer1::ILogger
-{
-public:
-    void log(Severity severity, const char* msg) noexcept override
-    {
-        if (severity <= Severity::kWARNING)
-        {
-            std::cout << "[TensorRT] " << msg << std::endl;
-        }
-    }
-};
-
-size_t getElementSize(nvinfer1::DataType dtype)
-{
-    switch (dtype)
-    {
-    case nvinfer1::DataType::kFLOAT:
-        return 4;
-    case nvinfer1::DataType::kHALF:
-        return 2;
-    case nvinfer1::DataType::kINT32:
-        return 4;
-    case nvinfer1::DataType::kINT8:
-        return 1;
-    case nvinfer1::DataType::kBOOL:
-        return 1;
-    default:
-        throw std::runtime_error("Unsupported TensorRT data type");
-    }
-}
-
-size_t volume(const nvinfer1::Dims& dims)
-{
-    return std::accumulate(
-        dims.d, dims.d + dims.nbDims, static_cast<size_t>(1), [](size_t a, int64_t b) { return a * static_cast<size_t>(b); });
-}
 
 class DeviceBuffer
 {
@@ -128,19 +97,6 @@ public:
 private:
     cudaStream_t mStream{};
 };
-
-std::string resolveEnginePath(const std::string& engine_path, const std::string& default_name)
-{
-    std::string resolved = engine_path.empty() ? default_name : engine_path;
-    try
-    {
-        resolved = std::filesystem::absolute(resolved).string();
-    }
-    catch (...)
-    {
-    }
-    return resolved;
-}
 
 namespace small_impl
 {
@@ -243,7 +199,7 @@ EngineContext& getEngineContext(const std::string& engine_path)
     static auto* mutex = new std::mutex();
     static auto* contexts = new std::unordered_map<std::string, std::unique_ptr<EngineContext>>();
 
-    std::string resolvedPath = resolveEnginePath(engine_path, "model.trt");
+    std::string resolvedPath = resolve_engine_path(engine_path, "model.trt");
 
     std::lock_guard<std::mutex> lock(*mutex);
     auto it = contexts->find(resolvedPath);
@@ -457,9 +413,9 @@ RawOutputs runInference(EngineContext& ctx, const std::vector<float>& input)
         throw std::runtime_error("Failed to set small-model input shape.");
     }
 
-    DeviceBuffer inputDevice(volume(inputDims) * getElementSize(inputType));
-    DeviceBuffer policyDevice(volume(policyDims) * getElementSize(policyType));
-    DeviceBuffer valueDevice(volume(valueDims) * getElementSize(valueType));
+    DeviceBuffer inputDevice(volume(inputDims) * element_size(inputType));
+    DeviceBuffer policyDevice(volume(policyDims) * element_size(policyType));
+    DeviceBuffer valueDevice(volume(valueDims) * element_size(valueType));
     CudaStream stream;
 
     std::vector<__half> inputHalf;

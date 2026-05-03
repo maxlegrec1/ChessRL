@@ -17,12 +17,15 @@ PolicyValueResult = Tuple[List[str], List[WdlVector]]
 def _load_binding():
     global _BINDING
     if _BINDING is None:
-        cpp_dir = Path(__file__).resolve().parents[3] / "cpp"
-        if not cpp_dir.exists():
-            raise RuntimeError(f"Expected cpp directory at {cpp_dir}")
-        if str(cpp_dir) not in sys.path:
-            sys.path.insert(0, str(cpp_dir))
-        _BINDING = importlib.import_module("_inference_cpp")
+        try:
+            _BINDING = importlib.import_module("_inference_cpp")
+        except ImportError:
+            cpp_dir = Path(__file__).resolve().parents[3] / "cpp"
+            if not cpp_dir.exists():
+                raise
+            if str(cpp_dir) not in sys.path:
+                sys.path.insert(0, str(cpp_dir))
+            _BINDING = importlib.import_module("_inference_cpp")
     return _BINDING
 
 

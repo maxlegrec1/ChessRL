@@ -25,6 +25,12 @@ dependencies = [
     "pycuda>=2025.1.2",
     "pyarrow>=17.0.0",
     "pyyaml>=6.0.2",
+    "chessrl-inference-cpp",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
 
 [[tool.uv.index]]
@@ -32,6 +38,17 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[tool.uv.workspace]
+members = ["cpp"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 torch-tensorrt = { index = "pytorch-cu130" }
+chessrl-inference-cpp = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires CUDA",
+    "trt: requires TensorRT engine artifact",
+]

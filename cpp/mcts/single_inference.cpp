@@ -29,11 +29,17 @@
 #include "cuda_fp16.h"
 
 #include "chess-library/include/chess.hpp"
+#include "include/trt_utils.hpp"
 
 namespace chessrl::mcts::single
 {
 namespace
 {
+
+using chessrl::trt::Logger;
+using chessrl::trt::element_size;
+using chessrl::trt::volume;
+using chessrl::trt::resolve_engine_path;
 
 constexpr int kSmallBoardSize = 8;
 constexpr int kSmallFeaturePlanes = 19;
@@ -42,61 +48,7 @@ constexpr int kSmallValueSize = 3;
 
 constexpr float kIllegalScore = -1e9F;
 
-class Logger : public nvinfer1::ILogger
-{
-public:
-    void log(Severity severity, const char* msg) noexcept override
-    {
-        if (severity <= Severity::kWARNING)
-        {
-            std::clog << "[TensorRT] " << msg << std::endl;
-        }
-    }
-};
-
-std::string resolveEnginePath(const std::string& engine_path, const std::string& default_name)
-{
-    std::string resolved = engine_path.empty() ? default_name : engine_path;
-    try
-    {
-        resolved = std::filesystem::absolute(resolved).string();
-    }
-    catch (...)
-    {
-    }
-    return resolved;
-}
-
-size_t getElementSize(nvinfer1::DataType dtype)
-{
-    switch (dtype)
-    {
-    case nvinfer1::DataType::kFLOAT:
-        return 4;
-    case nvinfer1::DataType::kHALF:
-        return 2;
-    case nvinfer1::DataType::kINT32:
-        return 4;
-    case nvinfer1::DataType::kINT8:
-        return 1;
-    case nvinfer1::DataType::kBOOL:
-        return 1;
-    default:
-        throw std::runtime_error("Unsupported TensorRT data type");
-    }
-}
-
-size_t volume(const nvinfer1::Dims& dims)
-{
-    size_t result = 1;
-    for (int i = 0; i < dims.nbDims; ++i)
-    {
-        result *= static_cast<size_t>(dims.d[i]);
-    }
-    return result;
-}
-
-// Helper to calculate the volume of a single sample (ignoring batch dim)
+// Volume excluding the batch dimension (works for both static and dynamic shapes).
 size_t normalized_tensor_volume(const nvinfer1::Dims& dims)
 {
     if (dims.nbDims == 0) return 0;
@@ -356,7 +308,7 @@ SmallEngineContext& getSmallEngineContext(const std::string& engine_path)
     static auto* mutex = new std::mutex();
     static auto* contexts = new std::unordered_map<std::string, std::unique_ptr<SmallEngineContext>>();
 
-    std::string resolved = resolveEnginePath(engine_path, "model.trt");
+    std::string resolved = resolve_engine_path(engine_path, "model.trt");
     std::lock_guard<std::mutex> lock(*mutex);
     auto it = contexts->find(resolved);
     if (it == contexts->end())
@@ -488,9 +440,9 @@ SmallRawOutputs runSmallInference(
     const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
     const auto valueType = engine.getTensorDataType(ctx.valueName().c_str());
 
-    DeviceBuffer inputDevice(kInputElements * getElementSize(inputType));
-    DeviceBuffer policyDevice(kPolicyElements * getElementSize(policyType));
-    DeviceBuffer valueDevice(kValueElements * getElementSize(valueType));
+    DeviceBuffer inputDevice(kInputElements * element_size(inputType));
+    DeviceBuffer policyDevice(kPolicyElements * element_size(policyType));
+    DeviceBuffer valueDevice(kValueElements * element_size(valueType));
     CudaStream stream;
 
     std::vector<__half> inputHalf;
@@ -783,14 +735,14 @@ struct SmallBatchRunner::Impl
             }
 
             // Step 2: Use persistent buffers
-            inputDevice_.ensure(engineBatch * inputElements * getElementSize(inputType));
-            policyDevice_.ensure(engineBatch * policyElements * getElementSize(policyType));
-            valueDevice_.ensure(engineBatch * valueElements * getElementSize(valueType));
+            inputDevice_.ensure(engineBatch * inputElements * element_size(inputType));
+            policyDevice_.ensure(engineBatch * policyElements * element_size(policyType));
+            valueDevice_.ensure(engineBatch * valueElements * element_size(valueType));
             
             // Step 2: Ensure pinned host buffers
-            const size_t inputBytes = engineBatch * inputElements * getElementSize(inputType);
-            const size_t policyBytes = engineBatch * policyElements * getElementSize(policyType);
-            const size_t valueBytes = engineBatch * valueElements * getElementSize(valueType);
+            const size_t inputBytes = engineBatch * inputElements * element_size(inputType);
+            const size_t policyBytes = engineBatch * policyElements * element_size(policyType);
+            const size_t valueBytes = engineBatch * valueElements * element_size(valueType);
             hostInputBuffer_.ensure(inputBytes);
             hostOutputPolicy_.ensure(policyBytes);
             hostOutputValue_.ensure(valueBytes);
@@ -1022,7 +974,7 @@ SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
 
     const std::string key = [&config]() {
         std::ostringstream oss;
-        oss << resolveEnginePath(config.engine_path, "model.trt")
+        oss << resolve_engine_path(config.engine_path, "model.trt")
             << '|' << config.max_batch_size
             << '|' << (config.enable_telemetry ? '1' : '0');
         return oss.str();

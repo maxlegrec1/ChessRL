@@ -387,13 +387,8 @@ class Trainer:
         """Evaluate raw model against Stockfish and log ELO to wandb."""
         self.console.log(f"Evaluating checkpoint {checkpoint_path} against Stockfish (ELO {self._current_stockfish_elo})...")
         
-        # Import play_move dynamically to avoid import path issues
         try:
-            # Add project root to path if needed
-            project_root = Path(__file__).parent.parent.parent
-            if str(project_root) not in sys.path:
-                sys.path.insert(0, str(project_root))
-            from play_move import main_model_vs_stockfish
+            from src.eval.play_move import main_model_vs_stockfish
         except ImportError as exc:
             self.console.log(f"[WARN] Failed to import play_move: {exc}")
             return

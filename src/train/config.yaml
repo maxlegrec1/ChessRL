@@ -11,15 +11,15 @@ teacher_decay: 0.8
 teacher_weight: 0.2
 
 checkpoint:
-  dir: checkpoints
+  dir: artifacts/checkpoints
   every_steps: 100
   keep_last: 999999
-  build_script: build_trt.sh
-  engine_dir: engines
-  iteration_file: src/self_play/.iteration
+  build_script: scripts/build_trt.sh
+  engine_dir: artifacts/engines
+  iteration_file: artifacts/engines/.iteration
 
 data:
-  dataset_path: buffer_value_perspective.bin
+  dataset_path: artifacts/buffers/buffer.bin
   reload_seconds: 60
 
 wandb:
@@ -27,4 +27,3 @@ wandb:
   entity: null
   run_name: null
   enabled: true
-

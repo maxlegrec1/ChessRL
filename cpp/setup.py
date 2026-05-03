@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext
@@ -5,8 +6,8 @@ from setuptools import setup
 
 ROOT = Path(__file__).resolve().parent
 
-TENSORRT_ROOT = Path("/usr/local/TensorRT-10.14.1.48")
-CUDA_ROOT = Path("/usr/local/cuda")
+TENSORRT_ROOT = Path(os.environ.get("TENSORRT_ROOT", "/usr/local/TensorRT-10.14.1.48"))
+CUDA_ROOT = Path(os.environ.get("CUDA_ROOT", "/usr/local/cuda"))
 
 ext_modules = [
     Pybind11Extension(
