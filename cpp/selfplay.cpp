@@ -194,7 +194,8 @@ SelfPlayMetrics SelfPlayWorker::step()
     {
         std::cerr << "[Profile] MCTS=" << mcts_duration_ms << "ms"
                   << " TRT=" << trt_duration_ms << "ms\n";
-        impl_->cache->print_stats();
+        if (impl_->cache) impl_->cache->print_stats();
+        else std::cerr << "[Cache] disabled (hash_size=0)\n";
     }
 
     // Process results
