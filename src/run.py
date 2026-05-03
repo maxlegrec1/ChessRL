@@ -1,56 +1,130 @@
-"""Single-command launcher for the self-play + training loop.
+"""Single-command launcher with per-run isolation.
 
-Spawns:
-  - self-play  (`python -m src.self_play`)  — generates training data
-  - trainer    (`python -m src.train`)      — consumes the buffer
-
-Each child's stdout/stderr is appended to artifacts/runs/{selfplay,training}.log.
-The launcher forwards SIGINT/SIGTERM to both children; if either exits, the
-other is terminated and the launcher exits with a non-zero status.
-
-The trainer waits for `data.min_samples_to_start` records (see config.yaml)
-before entering its training loop, so it is safe to start both processes
-simultaneously on a fresh buffer.
+By default each launch creates a fresh run directory at
+    artifacts/runs/<run_id>/
+containing isolated subfolders for the buffer, engines, checkpoints, pgns and
+wandb logs, plus a snapshot of the resolved config used for the run. A
+random-initialized TRT engine is built up-front so self-play has something to
+play with from the very first second.
 
 Usage:
-    uv run python -m src.run                            # default config
-    uv run python -m src.run --config path/to/cfg.yaml  # custom config
-    uv run python -m src.run --no-train                 # self-play only
-    uv run python -m src.run --no-selfplay              # trainer only (resume an existing buffer)
+    uv run python -m src.run                          # fresh run
+    uv run python -m src.run --name my-experiment     # fresh run, named
+    uv run python -m src.run --resume artifacts/runs/<id>   # resume an existing run
 
-All self-play hyperparameters (boards, threads, simulations, cpuct, temperature,
-dirichlet, ...) live in the `selfplay:` section of the YAML config.
+Each child's stdout/stderr is appended to <run_dir>/{selfplay,training}.log.
+SIGINT/SIGTERM is forwarded to both children; if either exits the launcher
+terminates the other and exits with a non-zero status.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS_DIR = ROOT / "artifacts" / "runs"
+RUNS_ROOT = ROOT / "artifacts" / "runs"
+DEFAULT_BASE_CONFIG = ROOT / "src" / "train" / "config.yaml"
+SUBDIRS = ("buffer", "engines", "checkpoints", "pgns", "wandb")
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", type=Path, default=Path("src/train/config.yaml"),
-                   help="Shared YAML config (selfplay + trainer sections).")
+    p.add_argument("--config", type=Path, default=DEFAULT_BASE_CONFIG,
+                   help="Base YAML config (paths inside it are overridden per-run).")
+    p.add_argument("--name", type=str, default=None,
+                   help="Optional human-readable suffix for the run id.")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="Path to an existing run directory to resume.")
     p.add_argument("--no-train", action="store_true", help="Run self-play only.")
     p.add_argument("--no-selfplay", action="store_true", help="Run trainer only.")
+    p.add_argument("--no-foreground", action="store_true",
+                   help="Even when only one side runs, redirect its output to a logfile "
+                        "instead of attaching to the terminal.")
     p.add_argument("--shutdown-grace", type=float, default=15.0,
                    help="Seconds to wait for children to exit before SIGKILL.")
     return p.parse_args()
 
 
+def _make_run_dir(name: Optional[str]) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix = secrets.token_hex(2)
+    parts = [ts, suffix]
+    if name:
+        parts.append(name)
+    run_dir = RUNS_ROOT / "_".join(parts)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    for sub in SUBDIRS:
+        (run_dir / sub).mkdir()
+    return run_dir
+
+
+def _latest_step_checkpoint(run_dir: Path) -> Optional[Path]:
+    ckpts = sorted((run_dir / "checkpoints").glob("step_*.pt"))
+    return ckpts[-1] if ckpts else None
+
+
+def _build_initial_engine(run_dir: Path) -> Path:
+    """Save a random-init SmallModel checkpoint, build the TRT engine via
+    scripts/build_trt.sh, and seed the run's .iteration file with its path."""
+    import torch  # local import; pulls torch only when launching a fresh run.
+    from src.models.small.small_model import SmallModel
+
+    init_pt = run_dir / "checkpoints" / "model_dynamic_initial.pt"
+    model = SmallModel().eval()
+    torch.save({"model": model.state_dict()}, init_pt)
+
+    engine_dir = run_dir / "engines"
+    iter_file = engine_dir / ".iteration"
+
+    print(f"[launcher] building initial TRT engine ({init_pt} -> {engine_dir})", flush=True)
+    subprocess.run(
+        [
+            "bash", str(ROOT / "scripts" / "build_trt.sh"),
+            str(init_pt), "0",
+            str(engine_dir), str(iter_file),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    initial_trt = engine_dir / "model_dynamic_initial.trt"
+    if not initial_trt.exists():
+        raise RuntimeError(f"build_trt.sh did not produce {initial_trt}")
+    return initial_trt
+
+
+def _write_run_config(base_config: Path, run_dir: Path,
+                       resume_from: Optional[Path]) -> Path:
+    """Load the base YAML, override every path field to point inside `run_dir`,
+    write the result to <run_dir>/config.yaml, and return its path."""
+    cfg = yaml.safe_load(base_config.read_text()) or {}
+    cfg.setdefault("data", {})["dataset_path"] = str((run_dir / "buffer" / "buffer.bin").resolve())
+    ckpt = cfg.setdefault("checkpoint", {})
+    ckpt["dir"] = str((run_dir / "checkpoints").resolve())
+    ckpt["engine_dir"] = str((run_dir / "engines").resolve())
+    ckpt["iteration_file"] = str((run_dir / "engines" / ".iteration").resolve())
+    sp = cfg.setdefault("selfplay", {})
+    sp["pgn_dir"] = str((run_dir / "pgns").resolve())
+    wb = cfg.setdefault("wandb", {})
+    wb["dir"] = str((run_dir / "wandb").resolve())
+    if resume_from:
+        cfg["resume_path"] = str(resume_from.resolve())
+    out = run_dir / "config.yaml"
+    out.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return out
+
+
 def _open_log(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
     fh = path.open("a", buffering=1)
     fh.write(f"\n========== launched {datetime.now().isoformat(timespec='seconds')} ==========\n")
     return fh
@@ -59,11 +133,8 @@ def _open_log(path: Path):
 def _spawn(cmd: List[str], log_path: Path) -> subprocess.Popen:
     log_fh = _open_log(log_path)
     return subprocess.Popen(
-        cmd,
-        cwd=ROOT,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,  # own process group → can SIGTERM the whole tree
+        cmd, cwd=ROOT, stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
 
 
@@ -80,24 +151,65 @@ def main() -> int:
         print("Nothing to launch (both --no-selfplay and --no-train).", file=sys.stderr)
         return 2
 
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    selfplay_log = RUNS_DIR / "selfplay.log"
-    trainer_log = RUNS_DIR / "training.log"
+    if args.resume:
+        run_dir = args.resume.resolve()
+        if not run_dir.is_dir():
+            print(f"--resume target does not exist: {run_dir}", file=sys.stderr)
+            return 2
+        for sub in SUBDIRS:
+            (run_dir / sub).mkdir(exist_ok=True)
+        latest = _latest_step_checkpoint(run_dir)
+        if latest is not None:
+            print(f"[launcher] resuming run {run_dir.name} from {latest.name}", flush=True)
+        else:
+            print(f"[launcher] resuming run {run_dir.name} (no step checkpoints yet)", flush=True)
+        resume_path = latest
+    else:
+        run_dir = _make_run_dir(args.name)
+        print(f"[launcher] new run -> {run_dir}", flush=True)
+        if not args.no_selfplay:
+            _build_initial_engine(run_dir)
+        else:
+            # Trainer-only fresh run: still need an iteration file so the
+            # trainer's later build_trt invocations append cleanly.
+            (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
+        resume_path = None
+
+    cfg_path = _write_run_config(args.config, run_dir, resume_path)
+    selfplay_log = run_dir / "selfplay.log"
+    trainer_log = run_dir / "training.log"
+
+    plan: List[Tuple[str, List[str], Path]] = []
+    if not args.no_selfplay:
+        cmd_sp = [sys.executable, "-m", "src.self_play", "--config", str(cfg_path)]
+        plan.append(("selfplay", cmd_sp, selfplay_log))
+    if not args.no_train:
+        cmd_tr = [sys.executable, "-m", "src.train", "--config", str(cfg_path)]
+        plan.append(("training", cmd_tr, trainer_log))
+
+    # If only ONE side is running, exec into it so it inherits the launcher's
+    # TTY — that way Rich (the self-play dashboard) renders normally instead of
+    # being downgraded to plain text by stdout-to-logfile redirection.
+    if len(plan) == 1 and not args.no_foreground:
+        name, cmd, _ = plan[0]
+        print(f"\nRun directory: {run_dir}")
+        print(f"Resolved config: {cfg_path}")
+        print(f"Foreground: {name} (Ctrl-C to stop)\n", flush=True)
+        os.execvp(cmd[0], cmd)
+        # unreachable
+        return 0
 
     children: List[Tuple[str, subprocess.Popen, Path]] = []
-    if not args.no_selfplay:
-        cmd_sp = [sys.executable, "-m", "src.self_play", "--config", str(args.config)]
-        children.append(("selfplay", _spawn(cmd_sp, selfplay_log), selfplay_log))
+    for name, cmd, log in plan:
+        children.append((name, _spawn(cmd, log), log))
 
-    if not args.no_train:
-        cmd_tr = [sys.executable, "-m", "src.train", "--config", str(args.config)]
-        children.append(("training", _spawn(cmd_tr, trainer_log), trainer_log))
-
+    print(f"\nRun directory: {run_dir}")
+    print(f"Resolved config: {cfg_path}")
     print(f"Launched {len(children)} subprocess(es):")
     for name, proc, log in children:
         print(f"  - {name:<8} pid={proc.pid}  log={log}")
     print("\nTail logs with:")
-    for name, _, log in children:
+    for _, _, log in children:
         print(f"  tail -f {log}")
     print("\nCtrl-C to stop both processes.\n", flush=True)
 

@@ -16,27 +16,31 @@ uv workspace member. Override the native paths via environment variables:
 
 All commands assume the repo root as the working directory.
 
-    # Start (or resume) the full training loop. This launches self-play and the
-    # trainer in parallel; the trainer waits for the buffer to fill (see
-    # data.min_samples_to_start in config.yaml) before its first step.
+    # Start a fresh run. Creates artifacts/runs/<id>/ with isolated subdirs
+    # for buffer/, engines/, checkpoints/, pgns/, wandb/, plus a snapshot of
+    # the resolved config. Builds an initial random-init TRT engine so
+    # self-play has something to play with from the first second.
     uv run python -m src.run
+    uv run python -m src.run --name my-experiment       # named suffix
+    uv run python -m src.run --resume artifacts/runs/<id>  # resume an existing run
 
-    # Watch the per-process logs:
-    tail -f artifacts/runs/selfplay.log
-    tail -f artifacts/runs/training.log
+    # Watch the per-process logs (paths printed by the launcher at startup):
+    tail -f artifacts/runs/<id>/selfplay.log
+    tail -f artifacts/runs/<id>/training.log
 
-    # Run only one side (useful for resume / debugging)
+    # Run only one side (useful for debugging)
     uv run python -m src.run --no-train      # self-play only
     uv run python -m src.run --no-selfplay   # trainer only
 
     # Manually convert a checkpoint to a TensorRT engine
-    scripts/build_trt.sh artifacts/checkpoints/step_00043900.pt 43900
+    scripts/build_trt.sh artifacts/runs/<id>/checkpoints/step_00043900.pt 43900 \
+        artifacts/runs/<id>/engines artifacts/runs/<id>/engines/.iteration
 
     # Head-to-head evaluation between two checkpoints
     uv run python -m src.eval.brawls \
         --num_games 100 --model1 small --model2 small \
-        --ckpt1 artifacts/checkpoints/<a>.pt \
-        --ckpt2 artifacts/checkpoints/<b>.pt
+        --ckpt1 artifacts/runs/<id_a>/checkpoints/step_*.pt \
+        --ckpt2 artifacts/runs/<id_b>/checkpoints/step_*.pt
 
     # Prune artifacts (keep only last N step checkpoints + matching engines)
     uv run python scripts/prune_artifacts.py            # dry-run
@@ -60,5 +64,5 @@ All commands assume the repo root as the working directory.
 - `cpp/` — pybind11 C++ inference extension (uv workspace member)
 - `scripts/` — `build_trt.sh`, `prune_artifacts.py`
 - `tests/` — pytest suite
-- `artifacts/` — generated state (checkpoints, engines, buffers, runs, wandb); gitignored
+- `artifacts/runs/<id>/` — per-run state (buffer, engines, checkpoints, pgns, wandb, config snapshot, logs); gitignored
 - `archive/` — legacy scripts and historical model files

@@ -8,8 +8,8 @@ def test_pickup_latest_row(tmp_path):
     assert w.engine_path == "/tmp/b.trt"
 
 
-def test_missing_file_keeps_default(tmp_path):
+def test_missing_file_keeps_empty(tmp_path):
     f = tmp_path / "absent.iteration"
     w = EngineWatcher(f, poll_interval=0)
-    # default fallback when the file doesn't exist
-    assert w.engine_path == "artifacts/engines/model_dynamic_initial.trt"
+    # No fallback: the watcher idles with an empty path until .iteration exists.
+    assert w.engine_path == ""
