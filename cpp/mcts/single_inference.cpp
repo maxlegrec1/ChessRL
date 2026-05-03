@@ -951,10 +951,13 @@ struct SmallBatchRunner::Impl
     bool stop_worker_{false};
     std::deque<SmallPending> queue;
     std::thread worker;
-    // Phase C: Remove artificial timeout - set to minimal value to maximize GPU throughput
+    // Smaller flush timeout = less GPU idle when the queue is partially filled.
+    // 100us is well under typical batch inference latency for the 1.2M-param model
+    // at any reasonable batch size, so this is mostly free latency reclaimed.
+    // Override via CHESSRL_MCTS_FLUSH_US if needed.
     const std::chrono::microseconds flush_timeout_{[](){
         if (const char* env = std::getenv("CHESSRL_MCTS_FLUSH_US")) return std::atoi(env);
-        return 500;
+        return 100;
     }()};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;

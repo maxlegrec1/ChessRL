@@ -13,9 +13,10 @@ namespace chessrl::mcts
 MctsSummary run_small_mcts(MctsOptions options);
 std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> options);
 std::vector<MctsSummary> run_small_mcts_batch_shared(
-    std::vector<MctsOptions> options, 
+    std::vector<MctsOptions> options,
     std::shared_ptr<single::SmallBatchRunner> runner,
-    std::shared_ptr<TranspositionTable> cache = {});
+    std::shared_ptr<TranspositionTable> cache = {},
+    int num_threads = 0);  // 0 = auto: min(jobs, 256)
 
 } // namespace chessrl::mcts
 

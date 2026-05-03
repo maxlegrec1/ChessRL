@@ -32,8 +32,12 @@ data:
   target_k: 5.0
 
 selfplay:
-  boards: 512
-  threads: 8
+  boards: 1024
+  # MCTS worker threads (drives effective inference batch size).
+  # Each thread blocks on futures most of the time so 16x oversubscription
+  # is fine; 256+ on an 8-core CPU has been measured to cause scheduler
+  # thrash. 0 = legacy hardcoded 256.
+  threads: 128
   hash_size: 4096
   simulations: 800
   cpuct: 0.65

@@ -176,7 +176,8 @@ SelfPlayMetrics SelfPlayWorker::step()
 
     // Run MCTS
     double start_infer_ms = impl_->runner->statistics().total_inference_ms;
-    auto summaries = chessrl::mcts::run_small_mcts_batch_shared(options, impl_->runner, impl_->cache);
+    auto summaries = chessrl::mcts::run_small_mcts_batch_shared(
+        options, impl_->runner, impl_->cache, impl_->config.threads);
     double end_infer_ms = impl_->runner->statistics().total_inference_ms;
 
     auto current_time = std::chrono::high_resolution_clock::now();

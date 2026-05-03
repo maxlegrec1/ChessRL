@@ -12,7 +12,8 @@ struct SelfPlayConfig
     std::string engine_path;
     std::string output_path;
     int concurrency = 256;
-    int hash_size = 4096; // MB; transposition-table size shared across slots
+    int threads = 0;       // 0 = auto (legacy 256 MCTS workers)
+    int hash_size = 4096;  // MB; transposition-table size shared across slots
     int simulations = 800;
     float cpuct = 0.65f;
     float temperature = 1.3f;

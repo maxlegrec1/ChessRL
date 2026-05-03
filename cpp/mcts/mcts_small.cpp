@@ -732,9 +732,10 @@ MctsSummary run_small_mcts(MctsOptions options)
 }
 
 std::vector<MctsSummary> run_small_mcts_batch_shared(
-    std::vector<MctsOptions> batch_options, 
+    std::vector<MctsOptions> batch_options,
     std::shared_ptr<single::SmallBatchRunner> shared_runner,
-    std::shared_ptr<TranspositionTable> cache)
+    std::shared_ptr<TranspositionTable> cache,
+    int requested_threads)
 {
     if (batch_options.empty())
     {
@@ -742,11 +743,13 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     }
 
     std::vector<MctsSummary> summaries(batch_options.size());
-    
-    // Step 1: Oversubscription - Launch 256 workers to keep GPU busy
-    // Since these threads spend 99% of their time sleeping (waiting for GPU),
-    // it is safe to run 256 threads on an 8-core CPU.
-    const size_t num_threads = 256;
+
+    // Worker count: caller picks via config.threads. 0 = auto (legacy 256 cap).
+    // No point spawning more workers than there are jobs.
+    size_t num_threads = (requested_threads > 0)
+        ? static_cast<size_t>(requested_threads)
+        : size_t{256};
+    num_threads = std::min(num_threads, batch_options.size());
     std::atomic<size_t> next_job_index{0};
     std::vector<std::thread> workers;
     workers.reserve(num_threads);

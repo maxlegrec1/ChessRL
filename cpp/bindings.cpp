@@ -185,6 +185,7 @@ PYBIND11_MODULE(_inference_cpp, m)
             config.engine_path = engine_path;
             config.output_path = output_path;
             config.concurrency = batch_size;
+            config.threads = threads;
             config.hash_size = hash_size;
             config.max_games = max_games;
             config.max_buffer_size = max_buffer_size;
