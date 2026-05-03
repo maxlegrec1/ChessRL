@@ -231,12 +231,23 @@ class Trainer:
                 # Update sliding window.
                 cur_size = _live_record_count()
                 g_history.append((t1, cur_size))
-                # Drop snapshots older than the window (but always keep at least one).
-                while len(g_history) > 1 and (t1 - g_history[0][0]) > g_window_seconds:
+                # Cap deque memory at ~5 minutes of snapshots; never pop down
+                # to a single entry (which collapses window_dt to ~0 and
+                # produces g=0 if the most recent step was longer than the
+                # window).
+                cutoff_age = max(g_window_seconds * 4, 300.0)
+                while len(g_history) > 2 and (t1 - g_history[0][0]) > cutoff_age:
                     g_history.popleft()
-                t_oldest, size_oldest = g_history[0]
-                window_dt = max(1e-3, t1 - t_oldest)
-                g = max(0.0, (cur_size - size_oldest) / window_dt)
+                # Anchor selection: walk from oldest, keep the freshest
+                # snapshot that is still >= g_window_seconds old. Falls back
+                # to the oldest available entry if all are younger.
+                anchor_t, anchor_s = g_history[0]
+                for ts, sz in g_history:
+                    if t1 - ts < g_window_seconds:
+                        break
+                    anchor_t, anchor_s = ts, sz
+                window_dt = max(1e-3, t1 - anchor_t)
+                g = max(0.0, (cur_size - anchor_s) / window_dt)
 
                 # Pace: sleep so that s = batch_size / step_interval = target_k * g.
                 # Until the window is fully populated (first ~30s of training)
