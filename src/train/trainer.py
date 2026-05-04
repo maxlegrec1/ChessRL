@@ -408,15 +408,27 @@ class Trainer:
 
     # ------------------------------------------------------------------ #
     def _update_teacher(self) -> None:
-        """Update teacher model parameters using EMA."""
+        """Update teacher model parameters using EMA.
+
+        Two pieces of state to keep in sync:
+
+        1. Parameters (conv weights, FC weights, BN gamma/beta, ...) get
+           EMA-blended:   teacher = decay * teacher + (1-decay) * student.
+        2. Buffers (BN running_mean / running_var / num_batches_tracked) get
+           hard-copied from the student. These are not learnable; they track
+           the *running statistics* of activations seen during the student's
+           training. If we leave them at init while EMA-updating gamma/beta,
+           the teacher's BN normalizes using stale stats and the network's
+           output is garbage at eval() time. (model.parameters() does NOT
+           iterate buffers, which was the original bug.)
+        """
         with torch.no_grad():
             for teacher_param, student_param in zip(self.teacher_model.parameters(), self.model.parameters()):
-                # teacher = decay * teacher + (1 - decay) * student
-                # User requested: teacher = 0.9 * teacher + 0.1 * student
-                # This matches the formula if decay=0.9 and weight=0.1
                 teacher_param.data.mul_(self.config.teacher_decay).add_(
                     student_param.data, alpha=self.config.teacher_weight
                 )
+            for teacher_buf, student_buf in zip(self.teacher_model.buffers(), self.model.buffers()):
+                teacher_buf.data.copy_(student_buf.data)
 
     def _save_checkpoint(self) -> None:
         # Save Student Checkpoint (for resuming training)
