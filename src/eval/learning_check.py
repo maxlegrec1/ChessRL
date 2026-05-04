@@ -191,7 +191,15 @@ def load_dataset(seed: int = 42) -> List[Tuple[str, str, Optional[str]]]:
     return valid
 
 
-def find_latest_checkpoint(run_dir: Optional[Path]) -> Path:
+def find_latest_checkpoint(run_dir: Optional[Path], use_teacher: bool = False) -> Path:
+    """Locate the latest checkpoint to benchmark.
+
+    By default, returns the latest STUDENT checkpoint (`step_*.pt`) — that's
+    the model self-play actually exports to TRT, so it is what we want to
+    evaluate. The teacher snapshot (`teacher_step_*.pt`) is currently
+    vestigial: it's EMA-updated and saved to disk but never used for inference.
+    Pass use_teacher=True to evaluate the teacher snapshot instead.
+    """
     if run_dir is None:
         runs_root = Path("artifacts/runs")
         if not runs_root.is_dir():
@@ -203,7 +211,12 @@ def find_latest_checkpoint(run_dir: Optional[Path]) -> Path:
     ckpt_dir = run_dir / "checkpoints"
     if not ckpt_dir.is_dir():
         raise FileNotFoundError(f"no checkpoints/ in {run_dir}")
-    candidates = sorted(ckpt_dir.glob("*.pt"))
+    pattern = "teacher_step_*.pt" if use_teacher else "step_*.pt"
+    candidates = sorted(ckpt_dir.glob(pattern))
+    if not candidates:
+        # Fall back to whichever is available so the script doesn't crash if
+        # one of the checkpoint families is missing.
+        candidates = sorted(ckpt_dir.glob("*.pt"))
     if not candidates:
         raise FileNotFoundError(f"no .pt files in {ckpt_dir}")
     return candidates[-1]
@@ -310,9 +323,13 @@ def main() -> int:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-buffer-stats", action="store_true",
                    help="skip the buffer-distribution analysis")
+    p.add_argument("--teacher", action="store_true",
+                   help="benchmark the teacher_step_*.pt snapshot instead of "
+                        "the student. Default is the student because that's "
+                        "what self-play exports to TRT.")
     args = p.parse_args()
 
-    ckpt_path = args.checkpoint or find_latest_checkpoint(args.run_dir)
+    ckpt_path = args.checkpoint or find_latest_checkpoint(args.run_dir, use_teacher=args.teacher)
     print(f"checkpoint: {ckpt_path}")
     print(f"device:     {args.device}")
 
