@@ -471,7 +471,10 @@ class Trainer:
         self._prune_checkpoints()
 
     def _load_checkpoint(self, path: Path) -> None:
-        ckpt = torch.load(path, map_location=self.device)
+        # weights_only=False because our checkpoints embed pathlib.Path objects
+        # in the saved config dict, and PyTorch 2.6+ defaults to a strict
+        # safe-globals list that rejects them.
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         if "scaler" in ckpt:
