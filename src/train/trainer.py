@@ -351,6 +351,15 @@ class Trainer:
             policy_probs, batch.fens
         )
 
+        # Buffer-target sharpness: what fraction of MCTS-WDL targets are
+        # confident (>=80% on a single class)? When this stays low the value_q
+        # head has nothing to learn from. Cheap — computed on the same batch.
+        vm = target_value_mcts.float()
+        frac_w_conf = float((vm[:, 0] >= 0.8).float().mean().item())
+        frac_l_conf = float((vm[:, 2] >= 0.8).float().mean().item())
+        frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
+        frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
+
         metrics = {
             "loss/total": float(total_loss.detach().item()),
             "loss/policy": float(policy_loss.detach().item()),
@@ -361,6 +370,10 @@ class Trainer:
             "acc/value_q": float(value_q_accuracy.detach().item()),
             "entropy/policy": policy_entropy,
             "legal_move_prob": legal_move_probs,
+            "buffer/frac_W_geq_0.8": frac_w_conf,
+            "buffer/frac_L_geq_0.8": frac_l_conf,
+            "buffer/frac_D_geq_0.8": frac_d_conf,
+            "buffer/frac_near_uniform": frac_uniform,
         }
         return metrics
 

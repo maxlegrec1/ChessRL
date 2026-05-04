@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import struct
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -249,11 +250,66 @@ def best_legal_uci(policy_logits: np.ndarray, fen: str) -> str:
     return best_uci or ""
 
 
+RECORD_SIZE = 144
+VALUE_OUTCOME_OFFSET = 116
+VALUE_MCTS_OFFSET = 128
+
+
+def analyze_buffer(buffer_path: Path, sample_size: int = 200_000) -> None:
+    """Sample-scan a self-play buffer and print target-distribution stats.
+
+    Mirrors the metric set the trainer now logs to W&B
+    (buffer/frac_W_geq_0.8, buffer/frac_L_geq_0.8, buffer/frac_near_uniform)
+    so old runs without those metrics in W&B can still get the read-out.
+    """
+    if not buffer_path.is_file() or buffer_path.stat().st_size < RECORD_SIZE:
+        print(f"[buffer-stats] no usable buffer at {buffer_path}")
+        return
+    content = buffer_path.read_bytes()
+    n = len(content) // RECORD_SIZE
+    if n == 0:
+        print(f"[buffer-stats] {buffer_path} contains 0 records")
+        return
+    sample_size = min(sample_size, n)
+    idxs = np.random.default_rng(42).choice(n, sample_size, replace=False)
+    vo = np.zeros((sample_size, 3), dtype=np.float32)
+    vm = np.zeros((sample_size, 3), dtype=np.float32)
+    for i, idx in enumerate(idxs):
+        o = int(idx) * RECORD_SIZE
+        vo[i] = struct.unpack_from("fff", content, o + VALUE_OUTCOME_OFFSET)
+        vm[i] = struct.unpack_from("fff", content, o + VALUE_MCTS_OFFSET)
+
+    nonzero = vo.sum(axis=1) > 0
+    cls_o = vo.argmax(axis=1)
+    n_w_o = int(((cls_o == 0) & nonzero).sum())
+    n_d_o = int(((cls_o == 1) & nonzero).sum())
+    n_l_o = int(((cls_o == 2) & nonzero).sum())
+    max_p = vm.max(axis=1)
+    frac_w_conf = float((vm[:, 0] >= 0.8).mean())
+    frac_l_conf = float((vm[:, 2] >= 0.8).mean())
+    frac_d_conf = float((vm[:, 1] >= 0.8).mean())
+    frac_uniform = float((max_p < 0.40).mean())
+
+    print()
+    print(f"=== buffer stats ({buffer_path.name}, n={n:,}, sampled {sample_size:,}) ===")
+    print(f"value_outcome (game ends, side-to-move):")
+    print(f"  W = {100*n_w_o/sample_size:5.1f}%   D = {100*n_d_o/sample_size:5.1f}%   L = {100*n_l_o/sample_size:5.1f}%")
+    print(f"value_mcts (dense MCTS-WDL):")
+    print(f"  mean = ({vm[:,0].mean():.3f}, {vm[:,1].mean():.3f}, {vm[:,2].mean():.3f})")
+    print(f"  frac_W_geq_0.8     = {100*frac_w_conf:5.1f}%")
+    print(f"  frac_L_geq_0.8     = {100*frac_l_conf:5.1f}%")
+    print(f"  frac_D_geq_0.8     = {100*frac_d_conf:5.1f}%")
+    print(f"  frac_near_uniform  = {100*frac_uniform:5.1f}%   (max class < 0.40)")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=Path, help="explicit .pt file")
     p.add_argument("--run-dir", type=Path, help="run dir; uses its latest .pt")
+    p.add_argument("--buffer", type=Path, help="explicit buffer.bin to analyze")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--no-buffer-stats", action="store_true",
+                   help="skip the buffer-distribution analysis")
     args = p.parse_args()
 
     ckpt_path = args.checkpoint or find_latest_checkpoint(args.run_dir)
@@ -322,6 +378,20 @@ def main() -> int:
     print("        V[W] = mean P(Win) from the value head.")
     print("        Same for Vq (the dense MCTS-trained value_q head).")
     print("        mate column = % mate-in-1 found via legal-move argmax over policy.")
+
+    # Buffer stats — auto-detect from the checkpoint's run dir, or use --buffer.
+    if not args.no_buffer_stats:
+        buffer_path: Optional[Path] = args.buffer
+        if buffer_path is None:
+            # ckpt_path is artifacts/runs/<id>/checkpoints/foo.pt → ../buffer/buffer.bin
+            run_dir_guess = ckpt_path.parent.parent
+            candidate = run_dir_guess / "buffer" / "buffer.bin"
+            if candidate.is_file():
+                buffer_path = candidate
+        if buffer_path is not None:
+            analyze_buffer(buffer_path)
+        else:
+            print("\n[buffer-stats] no buffer.bin found near the checkpoint; pass --buffer to override")
     return 0
 
 
