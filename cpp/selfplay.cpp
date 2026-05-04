@@ -58,6 +58,12 @@ struct SelfPlayWorker::Impl
     std::vector<BoardSlot> slots;
     std::fstream outfile;
     size_t current_records = 0;
+    // Monotonic counter of EVERY write (append + random-replace). Once the
+    // buffer is at max_buffer_size the file size stops growing, so the
+    // trainer can no longer infer insertion rate from the file. We persist
+    // this counter to a sidecar `<output_path>.writes` after each flush so
+    // the trainer can read insertion rate as delta(total_writes) / dt.
+    size_t total_writes = 0;
     std::mt19937 opening_rng{std::random_device{}()};
 
     // Reset a slot to a fresh starting position, optionally seeded with N
@@ -148,6 +154,22 @@ struct SelfPlayWorker::Impl
             outfile.seekp(0, std::ios::end);
             size_t size = outfile.tellp();
             current_records = size / kRecordSize;
+            // Resume from the existing sidecar if present so an interrupted
+            // run reattaches the monotonic counter; otherwise seed from the
+            // current append count (an underestimate the first time the run
+            // is started after random-replace was already happening, but
+            // that's fine — only delta matters).
+            std::ifstream wf(config.output_path + ".writes");
+            if (wf)
+            {
+                size_t prev = 0;
+                wf >> prev;
+                total_writes = std::max(prev, current_records);
+            }
+            else
+            {
+                total_writes = current_records;
+            }
         }
     }
 };
@@ -327,13 +349,35 @@ SelfPlayMetrics SelfPlayWorker::step()
                     static std::mt19937 rng(std::random_device{}());
                     std::uniform_int_distribution<size_t> dist(0, impl_->config.max_buffer_size - 1);
                     size_t idx = dist(rng);
-                    
+
                     impl_->outfile.seekp(idx * kRecordSize, std::ios::beg);
                     impl_->outfile.write(buffer, kRecordSize);
                 }
+                // Always count the write, regardless of which branch handled
+                // it. The trainer needs this to compute insertion rate once
+                // the buffer is at capacity — the file size becomes constant
+                // under random-replacement, but writes (and thus inserts)
+                // continue.
+                impl_->total_writes++;
             }
-            
+
             if (impl_->outfile) impl_->outfile.flush();
+            // Persist the monotonic write counter to a sidecar file. The
+            // trainer reads this to derive insertion rate even after the
+            // buffer file has stopped growing. Atomic rename so a partial
+            // write is never observed.
+            {
+                const std::string sidecar = impl_->config.output_path + ".writes";
+                const std::string sidecar_tmp = sidecar + ".tmp";
+                std::ofstream wfo(sidecar_tmp, std::ios::trunc);
+                if (wfo)
+                {
+                    wfo << impl_->total_writes << "\n";
+                    wfo.close();
+                    std::error_code ec;
+                    std::filesystem::rename(sidecar_tmp, sidecar, ec);
+                }
+            }
 
             // Save PGN if requested
             if (impl_->config.save_pgn)

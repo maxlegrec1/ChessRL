@@ -196,29 +196,40 @@ class Trainer:
         )
 
         target_k = max(0.1, float(self.config.data.target_k))
-        # Probe the on-disk file size for a fresh-to-the-second record count;
-        # the in-memory dataset.size only updates at reload boundaries.
         buffer_path = self.config.data.dataset_path
+        writes_sidecar = buffer_path.parent / (buffer_path.name + ".writes")
 
         def _live_record_count() -> int:
+            """Buffer file size / record size. Used for the warmup gate."""
             try:
                 return buffer_path.stat().st_size // RECORD_SIZE
             except FileNotFoundError:
                 return self.dataset.size
 
-        # Sliding-window measurement of g. Records are flushed to the buffer
-        # in BURSTS (every game-end across 1024 boards), so per-step instant
-        # rates can be 0 or 10x truth depending on whether the step window
-        # caught a flush. EMA-on-instant chases those bursts and produces
-        # both initial overshoot (~500 rec/s false reading) and later
-        # collapse (g=9.8). Instead, keep a deque of (time, size) snapshots
-        # spanning ~30s and compute g over the whole window — same as what
-        # `iostat`-style tools do.
+        def _live_total_writes() -> int:
+            """Monotonic write counter from the C++ sidecar.
+
+            Counts every write self-play emits — appends *and* random
+            replacements — so it keeps growing after the buffer hits its cap
+            (when file size goes flat). Falls back to file-size-based count
+            for old runs without the sidecar.
+            """
+            try:
+                with writes_sidecar.open("r") as fh:
+                    return int(fh.read().strip())
+            except (FileNotFoundError, ValueError):
+                return _live_record_count()
+
+        # Sliding-window measurement of g. Records are flushed in BURSTS at
+        # game ends, so per-step instant rates spike or read 0 depending on
+        # whether the step window caught a flush. The 30s window absorbs
+        # bursts the same way `iostat` does. We track (time, total_writes)
+        # snapshots — total_writes is monotonic and keeps moving even after
+        # the buffer is capped.
         g_window_seconds = 30.0
-        g_history: deque = deque()  # (time, file_size)
-        # Seed with one snapshot so the first measurement has a baseline.
+        g_history: deque = deque()  # (time, total_writes)
         _t0 = time.time()
-        g_history.append((_t0, _live_record_count()))
+        g_history.append((_t0, _live_total_writes()))
 
         try:
             while True:
@@ -228,26 +239,24 @@ class Trainer:
                 metrics = self._train_step(batch)
                 t1 = time.time()
 
-                # Update sliding window.
-                cur_size = _live_record_count()
-                g_history.append((t1, cur_size))
+                # Update sliding window using the monotonic write counter.
+                cur_writes = _live_total_writes()
+                g_history.append((t1, cur_writes))
                 # Cap deque memory at ~5 minutes of snapshots; never pop down
-                # to a single entry (which collapses window_dt to ~0 and
-                # produces g=0 if the most recent step was longer than the
-                # window).
+                # to a single entry (which collapses window_dt to ~0).
                 cutoff_age = max(g_window_seconds * 4, 300.0)
                 while len(g_history) > 2 and (t1 - g_history[0][0]) > cutoff_age:
                     g_history.popleft()
                 # Anchor selection: walk from oldest, keep the freshest
                 # snapshot that is still >= g_window_seconds old. Falls back
                 # to the oldest available entry if all are younger.
-                anchor_t, anchor_s = g_history[0]
-                for ts, sz in g_history:
+                anchor_t, anchor_w = g_history[0]
+                for ts, w in g_history:
                     if t1 - ts < g_window_seconds:
                         break
-                    anchor_t, anchor_s = ts, sz
+                    anchor_t, anchor_w = ts, w
                 window_dt = max(1e-3, t1 - anchor_t)
-                g = max(0.0, (cur_size - anchor_s) / window_dt)
+                g = max(0.0, (cur_writes - anchor_w) / window_dt)
 
                 # Pace: sleep so that s = batch_size / step_interval = target_k * g.
                 # Until the window is fully populated (first ~30s of training)
