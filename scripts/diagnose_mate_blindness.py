@@ -111,7 +111,7 @@ def evaluate_model(model: SmallModel, fen: str, device: str = "cuda"):
     if isinstance(arr, np.ndarray):
         arr = torch.from_numpy(arr)
     x = arr.unsqueeze(0).float().to(device)
-    p_logits, v_logits, vq_logits, _mlh = model(x, return_all=True)
+    p_logits, v_logits, vq_logits, _mlh, _mlh_q = model(x, return_all=True)
     p = torch.softmax(p_logits[0], dim=-1).cpu().numpy()
     v = torch.softmax(v_logits[0], dim=-1).cpu().numpy()
     vq = torch.softmax(vq_logits[0], dim=-1).cpu().numpy()

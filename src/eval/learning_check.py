@@ -239,7 +239,7 @@ def run_inference(
     planes = np.stack([fen_to_tensor(f) for f in fens]).astype(np.float32)
     x = torch.from_numpy(planes).to(device)
     with torch.no_grad():
-        policy_logits, value_logits, value_q_logits, _mlh = model(x, return_all=True)
+        policy_logits, value_logits, value_q_logits, _mlh, _mlh_q = model(x, return_all=True)
     return (
         policy_logits.float().cpu().numpy(),
         torch.softmax(value_logits.float(), dim=-1).cpu().numpy(),
@@ -265,7 +265,7 @@ def best_legal_uci(policy_logits: np.ndarray, fen: str) -> str:
     return best_uci or ""
 
 
-RECORD_SIZE = 144
+RECORD_SIZE = 148
 VALUE_OUTCOME_OFFSET = 116
 VALUE_MCTS_OFFSET = 128
 

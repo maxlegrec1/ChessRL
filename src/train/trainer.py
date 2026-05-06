@@ -306,26 +306,33 @@ class Trainer:
         targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
         target_value_outcome = torch.from_numpy(batch.value_outcomes).to(self.device)  # one-hot
         target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)         # dense
-        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)         # raw plies
-        # MLH target: tanh(plies / 25) ∈ [0, 1). Saturates near 1 for plies>=50.
-        target_mlh = torch.tanh(target_plies.clamp_min(0.0) / 25.0)
-        # -1 is the "no MLH target" sentinel, used by the buffer-migration
-        # script to mark pre-MLH rows. Rows with plies < 0 are masked out;
-        # everything else (including plies == 0 from terminal-adjacent rows,
-        # though self-play doesn't currently emit those) trains the head.
-        mlh_mask = (target_plies > -0.5).float()
+        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)         # raw plies (true)
+        target_backed_plies = torch.from_numpy(batch.backed_plies).to(self.device)     # raw plies (MCTS-backed)
+        # Targets are raw `plies / 25`, clamped at 4 (= 100 plies = 50 moves)
+        # so long-horizon outliers don't dominate the MSE. The model output is
+        # also linear, so this is a clean regression with no saturation
+        # mismatch between the two sides of the loss.
+        target_mlh   = (target_plies.clamp_min(0.0)        / 25.0).clamp_max(4.0)
+        target_mlh_q = (target_backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
+        # -1 is the "no MLH target" sentinel set by the buffer-migration
+        # scripts to mark pre-MLH (resp. pre-mlh_q) rows. Each head has its
+        # own mask so the true-target head can keep training on legacy rows
+        # even before the mlh_q field is populated.
+        mlh_mask   = (target_plies        > -0.5).float()
+        mlh_q_mask = (target_backed_plies > -0.5).float()
         value_labels = torch.argmax(target_value_outcome, dim=-1)
         value_q_labels = torch.argmax(target_value_mcts, dim=-1)
 
         with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
-            policy_logits, value_logits, value_q_logits, mlh_pred = self.model(
+            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self.model(
                 [inputs, None], return_all=True
             )
             B = policy_logits.shape[0]
             policy_logits = policy_logits.view(B, -1)
             value_logits = value_logits.view(B, 3)
             value_q_logits = value_q_logits.view(B, 3)
-            mlh_pred = mlh_pred.view(B)
+            mlh_pred   = mlh_pred.view(B)
+            mlh_q_pred = mlh_q_pred.view(B)
 
             policy_loss = F.cross_entropy(
                 policy_logits, targets_policy, ignore_index=NULL_POLICY_INDEX
@@ -336,12 +343,15 @@ class Trainer:
             # value_q head ← dense MCTS-backed-up WDL (cross-entropy on soft labels).
             value_q_loss = F.cross_entropy(value_q_logits, target_value_mcts)
 
-            # MLH loss: MSE on tanh-saturated plies-remaining, masked to rows
-            # with valid targets. Falls back to 0 cleanly when the buffer has
-            # no MLH-tagged rows (early in a fresh run).
-            mlh_sq = (mlh_pred - target_mlh).pow(2) * mlh_mask
-            denom = mlh_mask.sum().clamp_min(1.0)
-            mlh_loss = mlh_sq.sum() / denom
+            # MLH losses: MSE on raw plies/25, masked. mlh learns the unbiased
+            # game-end target; mlh_q learns the MCTS-backed-up estimate at the
+            # search root. Both fall back to 0 cleanly when their respective
+            # mask is empty (e.g. early in a fresh run before backed_plies is
+            # populated).
+            mlh_sq   = (mlh_pred   - target_mlh  ).pow(2) * mlh_mask
+            mlh_q_sq = (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
+            mlh_loss   = mlh_sq.sum()   / mlh_mask.sum().clamp_min(1.0)
+            mlh_q_loss = mlh_q_sq.sum() / mlh_q_mask.sum().clamp_min(1.0)
 
             value_accuracy = (
                 (value_logits.argmax(dim=-1) == value_labels).float().mean()
@@ -350,7 +360,13 @@ class Trainer:
                 (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
             )
 
-            total_loss = 0.1 * policy_loss + value_q_loss + value_loss + 0.05 * mlh_loss
+            total_loss = (
+                0.1 * policy_loss
+                + value_q_loss
+                + value_loss
+                + 0.05 * mlh_loss
+                + 0.05 * mlh_q_loss
+            )
 
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
@@ -387,15 +403,21 @@ class Trainer:
         frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
         frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
 
-        # MLH diagnostics: how many rows had a valid target this batch, plus
-        # the predicted vs target average over the masked rows.
-        mask_frac = float(mlh_mask.mean().detach().item())
-        if mask_frac > 0:
-            mlh_pred_mean = float((mlh_pred * mlh_mask).sum().detach().item() / max(1.0, mlh_mask.sum().detach().item()))
-            mlh_target_mean = float((target_mlh * mlh_mask).sum().detach().item() / max(1.0, mlh_mask.sum().detach().item()))
-        else:
-            mlh_pred_mean = 0.0
-            mlh_target_mean = 0.0
+        # MLH diagnostics: per-head mask coverage and (pred, target) means
+        # taken over the masked rows. Diagnostics report values in raw plies
+        # (multiply the predicted/target /25 fields by 25) for readability.
+        def _masked_mean(t: torch.Tensor, mask: torch.Tensor) -> float:
+            denom = mask.sum().detach().item()
+            if denom <= 0.0:
+                return 0.0
+            return float((t * mask).sum().detach().item() / denom)
+
+        mask_frac     = float(mlh_mask.mean().detach().item())
+        mask_q_frac   = float(mlh_q_mask.mean().detach().item())
+        mlh_pred_mean   = _masked_mean(mlh_pred,   mlh_mask)   * 25.0  # plies
+        mlh_target_mean = _masked_mean(target_mlh, mlh_mask)   * 25.0
+        mlh_q_pred_mean   = _masked_mean(mlh_q_pred,   mlh_q_mask) * 25.0
+        mlh_q_target_mean = _masked_mean(target_mlh_q, mlh_q_mask) * 25.0
 
         metrics = {
             "loss/total": float(total_loss.detach().item()),
@@ -403,6 +425,7 @@ class Trainer:
             "loss/value": float(value_loss.detach().item()),
             "loss/value_q": float(value_q_loss.detach().item()),
             "loss/mlh": float(mlh_loss.detach().item()),
+            "loss/mlh_q": float(mlh_q_loss.detach().item()),
             "acc/policy": policy_accuracy,
             "acc/value": float(value_accuracy.detach().item()),
             "acc/value_q": float(value_q_accuracy.detach().item()),
@@ -413,8 +436,11 @@ class Trainer:
             "buffer/frac_D_geq_0.8": frac_d_conf,
             "buffer/frac_near_uniform": frac_uniform,
             "buffer/mlh_mask_frac": mask_frac,
-            "mlh/pred_mean": mlh_pred_mean,
-            "mlh/target_mean": mlh_target_mean,
+            "buffer/mlh_q_mask_frac": mask_q_frac,
+            "mlh/pred_plies": mlh_pred_mean,
+            "mlh/target_plies": mlh_target_mean,
+            "mlh_q/pred_plies": mlh_q_pred_mean,
+            "mlh_q/target_plies": mlh_q_target_mean,
         }
         return metrics
 

@@ -28,17 +28,19 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
 
 class ExportWrapper(torch.nn.Module):
     """Routes the `value_q` head (trained against MCTS-backed-up WDL) into the
-    engine's "value" output and exposes the moves-left head as a third output.
-    The C++ MCTS reads value_q for WDL and mlh for the moves-left tiebreaker."""
+    engine's "value" output and exposes both moves-left heads:
+      - mlh:   raw plies/25 estimate, true target.
+      - mlh_q: raw plies/25 estimate, MCTS-backed target. Used by C++ MCTS for
+               both the depth-incremented backup (×25 ↦ raw plies) and the
+               tiebreaker (tanh applied at the call site)."""
 
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, x):
-        p, _v, vq, mlh = self.model(x, return_all=True)
-        # mlh head is already sigmoid'd in the model (range [0, 1]).
-        return p, torch.softmax(vq, dim=-1), mlh
+        p, _v, vq, mlh, mlh_q = self.model(x, return_all=True)
+        return p, torch.softmax(vq, dim=-1), mlh, mlh_q
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
@@ -46,7 +48,7 @@ def export_model(args: argparse.Namespace) -> None:
     state_dict = load_state_dict(args.ckpt_path, args.device)
     base_model.load_state_dict(state_dict, strict=False)
     base_model.eval()
-    
+
     model = ExportWrapper(base_model).to(device)
     model.eval()
 
@@ -59,6 +61,7 @@ def export_model(args: argparse.Namespace) -> None:
         "policy": {0: "batch_size"},
         "value": {0: "batch_size"},
         "mlh": {0: "batch_size"},
+        "mlh_q": {0: "batch_size"},
     }
 
     torch.onnx.export(
@@ -66,7 +69,7 @@ def export_model(args: argparse.Namespace) -> None:
         dummy_input,
         onnx_path.as_posix(),
         input_names=["input"],
-        output_names=["policy", "value", "mlh"],
+        output_names=["policy", "value", "mlh", "mlh_q"],
         dynamic_axes=dynamic_axes,
         opset_version=args.opset,
         export_params=True,

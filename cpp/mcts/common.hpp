@@ -61,13 +61,16 @@ struct TreeNode
     // wdl_sum: sum (over visits) of leaf-WDL triples flipped to this node's
     // perspective. Divide by visit_count for the running average.
     std::array<float, 3> wdl_sum{{0.0F, 0.0F, 0.0F}};
-    // mlh_sum: sum (over visits) of leaf MLH values (tanh-saturated, in [0,1]).
-    // No sign flip — moves-left is symmetric across sides. Divide by
-    // visit_count for the running average.
-    float mlh_sum{0.0F};
-    // mlh value at this leaf (set on expansion from the NN). For terminal
-    // nodes this is 0 (game is over from here, zero plies remaining).
-    float leaf_mlh{0.0F};
+    // plies_sum: sum (over visits) of (leaf_plies + depth_from_leaf), where
+    // leaf_plies is the NN's raw plies-remaining estimate at the simulation's
+    // leaf and depth_from_leaf is the number of plies between this node and
+    // that leaf. Divide by visit_count for the visit-weighted average plies-
+    // remaining at this node. No sign flip — moves-left is symmetric.
+    float plies_sum{0.0F};
+    // leaf_plies: this node's raw plies-remaining estimate set on expansion.
+    // Computed from the NN's mlh_q head as `mlh_q * 25` (the head outputs
+    // plies/25). Terminal nodes use 0.
+    float leaf_plies{0.0F};
     HistoryHandle history;
     std::vector<int> children;
     std::vector<chess::Move> child_moves;
@@ -110,14 +113,17 @@ namespace detail
 void backpropagate(SearchTree& tree, const std::vector<int>& path, float value);
 
 // Extended backprop: also propagate the leaf's WDL triple (with W↔L flip per
-// ply) and MLH scalar (no flip). Maintains node.wdl as the running average
-// over visits so that in-tree selection has a meaningful per-node WDL.
+// ply) and the leaf's raw plies-remaining estimate. Each ancestor accumulates
+// `leaf_plies + depth_from_leaf` so plies_sum / visit_count gives the visit-
+// weighted plies-remaining estimate at that node. Maintains node.wdl as the
+// running average over visits so that in-tree selection has a meaningful
+// per-node WDL.
 void backpropagate_full(
     SearchTree& tree,
     const std::vector<int>& path,
     float value,
     std::array<float, 3> leaf_wdl,
-    float leaf_mlh);
+    float leaf_plies);
 
 // Post-order WDL aggregation starting at `node_index`. Children's WDL is
 // flipped to the parent's perspective and visit-weighted-averaged. Terminal

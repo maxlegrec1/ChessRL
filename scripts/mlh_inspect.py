@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 from src.models.small.fen_encoder import fen_to_tensor
 from src.models.small.small_model import SmallModel
 
-RECORD_SIZE = 144
+RECORD_SIZE = 148
 PLIES_OFFSET = 140
 FEN_OFFSET = 0
 POLICY_OFFSET = 100
@@ -86,7 +86,10 @@ def main():
             plies_pick.append(plies_arr[i])
 
     plies_pick = np.array(plies_pick, dtype=np.float32)
-    target_mlh = np.tanh(np.maximum(plies_pick, 0) / 25.0)
+    # MLH head now predicts raw plies/25 (linear, no activation). Target is
+    # the same linear transform of the buffer's plies-remaining, clamped at
+    # the trainer's saturation cap.
+    target_mlh = np.clip(np.maximum(plies_pick, 0) / 25.0, 0.0, 4.0)
 
     ckpt_path = latest_checkpoint(run_dir)
     print(f"loading {ckpt_path.name}")
@@ -101,7 +104,7 @@ def main():
         for off in range(0, len(fens), BATCH):
             chunk = fens[off:off+BATCH]
             x = torch.from_numpy(np.stack([fen_to_tensor(f) for f in chunk]).astype(np.float32)).cuda()
-            _, _, _, mlh = model(x, return_all=True)
+            _, _, _, mlh, _ = model(x, return_all=True)
             preds.append(mlh.cpu().numpy())
     preds = np.concatenate(preds)
 

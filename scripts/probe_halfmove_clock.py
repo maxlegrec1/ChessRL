@@ -53,7 +53,7 @@ def patch_halfmove(fen: str, halfmove: int) -> str:
 def evaluate(model, fens, device):
     arr = np.stack([fen_to_tensor(f) for f in fens]).astype(np.float32)
     x = torch.from_numpy(arr).to(device)
-    p, v, vq, mlh = model(x, return_all=True)
+    p, v, vq, mlh, _ = model(x, return_all=True)
     v = torch.softmax(v.float(), dim=-1).cpu().numpy()
     vq = torch.softmax(vq.float(), dim=-1).cpu().numpy()
     return v, vq, mlh.float().cpu().numpy()

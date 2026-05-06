@@ -27,21 +27,24 @@ struct SelfPlayRecord
     std::array<float, 3> value_outcome; // sparse one-hot, set at game end from z
     std::array<float, 3> value_mcts;    // dense WDL from MCTS root after refine
     int ply_index{0};                   // 0-based ply index within the game
-    float plies_remaining{0.0f};        // total_plies - ply_index, set at game end
+    float plies_remaining{-1.0f};       // total_plies - ply_index, set at game end
+    float backed_plies{-1.0f};          // MCTS-backed plies-remaining at root
 };
 
-// On-disk record layout (144 bytes, fixed):
+// On-disk record layout (148 bytes, fixed):
 //   [0..100)   FEN (null-padded)
 //   [100..116) policy UCI (null-padded)
 //   [116..128) value_outcome (3 x float32)
 //   [128..140) value_mcts    (3 x float32)
-//   [140..144) plies_remaining (1 x float32) — distance to game end at this position
-constexpr size_t kRecordSize = 144;
+//   [140..144) plies_remaining (1 x float32) — true plies to game end (set at game end)
+//   [144..148) backed_plies   (1 x float32) — MCTS-backed plies estimate at root
+constexpr size_t kRecordSize = 148;
 constexpr size_t kFenOffset = 0;
 constexpr size_t kPolicyOffset = 100;
 constexpr size_t kValueOutcomeOffset = 116;
 constexpr size_t kValueMctsOffset = 128;
 constexpr size_t kPliesRemainingOffset = 140;
+constexpr size_t kBackedPliesOffset = 144;
 
 struct BoardSlot
 {
@@ -257,7 +260,11 @@ SelfPlayMetrics SelfPlayWorker::step()
         record.value_mcts = summary.value;
         record.value_outcome = {0.0f, 0.0f, 0.0f};
         record.ply_index = slot.ply_count;
-        record.plies_remaining = 0.0f; // filled in at game end below
+        record.plies_remaining = -1.0f; // overwritten with the true value at game end
+        // backed_plies is the search's plies-remaining estimate at this
+        // position; available immediately from the MCTS summary, no game-end
+        // information needed. Negative sentinel if MCTS produced none.
+        record.backed_plies = summary.backed_plies;
         slot.pending_records.push_back(record);
         metrics.positions_generated++;
 
@@ -345,6 +352,7 @@ SelfPlayMetrics SelfPlayWorker::step()
                 std::memcpy(buffer + kValueOutcomeOffset,  rec.value_outcome.data(), 12);
                 std::memcpy(buffer + kValueMctsOffset,     rec.value_mcts.data(),    12);
                 std::memcpy(buffer + kPliesRemainingOffset, &rec.plies_remaining,    4);
+                std::memcpy(buffer + kBackedPliesOffset,    &rec.backed_plies,       4);
 
                 if (impl_->current_records < impl_->config.max_buffer_size)
                 {

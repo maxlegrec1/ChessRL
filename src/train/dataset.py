@@ -19,7 +19,7 @@ import struct
 NULL_POLICY_INDEX = len(policy_index) - 1
 
 # On-disk record size (bytes). Mirrors cpp/selfplay.cpp's kRecordSize.
-RECORD_SIZE = 144
+RECORD_SIZE = 148
 
 
 def _policy_str_to_idx(move: str) -> int:
@@ -38,7 +38,8 @@ class SelfPlayBatch:
     policy_indices: np.ndarray    # [B]
     value_outcomes: np.ndarray    # [B, 3] sparse one-hot (game outcome from side to move)
     value_mcts: np.ndarray        # [B, 3] dense WDL backed up from MCTS root
-    plies_remaining: np.ndarray   # [B] float32 plies until game end (0 for old buffer rows)
+    plies_remaining: np.ndarray   # [B] float32 plies until game end; -1 = no target
+    backed_plies: np.ndarray      # [B] float32 MCTS-backed plies-remaining at root; -1 = no target
     fens: List[str]
 
 
@@ -52,6 +53,7 @@ class SelfPlayDataset:
         self._value_outcomes: List[tuple[float, float, float]] = []
         self._value_mcts: List[tuple[float, float, float]] = []
         self._plies_remaining: List[float] = []
+        self._backed_plies: List[float] = []
         self._policies: List[str] = []
         self._size = 0
         self._last_load = 0.0
@@ -89,7 +91,8 @@ class SelfPlayDataset:
                     # Parquet path predates the dual-target schema; supply zero
                     # value_mcts so the value_q head sees a no-op target.
                     self._value_mcts = [(0.0, 0.0, 0.0)] * len(self._fens)
-                    self._plies_remaining = [0.0] * len(self._fens)
+                    self._plies_remaining = [-1.0] * len(self._fens)
+                    self._backed_plies = [-1.0] * len(self._fens)
                     self._policies = table.column("policy").to_pylist()
                 else:
                     # Assume binary format
@@ -99,6 +102,7 @@ class SelfPlayDataset:
                         self._value_outcomes,
                         self._value_mcts,
                         self._plies_remaining,
+                        self._backed_plies,
                     ) = self._read_binary_file()
                 
                 self._size = len(self._fens)
@@ -116,18 +120,20 @@ class SelfPlayDataset:
             self._last_mtime = self._last_load
 
     def _read_binary_file(self):
-        # On-disk record layout (144 bytes, fixed). Mirrors cpp/selfplay.cpp.
+        # On-disk record layout (148 bytes, fixed). Mirrors cpp/selfplay.cpp.
         FEN_OFFSET = 0
         POLICY_OFFSET = 100
         VALUE_OUTCOME_OFFSET = 116
         VALUE_MCTS_OFFSET = 128
         PLIES_REMAINING_OFFSET = 140
+        BACKED_PLIES_OFFSET = 144
 
         fens: List[str] = []
         policies: List[str] = []
         value_outcomes: List[tuple[float, float, float]] = []
         value_mcts: List[tuple[float, float, float]] = []
         plies_remaining: List[float] = []
+        backed_plies: List[float] = []
         try:
             with self.path.open("rb") as f:
                 content = f.read()
@@ -145,9 +151,8 @@ class SelfPlayDataset:
 
                 val_out = struct.unpack_from("fff", content, offset + VALUE_OUTCOME_OFFSET)
                 val_mcts = struct.unpack_from("fff", content, offset + VALUE_MCTS_OFFSET)
-                # Old (pre-MLH) records have this slot zero-padded by the C++
-                # writer's initial memset, so 0.0 is a valid sentinel.
                 (plies,) = struct.unpack_from("f", content, offset + PLIES_REMAINING_OFFSET)
+                (b_plies,) = struct.unpack_from("f", content, offset + BACKED_PLIES_OFFSET)
                 offset += RECORD_SIZE
 
                 if fen and policy:
@@ -156,11 +161,12 @@ class SelfPlayDataset:
                     value_outcomes.append(val_out)
                     value_mcts.append(val_mcts)
                     plies_remaining.append(float(plies))
+                    backed_plies.append(float(b_plies))
         except Exception as e:
             print(f"Error reading binary file: {e}")
-            return [], [], [], [], []
+            return [], [], [], [], [], []
 
-        return fens, policies, value_outcomes, value_mcts, plies_remaining
+        return fens, policies, value_outcomes, value_mcts, plies_remaining, backed_plies
 
     # ------------------------------------------------------------------ #
     @property
@@ -175,7 +181,8 @@ class SelfPlayDataset:
         planes = np.zeros((batch_size, 8, 8, 19), dtype=np.float32)
         value_outcomes = np.zeros((batch_size, 3), dtype=np.float32)
         value_mcts = np.zeros((batch_size, 3), dtype=np.float32)
-        plies_remaining = np.zeros((batch_size,), dtype=np.float32)
+        plies_remaining = np.full((batch_size,), -1.0, dtype=np.float32)
+        backed_plies = np.full((batch_size,), -1.0, dtype=np.float32)
         policy_indices = np.full((batch_size,), NULL_POLICY_INDEX, dtype=np.int64)
         fens: List[str] = []
 
@@ -183,7 +190,8 @@ class SelfPlayDataset:
             fen = self._fens[idx]
             wdl_outcome = list(self._value_outcomes[idx])
             wdl_mcts = list(self._value_mcts[idx])
-            plies = self._plies_remaining[idx] if idx < len(self._plies_remaining) else 0.0
+            plies = self._plies_remaining[idx] if idx < len(self._plies_remaining) else -1.0
+            b_plies = self._backed_plies[idx] if idx < len(self._backed_plies) else -1.0
             policy_str = self._policies[idx]
             # Both WDLs are already in side-to-move perspective; mirroring the board
             # swaps colors AND swaps the side to move, so the WDL stays valid as-is.
@@ -195,6 +203,7 @@ class SelfPlayDataset:
             value_outcomes[row] = wdl_outcome
             value_mcts[row] = wdl_mcts
             plies_remaining[row] = plies
+            backed_plies[row] = b_plies
             policy_indices[row] = _policy_str_to_idx(policy_str)
 
         return SelfPlayBatch(
@@ -203,6 +212,7 @@ class SelfPlayDataset:
             value_outcomes=value_outcomes,
             value_mcts=value_mcts,
             plies_remaining=plies_remaining,
+            backed_plies=backed_plies,
             fens=fens,
         )
 

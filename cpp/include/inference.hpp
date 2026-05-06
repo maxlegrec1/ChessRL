@@ -27,7 +27,14 @@ struct SmallPolicyValue
 {
     std::vector<float> policy_logits;
     std::array<float, 3> wdl;
-    float mlh{0.0F}; // moves-left head: tanh(plies_remaining / 25), in [0, 1]
+    // Both MLH heads are linear (no activation in the engine). The raw output
+    // is interpretable as plies_remaining / 25 — multiply by 25 for raw
+    // plies, apply tanh for a bounded tiebreaker modifier.
+    //   mlh   ← true target head (game-end plies).
+    //   mlh_q ← MCTS-backed target head; used by MCTS for depth-incremented
+    //           backup AND for the selection tiebreaker.
+    float mlh{0.0F};
+    float mlh_q{0.0F};
 };
 
 SmallInferenceResult small_generate_moves(

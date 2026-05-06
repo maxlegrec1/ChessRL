@@ -53,13 +53,23 @@ class SmallModel(nn.Module):
         self.value_fc1_q = nn.Linear(8 * 8 * 8, 128)
         self.value_fc2_q = nn.Linear(128, 3)
 
-        # Moves-Left Head (MLH): predicts tanh(plies_remaining / 25), so output
-        # saturates near 1 for plies >= 50 and ≈ 0 at terminal positions. Used
-        # by C++ MCTS as a tiebreaker via Q + ε * (1 - 2W) * mlh.
+        # Moves-Left Heads. Both predict a raw scalar interpretable as
+        # plies_remaining / 25 (linear; no activation baked in). The C++ MCTS
+        # multiplies by 25 for the depth-incremented backup, and applies tanh
+        # at the tiebreaker call site to bound the modifier.
+        #   mlh   ← true target: (game_total_plies - ply_index) / 25.
+        #   mlh_q ← search-backed target: MCTS-backed-up plies / 25 at root.
+        # Mirrors the value/value_q split: one unbiased anchor, one search-aware
+        # estimate. mlh_q is the one used for the tiebreaker.
         self.mlh_conv = nn.Conv2d(64, 4, 1, bias=False)
         self.mlh_bn = nn.BatchNorm2d(4)
         self.mlh_fc1 = nn.Linear(4 * 8 * 8, 64)
         self.mlh_fc2 = nn.Linear(64, 1)
+
+        self.mlh_q_conv = nn.Conv2d(64, 4, 1, bias=False)
+        self.mlh_q_bn = nn.BatchNorm2d(4)
+        self.mlh_q_fc1 = nn.Linear(4 * 8 * 8, 64)
+        self.mlh_q_fc2 = nn.Linear(64, 1)
 
     def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step = None):
         # inp is a list/tuple: [x, targets, ...] OR just x
@@ -105,18 +115,25 @@ class SmallModel(nn.Module):
         v_q = F.relu(v_q)
         value_q_logits = self.value_fc2_q(v_q)
 
-        # Moves-Left Head: sigmoid → [0, 1] to match the tanh(plies/25) target.
+        # Moves-Left heads (linear). Output is interpretable as plies/25.
         m = self.mlh_conv(x)
         m = self.mlh_bn(m)
         m = F.relu(m)
         m = m.flatten(1)
         m = self.mlh_fc1(m)
         m = F.relu(m)
-        mlh_logit = self.mlh_fc2(m).squeeze(-1)
-        mlh = torch.sigmoid(mlh_logit)
+        mlh = self.mlh_fc2(m).squeeze(-1)
+
+        m_q = self.mlh_q_conv(x)
+        m_q = self.mlh_q_bn(m_q)
+        m_q = F.relu(m_q)
+        m_q = m_q.flatten(1)
+        m_q = self.mlh_q_fc1(m_q)
+        m_q = F.relu(m_q)
+        mlh_q = self.mlh_q_fc2(m_q).squeeze(-1)
 
         if return_all:
-            return policy_logits, value_logits, value_q_logits, mlh
+            return policy_logits, value_logits, value_q_logits, mlh, mlh_q
 
         return policy_logits
 
@@ -196,7 +213,7 @@ class SmallModel(nn.Module):
         
         self.eval()
         with torch.no_grad():
-            _, value_logits, _, _ = self(x, return_all=True)
+            _, value_logits, _, _, _ = self(x, return_all=True)
             value_probs = torch.softmax(value_logits, dim=-1)
             
         # Return WDL

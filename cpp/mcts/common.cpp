@@ -473,10 +473,11 @@ void backpropagate_full(
     const std::vector<int>& path,
     float value,
     std::array<float, 3> leaf_wdl,
-    float leaf_mlh)
+    float leaf_plies)
 {
     float current_v = value;
     std::array<float, 3> current_wdl = leaf_wdl; // {W, D, L} from leaf's POV
+    int depth_from_leaf = 0;
     for (auto it = path.rbegin(); it != path.rend(); ++it)
     {
         TreeNode& node = tree.nodes[*it];
@@ -485,15 +486,18 @@ void backpropagate_full(
         node.wdl_sum[0] += current_wdl[0];
         node.wdl_sum[1] += current_wdl[1];
         node.wdl_sum[2] += current_wdl[2];
-        node.mlh_sum   += leaf_mlh;
+        // plies-remaining at this node = leaf_plies + depth between this
+        // node and the leaf. The leaf itself contributes leaf_plies + 0.
+        node.plies_sum += leaf_plies + static_cast<float>(depth_from_leaf);
         const float inv = 1.0F / static_cast<float>(node.visit_count);
         node.wdl[0] = node.wdl_sum[0] * inv;
         node.wdl[1] = node.wdl_sum[1] * inv;
         node.wdl[2] = node.wdl_sum[2] * inv;
         // Flip for parent's perspective: value sign-flips, WDL swaps W↔L,
-        // MLH stays as-is (moves-left is symmetric).
+        // plies stays as-is (moves-left is symmetric).
         current_v = -current_v;
         std::swap(current_wdl[0], current_wdl[2]);
+        depth_from_leaf += 1;
     }
 }
 

@@ -248,7 +248,7 @@ private:
             {
                 const float value = terminal_value(current_board).value_or(node.value_prior);
                 const std::array<float, 3> leaf_wdl = wdl_from_terminal(value);
-                detail::backpropagate_full(tree_, path, value, leaf_wdl, /*leaf_mlh=*/0.0F);
+                detail::backpropagate_full(tree_, path, value, leaf_wdl, /*leaf_plies=*/0.0F);
                 return;
             }
 
@@ -257,7 +257,7 @@ private:
                 evaluate_node(node_index, current_board);
                 const TreeNode& evaluated = tree_.nodes[node_index];
                 detail::backpropagate_full(
-                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_mlh);
+                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
                 return;
             }
 
@@ -267,7 +267,7 @@ private:
                 evaluate_node(node_index, current_board);
                 const TreeNode& evaluated = tree_.nodes[node_index];
                 detail::backpropagate_full(
-                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_mlh);
+                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
                 return;
             }
 
@@ -293,15 +293,18 @@ private:
         int best_child = -1;
         float best_score = -std::numeric_limits<float>::infinity();
 
-        // Q + U + ε * (1 - 2 * W_parent_pov) * mlh_avg
+        // Q + U + ε * (1 - 2 * W_parent_pov) * tanh(plies_avg / 25)
         // - W_parent_pov is child's L (from child's POV), since flipping a
         //   child's perspective into the parent's swaps W↔L.
-        // - mlh_avg is the in-tree backed-up moves-left, in [0, 1] (already
-        //   tanh-saturated at the leaves).
+        // - plies_avg is the in-tree backed-up plies-remaining at the child
+        //   (mlh_q-seeded leaves + per-ply +1 increments via backup). We
+        //   squash with tanh to bound the modifier to [-ε, ε] regardless of
+        //   game length — long-horizon positions saturate.
         // - sign of (1 - 2W): when winning (W large), modifier penalizes high
         //   MLH (prefer faster). When losing/drawing, modifier rewards high
         //   MLH (prefer slower / drag it out).
         constexpr float kMlhEpsilon = 0.05F;
+        constexpr float kPliesScale = 1.0F / 25.0F;
 
         for (size_t i = 0; i < node.children.size(); ++i)
         {
@@ -318,8 +321,8 @@ private:
                 // child.wdl is in child's perspective; flip to parent's POV.
                 const float w_parent_pov = child.wdl[2];
                 const float inv_n = 1.0F / static_cast<float>(child.visit_count);
-                const float mlh_avg = child.mlh_sum * inv_n;
-                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * mlh_avg;
+                const float plies_avg = child.plies_sum * inv_n;
+                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * std::tanh(plies_avg * kPliesScale);
             }
 
             const float score = q + u + kMlhEpsilon * mlh_modifier;
@@ -348,7 +351,7 @@ private:
             node.terminal = true;
             node.value_prior = *terminal;
             node.wdl = wdl_from_terminal(*terminal);
-            node.leaf_mlh = 0.0F;
+            node.leaf_plies = 0.0F;
             return node.value_prior;
         }
 
@@ -387,7 +390,10 @@ private:
         // WDL is already in side-to-move perspective: [win, draw, loss]
         node.wdl = eval.wdl;
         node.value_prior = node.wdl[0] - node.wdl[2];
-        node.leaf_mlh = eval.mlh;
+        // mlh_q is the search-aware head, output as plies/25. Convert to raw
+        // plies for the +depth backup math. Clamp at 0 so a negative-prediction
+        // outlier doesn't pollute the running plies-remaining estimate.
+        node.leaf_plies = std::max(0.0F, eval.mlh_q * 25.0F);
 
         // Phase B: Use passed board_state for computing priors
         std::vector<MovePrior> priors = compute_priors(board_state, eval);
@@ -767,6 +773,13 @@ private:
         summary.action = action;
         summary.policy = std::move(sorted);
         summary.value = root.wdl;
+        // Root's visit-weighted backed plies. The root itself has been visited
+        // simulations + 1 times in the current backup scheme (initial expansion
+        // contributes one visit too), so this is a valid average. When visits
+        // == 0 (degenerate), keep the negative sentinel.
+        summary.backed_plies = root.visit_count > 0
+            ? root.plies_sum / static_cast<float>(root.visit_count)
+            : -1.0F;
         summary.rollouts.reserve(aggregated.size());
         for (const auto& entry : aggregated)
         {
