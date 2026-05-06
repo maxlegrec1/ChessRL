@@ -43,9 +43,9 @@ class DataConfig:
 @dataclass
 class SelfPlayConfig:
     # parallelism / batching
-    boards: int = 128
-    threads: int = 1
-    hash_size: int = 128
+    boards: int = 1024
+    threads: int = 256
+    hash_size: int = 0
     # MCTS hyperparameters (mirror cpp/selfplay.hpp defaults)
     simulations: int = 800
     cpuct: float = 0.65
