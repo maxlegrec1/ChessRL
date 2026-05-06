@@ -28,16 +28,17 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
 
 class ExportWrapper(torch.nn.Module):
     """Routes the `value_q` head (trained against MCTS-backed-up WDL) into the
-    engine's "value" output, since that is what the C++ MCTS consumes during
-    self-play search."""
+    engine's "value" output and exposes the moves-left head as a third output.
+    The C++ MCTS reads value_q for WDL and mlh for the moves-left tiebreaker."""
 
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, x):
-        p, _v, vq = self.model(x, return_all=True)
-        return p, torch.softmax(vq, dim=-1)
+        p, _v, vq, mlh = self.model(x, return_all=True)
+        # mlh head is already sigmoid'd in the model (range [0, 1]).
+        return p, torch.softmax(vq, dim=-1), mlh
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
@@ -57,6 +58,7 @@ def export_model(args: argparse.Namespace) -> None:
         "input": {0: "batch_size"},
         "policy": {0: "batch_size"},
         "value": {0: "batch_size"},
+        "mlh": {0: "batch_size"},
     }
 
     torch.onnx.export(
@@ -64,7 +66,7 @@ def export_model(args: argparse.Namespace) -> None:
         dummy_input,
         onnx_path.as_posix(),
         input_names=["input"],
-        output_names=["policy", "value"],
+        output_names=["policy", "value", "mlh"],
         dynamic_axes=dynamic_axes,
         opset_version=args.opset,
         export_params=True,

@@ -26,6 +26,8 @@ struct SelfPlayRecord
     // Both WDLs are stored from the side-to-move's perspective.
     std::array<float, 3> value_outcome; // sparse one-hot, set at game end from z
     std::array<float, 3> value_mcts;    // dense WDL from MCTS root after refine
+    int ply_index{0};                   // 0-based ply index within the game
+    float plies_remaining{0.0f};        // total_plies - ply_index, set at game end
 };
 
 // On-disk record layout (144 bytes, fixed):
@@ -33,12 +35,13 @@ struct SelfPlayRecord
 //   [100..116) policy UCI (null-padded)
 //   [116..128) value_outcome (3 x float32)
 //   [128..140) value_mcts    (3 x float32)
-//   [140..144) reserved padding
+//   [140..144) plies_remaining (1 x float32) — distance to game end at this position
 constexpr size_t kRecordSize = 144;
 constexpr size_t kFenOffset = 0;
 constexpr size_t kPolicyOffset = 100;
 constexpr size_t kValueOutcomeOffset = 116;
 constexpr size_t kValueMctsOffset = 128;
+constexpr size_t kPliesRemainingOffset = 140;
 
 struct BoardSlot
 {
@@ -253,6 +256,8 @@ SelfPlayMetrics SelfPlayWorker::step()
         // value_outcome is filled in at game end below; default to zero for now.
         record.value_mcts = summary.value;
         record.value_outcome = {0.0f, 0.0f, 0.0f};
+        record.ply_index = slot.ply_count;
+        record.plies_remaining = 0.0f; // filled in at game end below
         slot.pending_records.push_back(record);
         metrics.positions_generated++;
 
@@ -307,6 +312,9 @@ SelfPlayMetrics SelfPlayWorker::step()
             }
             
             // Always derive sparse one-hot game-outcome WDL for every pending record.
+            // Also fill plies_remaining = total_plies - ply_index so the
+            // moves-left head has a per-position regression target.
+            const int total_plies = slot.ply_count;
             for (auto& rec : slot.pending_records)
             {
                 bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
@@ -323,6 +331,8 @@ SelfPlayMetrics SelfPlayWorker::step()
                     else if (z == 1.0f) rec.value_outcome = {0.0f, 0.0f, 1.0f};
                     else rec.value_outcome = {0.0f, 1.0f, 0.0f};
                 }
+
+                rec.plies_remaining = static_cast<float>(std::max(0, total_plies - rec.ply_index));
             }
             // Write to buffer
             for (const auto& rec : slot.pending_records)
@@ -332,8 +342,9 @@ SelfPlayMetrics SelfPlayWorker::step()
 
                 std::strncpy(buffer + kFenOffset,    rec.fen.c_str(),    99);
                 std::strncpy(buffer + kPolicyOffset, rec.policy.c_str(), 15);
-                std::memcpy(buffer + kValueOutcomeOffset, rec.value_outcome.data(), 12);
-                std::memcpy(buffer + kValueMctsOffset,    rec.value_mcts.data(),    12);
+                std::memcpy(buffer + kValueOutcomeOffset,  rec.value_outcome.data(), 12);
+                std::memcpy(buffer + kValueMctsOffset,     rec.value_mcts.data(),    12);
+                std::memcpy(buffer + kPliesRemainingOffset, &rec.plies_remaining,    4);
 
                 if (impl_->current_records < impl_->config.max_buffer_size)
                 {

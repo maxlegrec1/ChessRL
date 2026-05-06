@@ -468,6 +468,35 @@ void backpropagate(SearchTree& tree, const std::vector<int>& path, float value)
     }
 }
 
+void backpropagate_full(
+    SearchTree& tree,
+    const std::vector<int>& path,
+    float value,
+    std::array<float, 3> leaf_wdl,
+    float leaf_mlh)
+{
+    float current_v = value;
+    std::array<float, 3> current_wdl = leaf_wdl; // {W, D, L} from leaf's POV
+    for (auto it = path.rbegin(); it != path.rend(); ++it)
+    {
+        TreeNode& node = tree.nodes[*it];
+        node.visit_count += 1;
+        node.value_sum += current_v;
+        node.wdl_sum[0] += current_wdl[0];
+        node.wdl_sum[1] += current_wdl[1];
+        node.wdl_sum[2] += current_wdl[2];
+        node.mlh_sum   += leaf_mlh;
+        const float inv = 1.0F / static_cast<float>(node.visit_count);
+        node.wdl[0] = node.wdl_sum[0] * inv;
+        node.wdl[1] = node.wdl_sum[1] * inv;
+        node.wdl[2] = node.wdl_sum[2] * inv;
+        // Flip for parent's perspective: value sign-flips, WDL swaps W↔L,
+        // MLH stays as-is (moves-left is symmetric).
+        current_v = -current_v;
+        std::swap(current_wdl[0], current_wdl[2]);
+    }
+}
+
 std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vector<bool>& visited)
 {
     TreeNode& node = tree.nodes[node_index];

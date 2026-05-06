@@ -75,7 +75,9 @@ class Trainer:
         if initial_teacher_path.exists():
             self.console.log(f"Loading initial teacher from {initial_teacher_path}")
             ckpt = torch.load(initial_teacher_path, map_location=self.device,weights_only=False)
-            self.teacher_model.load_state_dict(ckpt["model"])
+            # strict=False so a teacher saved before the MLH head was added
+            # still loads — the new params stay at their fresh init.
+            self.teacher_model.load_state_dict(ckpt["model"], strict=False)
         else:
             self.console.log(f"Creating initial teacher at {initial_teacher_path}")
             # Initialize teacher with current model weights
@@ -304,17 +306,26 @@ class Trainer:
         targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
         target_value_outcome = torch.from_numpy(batch.value_outcomes).to(self.device)  # one-hot
         target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)         # dense
+        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)         # raw plies
+        # MLH target: tanh(plies / 25) ∈ [0, 1). Saturates near 1 for plies>=50.
+        target_mlh = torch.tanh(target_plies.clamp_min(0.0) / 25.0)
+        # -1 is the "no MLH target" sentinel, used by the buffer-migration
+        # script to mark pre-MLH rows. Rows with plies < 0 are masked out;
+        # everything else (including plies == 0 from terminal-adjacent rows,
+        # though self-play doesn't currently emit those) trains the head.
+        mlh_mask = (target_plies > -0.5).float()
         value_labels = torch.argmax(target_value_outcome, dim=-1)
         value_q_labels = torch.argmax(target_value_mcts, dim=-1)
 
         with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
-            policy_logits, value_logits, value_q_logits = self.model(
+            policy_logits, value_logits, value_q_logits, mlh_pred = self.model(
                 [inputs, None], return_all=True
             )
             B = policy_logits.shape[0]
             policy_logits = policy_logits.view(B, -1)
             value_logits = value_logits.view(B, 3)
             value_q_logits = value_q_logits.view(B, 3)
+            mlh_pred = mlh_pred.view(B)
 
             policy_loss = F.cross_entropy(
                 policy_logits, targets_policy, ignore_index=NULL_POLICY_INDEX
@@ -325,6 +336,13 @@ class Trainer:
             # value_q head ← dense MCTS-backed-up WDL (cross-entropy on soft labels).
             value_q_loss = F.cross_entropy(value_q_logits, target_value_mcts)
 
+            # MLH loss: MSE on tanh-saturated plies-remaining, masked to rows
+            # with valid targets. Falls back to 0 cleanly when the buffer has
+            # no MLH-tagged rows (early in a fresh run).
+            mlh_sq = (mlh_pred - target_mlh).pow(2) * mlh_mask
+            denom = mlh_mask.sum().clamp_min(1.0)
+            mlh_loss = mlh_sq.sum() / denom
+
             value_accuracy = (
                 (value_logits.argmax(dim=-1) == value_labels).float().mean()
             )
@@ -332,7 +350,7 @@ class Trainer:
                 (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
             )
 
-            total_loss = 0.1 * policy_loss + value_q_loss + value_loss
+            total_loss = 0.1 * policy_loss + value_q_loss + value_loss + 0.05 * mlh_loss
 
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
@@ -369,11 +387,22 @@ class Trainer:
         frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
         frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
 
+        # MLH diagnostics: how many rows had a valid target this batch, plus
+        # the predicted vs target average over the masked rows.
+        mask_frac = float(mlh_mask.mean().detach().item())
+        if mask_frac > 0:
+            mlh_pred_mean = float((mlh_pred * mlh_mask).sum().detach().item() / max(1.0, mlh_mask.sum().detach().item()))
+            mlh_target_mean = float((target_mlh * mlh_mask).sum().detach().item() / max(1.0, mlh_mask.sum().detach().item()))
+        else:
+            mlh_pred_mean = 0.0
+            mlh_target_mean = 0.0
+
         metrics = {
             "loss/total": float(total_loss.detach().item()),
             "loss/policy": float(policy_loss.detach().item()),
             "loss/value": float(value_loss.detach().item()),
             "loss/value_q": float(value_q_loss.detach().item()),
+            "loss/mlh": float(mlh_loss.detach().item()),
             "acc/policy": policy_accuracy,
             "acc/value": float(value_accuracy.detach().item()),
             "acc/value_q": float(value_q_accuracy.detach().item()),
@@ -383,6 +412,9 @@ class Trainer:
             "buffer/frac_L_geq_0.8": frac_l_conf,
             "buffer/frac_D_geq_0.8": frac_d_conf,
             "buffer/frac_near_uniform": frac_uniform,
+            "buffer/mlh_mask_frac": mask_frac,
+            "mlh/pred_mean": mlh_pred_mean,
+            "mlh/target_mean": mlh_target_mean,
         }
         return metrics
 
@@ -475,8 +507,22 @@ class Trainer:
         # in the saved config dict, and PyTorch 2.6+ defaults to a strict
         # safe-globals list that rejects them.
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
+        # strict=False so a checkpoint from before the MLH head was added still
+        # loads — the new mlh_* params stay at their fresh init and warm up
+        # within a few hundred steps once the buffer has plies_remaining rows.
+        missing, unexpected = self.model.load_state_dict(ckpt["model"], strict=False)
+        if missing:
+            self.console.log(f"[resume] new params not in checkpoint (initialized fresh): {missing}")
+        if unexpected:
+            self.console.log(f"[resume] checkpoint has unused params: {unexpected}")
+        # Optimizer state is keyed by param-id, which depends on the param set.
+        # When the architecture grew (e.g. MLH head added), the saved state's
+        # param groups don't match the new optimizer; we fall back to a fresh
+        # optimizer rather than throwing.
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+        except (ValueError, KeyError) as exc:
+            self.console.log(f"[resume] optimizer state incompatible ({exc}); reinitialized")
         if "scaler" in ckpt:
             self.scaler.load_state_dict(ckpt["scaler"])
         self.step = int(ckpt.get("step", 0))
@@ -541,7 +587,7 @@ class Trainer:
         eval_model.eval()
         try:
             ckpt = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
-            eval_model.load_state_dict(ckpt["model"])
+            eval_model.load_state_dict(ckpt["model"], strict=False)
         except Exception as exc:
             self.console.log(f"[WARN] Failed to load checkpoint for evaluation: {exc}")
             return

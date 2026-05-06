@@ -53,7 +53,21 @@ struct TreeNode
     float virtual_loss{0.0F};
     int visit_count{0};
     float value_prior{0.0F};
+    // wdl: backed-up running average over visits (in this node's side-to-move
+    // perspective, with W↔L flips applied on each ply during backprop).
+    // Initialized at expansion to the NN's leaf prediction so the very first
+    // visit already has a meaningful triple.
     std::array<float, 3> wdl{{0.0F, 0.0F, 0.0F}};
+    // wdl_sum: sum (over visits) of leaf-WDL triples flipped to this node's
+    // perspective. Divide by visit_count for the running average.
+    std::array<float, 3> wdl_sum{{0.0F, 0.0F, 0.0F}};
+    // mlh_sum: sum (over visits) of leaf MLH values (tanh-saturated, in [0,1]).
+    // No sign flip — moves-left is symmetric across sides. Divide by
+    // visit_count for the running average.
+    float mlh_sum{0.0F};
+    // mlh value at this leaf (set on expansion from the NN). For terminal
+    // nodes this is 0 (game is over from here, zero plies remaining).
+    float leaf_mlh{0.0F};
     HistoryHandle history;
     std::vector<int> children;
     std::vector<chess::Move> child_moves;
@@ -94,6 +108,16 @@ namespace detail
 // sign at every ply. Exposed for unit tests; production code calls the same
 // logic from inside the MCTS runner.
 void backpropagate(SearchTree& tree, const std::vector<int>& path, float value);
+
+// Extended backprop: also propagate the leaf's WDL triple (with W↔L flip per
+// ply) and MLH scalar (no flip). Maintains node.wdl as the running average
+// over visits so that in-tree selection has a meaningful per-node WDL.
+void backpropagate_full(
+    SearchTree& tree,
+    const std::vector<int>& path,
+    float value,
+    std::array<float, 3> leaf_wdl,
+    float leaf_mlh);
 
 // Post-order WDL aggregation starting at `node_index`. Children's WDL is
 // flipped to the parent's perspective and visit-weighted-averaged. Terminal

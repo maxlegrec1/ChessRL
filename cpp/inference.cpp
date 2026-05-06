@@ -168,6 +168,10 @@ public:
             {
                 valueOutputName = name;
             }
+            else if (total == static_cast<size_t>(kSmallBatchSize) && mlhOutputName.empty())
+            {
+                mlhOutputName = name;
+            }
         }
 
         if (policyOutputName.empty() && !outputNames.empty())
@@ -192,6 +196,7 @@ public:
     std::string inputName;
     std::string policyOutputName;
     std::string valueOutputName;
+    std::string mlhOutputName; // optional: empty when engine has no MLH head
 };
 
 EngineContext& getEngineContext(const std::string& engine_path)
@@ -416,6 +421,17 @@ RawOutputs runInference(EngineContext& ctx, const std::vector<float>& input)
     DeviceBuffer inputDevice(volume(inputDims) * element_size(inputType));
     DeviceBuffer policyDevice(volume(policyDims) * element_size(policyType));
     DeviceBuffer valueDevice(volume(valueDims) * element_size(valueType));
+    // Bind MLH output (if present) so enqueueV3 doesn't fail; we don't read it
+    // back in this path — the large-batch route is for raw policy sampling,
+    // not MCTS.
+    std::unique_ptr<DeviceBuffer> mlhDevice;
+    nvinfer1::DataType mlhType = nvinfer1::DataType::kFLOAT;
+    if (!ctx.mlhOutputName.empty())
+    {
+        mlhType = engine.getTensorDataType(ctx.mlhOutputName.c_str());
+        const auto mlhDims = engine.getTensorShape(ctx.mlhOutputName.c_str());
+        mlhDevice = std::make_unique<DeviceBuffer>(volume(mlhDims) * element_size(mlhType));
+    }
     CudaStream stream;
 
     std::vector<__half> inputHalf;
@@ -455,6 +471,10 @@ RawOutputs runInference(EngineContext& ctx, const std::vector<float>& input)
         || !executionContext->setTensorAddress(ctx.valueOutputName.c_str(), valueDevice.data()))
     {
         throw std::runtime_error("Failed to set small-model tensor addresses.");
+    }
+    if (mlhDevice && !executionContext->setTensorAddress(ctx.mlhOutputName.c_str(), mlhDevice->data()))
+    {
+        throw std::runtime_error("Failed to set small-model mlh tensor address.");
     }
 
     if (!executionContext->enqueueV3(stream.get()))

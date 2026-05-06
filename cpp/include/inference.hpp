@@ -27,6 +27,7 @@ struct SmallPolicyValue
 {
     std::vector<float> policy_logits;
     std::array<float, 3> wdl;
+    float mlh{0.0F}; // moves-left head: tanh(plies_remaining / 25), in [0, 1]
 };
 
 SmallInferenceResult small_generate_moves(

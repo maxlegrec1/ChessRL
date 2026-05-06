@@ -246,23 +246,28 @@ private:
 
             if (node.terminal)
             {
-                float value = terminal_value(current_board).value_or(node.value_prior);
-                backpropagate(path, value);
+                const float value = terminal_value(current_board).value_or(node.value_prior);
+                const std::array<float, 3> leaf_wdl = wdl_from_terminal(value);
+                detail::backpropagate_full(tree_, path, value, leaf_wdl, /*leaf_mlh=*/0.0F);
                 return;
             }
 
             if (!node.expanded || node.children.empty())
             {
-                float value = evaluate_node(node_index, current_board);
-                backpropagate(path, value);
+                evaluate_node(node_index, current_board);
+                const TreeNode& evaluated = tree_.nodes[node_index];
+                detail::backpropagate_full(
+                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_mlh);
                 return;
             }
 
             const int child_index = select_child(node_index);
             if (child_index < 0)
             {
-                float value = evaluate_node(node_index, current_board);
-                backpropagate(path, value);
+                evaluate_node(node_index, current_board);
+                const TreeNode& evaluated = tree_.nodes[node_index];
+                detail::backpropagate_full(
+                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_mlh);
                 return;
             }
 
@@ -288,6 +293,16 @@ private:
         int best_child = -1;
         float best_score = -std::numeric_limits<float>::infinity();
 
+        // Q + U + ε * (1 - 2 * W_parent_pov) * mlh_avg
+        // - W_parent_pov is child's L (from child's POV), since flipping a
+        //   child's perspective into the parent's swaps W↔L.
+        // - mlh_avg is the in-tree backed-up moves-left, in [0, 1] (already
+        //   tanh-saturated at the leaves).
+        // - sign of (1 - 2W): when winning (W large), modifier penalizes high
+        //   MLH (prefer faster). When losing/drawing, modifier rewards high
+        //   MLH (prefer slower / drag it out).
+        constexpr float kMlhEpsilon = 0.05F;
+
         for (size_t i = 0; i < node.children.size(); ++i)
         {
             const int child_index = node.children[i];
@@ -296,7 +311,18 @@ private:
             const float child_mean = child.visit_count > 0 ? child.value_sum / static_cast<float>(child.visit_count) : 0.0F;
             const float q = -child_mean;
             const float u = options_.cpuct * prior * sqrt_visits / (1.0F + static_cast<float>(child.visit_count));
-            const float score = q + u;
+
+            float mlh_modifier = 0.0F;
+            if (child.visit_count > 0)
+            {
+                // child.wdl is in child's perspective; flip to parent's POV.
+                const float w_parent_pov = child.wdl[2];
+                const float inv_n = 1.0F / static_cast<float>(child.visit_count);
+                const float mlh_avg = child.mlh_sum * inv_n;
+                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * mlh_avg;
+            }
+
+            const float score = q + u + kMlhEpsilon * mlh_modifier;
             if (score > best_score)
             {
                 best_score = score;
@@ -305,11 +331,6 @@ private:
         }
 
         return best_child;
-    }
-
-    void backpropagate(const std::vector<int>& path, float value)
-    {
-        detail::backpropagate(tree_, path, value);
     }
 
     float evaluate_node(int node_index, const chess::Board& board_state)
@@ -324,8 +345,10 @@ private:
         if (auto terminal = terminal_value(board_state))
         {
             node.expanded = true;
+            node.terminal = true;
             node.value_prior = *terminal;
             node.wdl = wdl_from_terminal(*terminal);
+            node.leaf_mlh = 0.0F;
             return node.value_prior;
         }
 
@@ -364,6 +387,7 @@ private:
         // WDL is already in side-to-move perspective: [win, draw, loss]
         node.wdl = eval.wdl;
         node.value_prior = node.wdl[0] - node.wdl[2];
+        node.leaf_mlh = eval.mlh;
 
         // Phase B: Use passed board_state for computing priors
         std::vector<MovePrior> priors = compute_priors(board_state, eval);

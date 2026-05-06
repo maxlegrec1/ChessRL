@@ -53,6 +53,14 @@ class SmallModel(nn.Module):
         self.value_fc1_q = nn.Linear(8 * 8 * 8, 128)
         self.value_fc2_q = nn.Linear(128, 3)
 
+        # Moves-Left Head (MLH): predicts tanh(plies_remaining / 25), so output
+        # saturates near 1 for plies >= 50 and ≈ 0 at terminal positions. Used
+        # by C++ MCTS as a tiebreaker via Q + ε * (1 - 2W) * mlh.
+        self.mlh_conv = nn.Conv2d(64, 4, 1, bias=False)
+        self.mlh_bn = nn.BatchNorm2d(4)
+        self.mlh_fc1 = nn.Linear(4 * 8 * 8, 64)
+        self.mlh_fc2 = nn.Linear(64, 1)
+
     def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step = None):
         # inp is a list/tuple: [x, targets, ...] OR just x
         if isinstance(inp, (list, tuple)):
@@ -96,10 +104,20 @@ class SmallModel(nn.Module):
         v_q = self.value_fc1_q(v_q)
         v_q = F.relu(v_q)
         value_q_logits = self.value_fc2_q(v_q)
-        
+
+        # Moves-Left Head: sigmoid → [0, 1] to match the tanh(plies/25) target.
+        m = self.mlh_conv(x)
+        m = self.mlh_bn(m)
+        m = F.relu(m)
+        m = m.flatten(1)
+        m = self.mlh_fc1(m)
+        m = F.relu(m)
+        mlh_logit = self.mlh_fc2(m).squeeze(-1)
+        mlh = torch.sigmoid(mlh_logit)
+
         if return_all:
-            return policy_logits, value_logits, value_q_logits
-            
+            return policy_logits, value_logits, value_q_logits, mlh
+
         return policy_logits
 
     def get_move_from_fen_no_thinking(self, fen: str, T: float = 0.0, device: str = None, return_probs: bool = False, return_pre_probs: bool = False):
@@ -178,7 +196,7 @@ class SmallModel(nn.Module):
         
         self.eval()
         with torch.no_grad():
-            _, value_logits, _ = self(x, return_all=True)
+            _, value_logits, _, _ = self(x, return_all=True)
             value_probs = torch.softmax(value_logits, dim=-1)
             
         # Return WDL

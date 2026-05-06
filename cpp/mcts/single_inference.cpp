@@ -225,6 +225,7 @@ struct SmallRawOutputs
 {
     std::vector<float> policy;
     std::vector<float> wdl;
+    std::vector<float> mlh; // 1 element per batch row
 };
 
 class SmallEngineContext
@@ -279,6 +280,10 @@ public:
                 {
                     mValueOutputName = name;
                 }
+                else if (base == 1 && mMlhOutputName.empty())
+                {
+                    mMlhOutputName = name;
+                }
             }
         }
 
@@ -286,12 +291,16 @@ public:
         {
             throw std::runtime_error("Failed to determine small-model tensor names.");
         }
+        // mlh output is optional: an older engine without an MLH head still
+        // works (priors fall back to mlh=0, which neutralizes the modifier).
     }
 
     nvinfer1::ICudaEngine& engine() { return *mEngine; }
     const std::string& inputName() const { return mInputName; }
     const std::string& policyName() const { return mPolicyOutputName; }
     const std::string& valueName() const { return mValueOutputName; }
+    const std::string& mlhName() const { return mMlhOutputName; }
+    bool hasMlh() const { return !mMlhOutputName.empty(); }
 
 private:
     std::string mEnginePath;
@@ -301,6 +310,7 @@ private:
     std::string mInputName;
     std::string mPolicyOutputName;
     std::string mValueOutputName;
+    std::string mMlhOutputName;
 };
 
 SmallEngineContext& getSmallEngineContext(const std::string& engine_path)
@@ -416,6 +426,7 @@ SmallRawOutputs runSmallInference(
         = static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes;
     const size_t kPolicyElements = static_cast<size_t>(kSmallPolicySize);
     const size_t kValueElements = static_cast<size_t>(kSmallValueSize);
+    const size_t kMlhElements = 1;
 
     if (input.size() != kInputElements)
     {
@@ -439,10 +450,14 @@ SmallRawOutputs runSmallInference(
     const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
     const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
     const auto valueType = engine.getTensorDataType(ctx.valueName().c_str());
+    const bool hasMlh = ctx.hasMlh();
+    const auto mlhType = hasMlh ? engine.getTensorDataType(ctx.mlhName().c_str()) : nvinfer1::DataType::kFLOAT;
 
     DeviceBuffer inputDevice(kInputElements * element_size(inputType));
     DeviceBuffer policyDevice(kPolicyElements * element_size(policyType));
     DeviceBuffer valueDevice(kValueElements * element_size(valueType));
+    std::unique_ptr<DeviceBuffer> mlhDevice;
+    if (hasMlh) mlhDevice = std::make_unique<DeviceBuffer>(kMlhElements * element_size(mlhType));
     CudaStream stream;
 
     std::vector<__half> inputHalf;
@@ -480,6 +495,10 @@ SmallRawOutputs runSmallInference(
     {
         throw std::runtime_error("Failed to set small-model tensor addresses.");
     }
+    if (hasMlh && !exec->setTensorAddress(ctx.mlhName().c_str(), mlhDevice->data()))
+    {
+        throw std::runtime_error("Failed to set small-model mlh tensor address.");
+    }
 
     if (!exec->enqueueV3(stream.get()))
     {
@@ -489,9 +508,11 @@ SmallRawOutputs runSmallInference(
     SmallRawOutputs outputs;
     outputs.policy.resize(kPolicyElements);
     outputs.wdl.resize(kValueElements);
+    outputs.mlh.assign(kMlhElements, 0.0F);
 
     std::vector<__half> policyHalf;
     std::vector<__half> valueHalf;
+    std::vector<__half> mlhHalf;
 
     void* policyHost = nullptr;
     size_t policyBytes = 0;
@@ -541,6 +562,31 @@ SmallRawOutputs runSmallInference(
         throw std::runtime_error("cudaMemcpyAsync (small single value D2H) failed.");
     }
 
+    void* mlhHost = nullptr;
+    size_t mlhBytes = 0;
+    if (hasMlh)
+    {
+        if (mlhType == nvinfer1::DataType::kFLOAT)
+        {
+            mlhHost = outputs.mlh.data();
+            mlhBytes = outputs.mlh.size() * sizeof(float);
+        }
+        else if (mlhType == nvinfer1::DataType::kHALF)
+        {
+            mlhHalf.resize(outputs.mlh.size());
+            mlhHost = mlhHalf.data();
+            mlhBytes = mlhHalf.size() * sizeof(__half);
+        }
+        else
+        {
+            throw std::runtime_error("Unsupported small-model mlh tensor type.");
+        }
+        if (cudaMemcpyAsync(mlhHost, mlhDevice->data(), mlhBytes, cudaMemcpyDeviceToHost, stream.get()) != cudaSuccess)
+        {
+            throw std::runtime_error("cudaMemcpyAsync (small single mlh D2H) failed.");
+        }
+    }
+
     if (cudaStreamSynchronize(stream.get()) != cudaSuccess)
     {
         throw std::runtime_error("cudaStreamSynchronize (small single) failed.");
@@ -559,6 +605,14 @@ SmallRawOutputs runSmallInference(
         for (size_t i = 0; i < outputs.wdl.size(); ++i)
         {
             outputs.wdl[i] = __half2float(valueHalf[i]);
+        }
+    }
+
+    if (hasMlh && mlhType == nvinfer1::DataType::kHALF)
+    {
+        for (size_t i = 0; i < outputs.mlh.size(); ++i)
+        {
+            outputs.mlh[i] = __half2float(mlhHalf[i]);
         }
     }
 
@@ -591,6 +645,7 @@ SmallPolicyValue evaluateSmall(
     {
         result.wdl[static_cast<size_t>(i)] = raw.wdl[static_cast<size_t>(i)];
     }
+    result.mlh = raw.mlh.empty() ? 0.0F : raw.mlh[0];
     return result;
 }
 
@@ -707,12 +762,17 @@ struct SmallBatchRunner::Impl
             const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
             const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
             const auto valueType = engine.getTensorDataType(ctx.valueName().c_str());
+            const bool hasMlh = ctx.hasMlh();
+            const auto mlhType = hasMlh
+                ? engine.getTensorDataType(ctx.mlhName().c_str())
+                : nvinfer1::DataType::kFLOAT;
 
             const size_t actualCount = work.size();
             const size_t inputElements
                 = static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes;
             const size_t policyElements = static_cast<size_t>(kSmallPolicySize);
             const size_t valueElements = static_cast<size_t>(kSmallValueSize);
+            const size_t mlhElements = 1;
 
             nvinfer1::Dims inputDims = engine.getTensorShape(ctx.inputName().c_str());
             if (inputDims.nbDims <= 0)
@@ -738,7 +798,11 @@ struct SmallBatchRunner::Impl
             inputDevice_.ensure(engineBatch * inputElements * element_size(inputType));
             policyDevice_.ensure(engineBatch * policyElements * element_size(policyType));
             valueDevice_.ensure(engineBatch * valueElements * element_size(valueType));
-            
+            const size_t mlhBytes = hasMlh
+                ? engineBatch * mlhElements * element_size(mlhType)
+                : 0;
+            if (hasMlh) mlhDevice_.ensure(mlhBytes);
+
             // Step 2: Ensure pinned host buffers
             const size_t inputBytes = engineBatch * inputElements * element_size(inputType);
             const size_t policyBytes = engineBatch * policyElements * element_size(policyType);
@@ -746,6 +810,7 @@ struct SmallBatchRunner::Impl
             hostInputBuffer_.ensure(inputBytes);
             hostOutputPolicy_.ensure(policyBytes);
             hostOutputValue_.ensure(valueBytes);
+            if (hasMlh) hostOutputMlh_.ensure(mlhBytes);
 
             // Step 3: Input assembly - write directly into pinned buffer
             // Step C: Simplified copy loops - no padding needed since engineBatch == actualCount
@@ -786,14 +851,15 @@ struct SmallBatchRunner::Impl
             {
                 throw std::runtime_error("Failed to set small-model batch tensor addresses.");
             }
+            if (hasMlh && !exec->setTensorAddress(ctx.mlhName().c_str(), mlhDevice_.data()))
+            {
+                throw std::runtime_error("Failed to set small-model batch mlh tensor address.");
+            }
 
             if (!exec->enqueueV3(stream->get()))
             {
                 throw std::runtime_error("Small-model batched TensorRT enqueue failed.");
             }
-
-            const size_t totalPolicy = engineBatch * policyElements;
-            const size_t totalValue = engineBatch * valueElements;
 
             // Step 3: D2H transfer - copy directly into pinned buffers
             if (cudaMemcpyAsync(hostOutputPolicy_.data(), policyDevice_.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
@@ -803,6 +869,10 @@ struct SmallBatchRunner::Impl
             if (cudaMemcpyAsync(hostOutputValue_.data(), valueDevice_.data(), valueBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
+            }
+            if (hasMlh && cudaMemcpyAsync(hostOutputMlh_.data(), mlhDevice_.data(), mlhBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            {
+                throw std::runtime_error("cudaMemcpyAsync (small batch mlh D2H) failed.");
             }
 
             if (cudaStreamSynchronize(stream->get()) != cudaSuccess)
@@ -826,6 +896,8 @@ struct SmallBatchRunner::Impl
             __half* policyHalf = static_cast<__half*>(hostOutputPolicy_.data());
             float* valueFloat = static_cast<float*>(hostOutputValue_.data());
             __half* valueHalf = static_cast<__half*>(hostOutputValue_.data());
+            float* mlhFloat = hasMlh ? static_cast<float*>(hostOutputMlh_.data()) : nullptr;
+            __half* mlhHalf = hasMlh ? static_cast<__half*>(hostOutputMlh_.data()) : nullptr;
 
             for (size_t i = 0; i < actualCount; ++i)
             {
@@ -873,7 +945,28 @@ struct SmallBatchRunner::Impl
                 {
                     throw std::runtime_error("Unsupported small-model batch value tensor type.");
                 }
-                
+
+                // Read MLH (single scalar per row). When the engine has no
+                // mlh head, leave the default 0 — the modifier collapses to
+                // zero so old engines see the same selection behavior as
+                // before this feature shipped.
+                if (hasMlh)
+                {
+                    const size_t mlhOffset = i * mlhElements;
+                    if (mlhType == nvinfer1::DataType::kFLOAT)
+                    {
+                        result.mlh = mlhFloat[mlhOffset];
+                    }
+                    else if (mlhType == nvinfer1::DataType::kHALF)
+                    {
+                        result.mlh = __half2float(mlhHalf[mlhOffset]);
+                    }
+                    else
+                    {
+                        throw std::runtime_error("Unsupported small-model batch mlh tensor type.");
+                    }
+                }
+
                 work[i].promise->set_value(std::move(result));
             }
         }
@@ -943,9 +1036,11 @@ struct SmallBatchRunner::Impl
     ResizableDeviceBuffer inputDevice_;
     ResizableDeviceBuffer policyDevice_;
     ResizableDeviceBuffer valueDevice_;
+    ResizableDeviceBuffer mlhDevice_;
     PinnedBuffer hostInputBuffer_;
     PinnedBuffer hostOutputPolicy_;
     PinnedBuffer hostOutputValue_;
+    PinnedBuffer hostOutputMlh_;
     mutable std::mutex mutex;
     std::condition_variable cv;
     bool stop_worker_{false};

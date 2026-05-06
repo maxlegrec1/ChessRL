@@ -226,7 +226,9 @@ def load_model(checkpoint_path: Path, device: str) -> SmallModel:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     model = SmallModel().to(device).eval()
-    model.load_state_dict(state)
+    # strict=False so pre-MLH checkpoints still load — the new mlh_* params
+    # stay at their fresh init.
+    model.load_state_dict(state, strict=False)
     return model
 
 
@@ -237,7 +239,7 @@ def run_inference(
     planes = np.stack([fen_to_tensor(f) for f in fens]).astype(np.float32)
     x = torch.from_numpy(planes).to(device)
     with torch.no_grad():
-        policy_logits, value_logits, value_q_logits = model(x, return_all=True)
+        policy_logits, value_logits, value_q_logits, _mlh = model(x, return_all=True)
     return (
         policy_logits.float().cpu().numpy(),
         torch.softmax(value_logits.float(), dim=-1).cpu().numpy(),
