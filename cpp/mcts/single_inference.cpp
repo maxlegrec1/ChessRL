@@ -750,6 +750,30 @@ struct SmallBatchRunner::Impl
         std::shared_ptr<std::promise<SmallPolicyValue>> promise;
     };
 
+    // Per-worker inference state. Each worker owns its own IExecutionContext +
+    // CUDA stream + device/host buffers so they can pipeline: while worker N is
+    // busy on the GPU, worker N+1 can be prepping its next batch in parallel.
+    // The MCTS-side queue (queue/mutex/cv) is shared across workers, so each
+    // worker pops a sub-batch independently and serves it without blocking
+    // others. TensorRT explicitly supports concurrent execution of multiple
+    // IExecutionContext instances on the same engine.
+    struct Worker
+    {
+        std::thread thread;
+        std::unique_ptr<nvinfer1::IExecutionContext> exec;
+        std::unique_ptr<CudaStream> stream;
+        ResizableDeviceBuffer inputDevice;
+        ResizableDeviceBuffer policyDevice;
+        ResizableDeviceBuffer valueDevice;
+        ResizableDeviceBuffer mlhDevice;
+        ResizableDeviceBuffer mlhQDevice;
+        PinnedBuffer hostInput;
+        PinnedBuffer hostPolicy;
+        PinnedBuffer hostValue;
+        PinnedBuffer hostMlh;
+        PinnedBuffer hostMlhQ;
+    };
+
     explicit Impl(SmallBatchConfig cfg)
         : config(std::move(cfg))
         , ctx(getSmallEngineContext(config.engine_path))
@@ -759,7 +783,32 @@ struct SmallBatchRunner::Impl
         {
             throw std::invalid_argument("SmallBatchRunner requires positive max_batch_size");
         }
-        worker = std::thread([this]() { worker_loop(); });
+
+        // Number of concurrent inference workers. Override via
+        // CHESSRL_INFER_WORKERS. Each adds an IExecutionContext + CUDA stream
+        // + persistent device/host buffers; while worker N is on the GPU,
+        // worker N+1 is prepping H2D for its batch.
+        //   measured (H200, threads=256, sims=800, b=1024): peak at W=4
+        //   (~262 moves/s, vs ~117 with W=1, threads=64). W=6 starts to
+        //   regress; W=8 cliffs hard from queue + stream contention.
+        // On smaller GPUs (e.g. a 4090) W=2 is likely the right default —
+        // override the env var if so.
+        int n = 4;
+        if (const char* env = std::getenv("CHESSRL_INFER_WORKERS"))
+        {
+            const int parsed = std::atoi(env);
+            if (parsed > 0) n = parsed;
+        }
+        workers_.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i)
+        {
+            workers_.emplace_back(std::make_unique<Worker>());
+        }
+        for (auto& w : workers_)
+        {
+            Worker* raw = w.get();
+            raw->thread = std::thread([this, raw]() { worker_loop(*raw); });
+        }
     }
 
     ~Impl()
@@ -769,9 +818,12 @@ struct SmallBatchRunner::Impl
             stop_worker_ = true;
         }
         cv.notify_all();
-        if (worker.joinable())
+        for (auto& w : workers_)
         {
-            worker.join();
+            if (w && w->thread.joinable())
+            {
+                w->thread.join();
+            }
         }
     }
 
@@ -793,7 +845,7 @@ struct SmallBatchRunner::Impl
         return BatchTicket<SmallPolicyValue>(std::move(future));
     }
 
-    void process()
+    void process(Worker& w)
     {
         std::vector<SmallPending> work;
         work.reserve(static_cast<size_t>(config.max_batch_size));
@@ -818,17 +870,17 @@ struct SmallBatchRunner::Impl
         try
         {
             auto start_time = std::chrono::steady_clock::now();
-            if (!exec)
+            if (!w.exec)
             {
-                exec.reset(ctx.engine().createExecutionContext());
-                if (!exec)
+                w.exec.reset(ctx.engine().createExecutionContext());
+                if (!w.exec)
                 {
                     throw std::runtime_error("Failed to create small-model batch execution context.");
                 }
             }
-            if (!stream)
+            if (!w.stream)
             {
-                stream = std::make_unique<CudaStream>();
+                w.stream = std::make_unique<CudaStream>();
             }
 
             auto& engine = ctx.engine();
@@ -866,38 +918,38 @@ struct SmallBatchRunner::Impl
             // Step B: Remove padding logic - use exact batch size
             const size_t engineBatch = actualCount;
             inputDims.d[0] = static_cast<int>(engineBatch);
-            if (!exec->setInputShape(ctx.inputName().c_str(), inputDims))
+            if (!w.exec->setInputShape(ctx.inputName().c_str(), inputDims))
             {
                 throw std::runtime_error("Failed to set small-model batch input shape.");
             }
 
-            // Step 2: Use persistent buffers
-            inputDevice_.ensure(engineBatch * inputElements * element_size(inputType));
-            policyDevice_.ensure(engineBatch * policyElements * element_size(policyType));
-            valueDevice_.ensure(engineBatch * valueElements * element_size(valueType));
+            // Step 2: Use persistent buffers (per-worker)
+            w.inputDevice.ensure(engineBatch * inputElements * element_size(inputType));
+            w.policyDevice.ensure(engineBatch * policyElements * element_size(policyType));
+            w.valueDevice.ensure(engineBatch * valueElements * element_size(valueType));
             const size_t mlhBytes = hasMlh
                 ? engineBatch * mlhElements * element_size(mlhType)
                 : 0;
             const size_t mlhQBytes = hasMlhQ
                 ? engineBatch * mlhElements * element_size(mlhQType)
                 : 0;
-            if (hasMlh) mlhDevice_.ensure(mlhBytes);
-            if (hasMlhQ) mlhQDevice_.ensure(mlhQBytes);
+            if (hasMlh) w.mlhDevice.ensure(mlhBytes);
+            if (hasMlhQ) w.mlhQDevice.ensure(mlhQBytes);
 
-            // Step 2: Ensure pinned host buffers
+            // Step 2: Ensure pinned host buffers (per-worker)
             const size_t inputBytes = engineBatch * inputElements * element_size(inputType);
             const size_t policyBytes = engineBatch * policyElements * element_size(policyType);
             const size_t valueBytes = engineBatch * valueElements * element_size(valueType);
-            hostInputBuffer_.ensure(inputBytes);
-            hostOutputPolicy_.ensure(policyBytes);
-            hostOutputValue_.ensure(valueBytes);
-            if (hasMlh) hostOutputMlh_.ensure(mlhBytes);
-            if (hasMlhQ) hostOutputMlhQ_.ensure(mlhQBytes);
+            w.hostInput.ensure(inputBytes);
+            w.hostPolicy.ensure(policyBytes);
+            w.hostValue.ensure(valueBytes);
+            if (hasMlh) w.hostMlh.ensure(mlhBytes);
+            if (hasMlhQ) w.hostMlhQ.ensure(mlhQBytes);
 
             // Step 3: Input assembly - write directly into pinned buffer
             // Step C: Simplified copy loops - no padding needed since engineBatch == actualCount
-            float* hostInputFloat = static_cast<float*>(hostInputBuffer_.data());
-            __half* hostInputHalf = static_cast<__half*>(hostInputBuffer_.data());
+            float* hostInputFloat = static_cast<float*>(w.hostInput.data());
+            __half* hostInputHalf = static_cast<__half*>(w.hostInput.data());
             
             for (size_t i = 0; i < actualCount; ++i)
             {
@@ -922,50 +974,50 @@ struct SmallBatchRunner::Impl
                 }
             }
             
-            if (cudaMemcpyAsync(inputDevice_.data(), hostInputBuffer_.data(), inputBytes, cudaMemcpyHostToDevice, stream->get()) != cudaSuccess)
+            if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(), inputBytes, cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
             }
 
-            if (!exec->setTensorAddress(ctx.inputName().c_str(), inputDevice_.data())
-                || !exec->setTensorAddress(ctx.policyName().c_str(), policyDevice_.data())
-                || !exec->setTensorAddress(ctx.valueName().c_str(), valueDevice_.data()))
+            if (!w.exec->setTensorAddress(ctx.inputName().c_str(), w.inputDevice.data())
+                || !w.exec->setTensorAddress(ctx.policyName().c_str(), w.policyDevice.data())
+                || !w.exec->setTensorAddress(ctx.valueName().c_str(), w.valueDevice.data()))
             {
                 throw std::runtime_error("Failed to set small-model batch tensor addresses.");
             }
-            if (hasMlh && !exec->setTensorAddress(ctx.mlhName().c_str(), mlhDevice_.data()))
+            if (hasMlh && !w.exec->setTensorAddress(ctx.mlhName().c_str(), w.mlhDevice.data()))
             {
                 throw std::runtime_error("Failed to set small-model batch mlh tensor address.");
             }
-            if (hasMlhQ && !exec->setTensorAddress(ctx.mlhQName().c_str(), mlhQDevice_.data()))
+            if (hasMlhQ && !w.exec->setTensorAddress(ctx.mlhQName().c_str(), w.mlhQDevice.data()))
             {
                 throw std::runtime_error("Failed to set small-model batch mlh_q tensor address.");
             }
 
-            if (!exec->enqueueV3(stream->get()))
+            if (!w.exec->enqueueV3(w.stream->get()))
             {
                 throw std::runtime_error("Small-model batched TensorRT enqueue failed.");
             }
 
             // Step 3: D2H transfer - copy directly into pinned buffers
-            if (cudaMemcpyAsync(hostOutputPolicy_.data(), policyDevice_.data(), policyBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            if (cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch policy D2H) failed.");
             }
-            if (cudaMemcpyAsync(hostOutputValue_.data(), valueDevice_.data(), valueBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            if (cudaMemcpyAsync(w.hostValue.data(), w.valueDevice.data(), valueBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
             }
-            if (hasMlh && cudaMemcpyAsync(hostOutputMlh_.data(), mlhDevice_.data(), mlhBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            if (hasMlh && cudaMemcpyAsync(w.hostMlh.data(), w.mlhDevice.data(), mlhBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch mlh D2H) failed.");
             }
-            if (hasMlhQ && cudaMemcpyAsync(hostOutputMlhQ_.data(), mlhQDevice_.data(), mlhQBytes, cudaMemcpyDeviceToHost, stream->get()) != cudaSuccess)
+            if (hasMlhQ && cudaMemcpyAsync(w.hostMlhQ.data(), w.mlhQDevice.data(), mlhQBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaMemcpyAsync (small batch mlh_q D2H) failed.");
             }
 
-            if (cudaStreamSynchronize(stream->get()) != cudaSuccess)
+            if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
             {
                 throw std::runtime_error("cudaStreamSynchronize (small batch) failed.");
             }
@@ -982,14 +1034,14 @@ struct SmallBatchRunner::Impl
             }
 
             // Step 3: Distribution - read directly from pinned buffers
-            float* policyFloat = static_cast<float*>(hostOutputPolicy_.data());
-            __half* policyHalf = static_cast<__half*>(hostOutputPolicy_.data());
-            float* valueFloat = static_cast<float*>(hostOutputValue_.data());
-            __half* valueHalf = static_cast<__half*>(hostOutputValue_.data());
-            float* mlhFloat = hasMlh ? static_cast<float*>(hostOutputMlh_.data()) : nullptr;
-            __half* mlhHalf = hasMlh ? static_cast<__half*>(hostOutputMlh_.data()) : nullptr;
-            float* mlhQFloat = hasMlhQ ? static_cast<float*>(hostOutputMlhQ_.data()) : nullptr;
-            __half* mlhQHalf = hasMlhQ ? static_cast<__half*>(hostOutputMlhQ_.data()) : nullptr;
+            float* policyFloat = static_cast<float*>(w.hostPolicy.data());
+            __half* policyHalf = static_cast<__half*>(w.hostPolicy.data());
+            float* valueFloat = static_cast<float*>(w.hostValue.data());
+            __half* valueHalf = static_cast<__half*>(w.hostValue.data());
+            float* mlhFloat = hasMlh ? static_cast<float*>(w.hostMlh.data()) : nullptr;
+            __half* mlhHalf = hasMlh ? static_cast<__half*>(w.hostMlh.data()) : nullptr;
+            float* mlhQFloat = hasMlhQ ? static_cast<float*>(w.hostMlhQ.data()) : nullptr;
+            __half* mlhQHalf = hasMlhQ ? static_cast<__half*>(w.hostMlhQ.data()) : nullptr;
 
             for (size_t i = 0; i < actualCount; ++i)
             {
@@ -1098,36 +1150,46 @@ struct SmallBatchRunner::Impl
         return queue.size();
     }
 
-    void worker_loop()
+    void notify_all()
+    {
+        cv.notify_all();
+    }
+
+    void worker_loop(Worker& w)
     {
         while (true)
         {
             std::unique_lock<std::mutex> lock(mutex);
-            
-            // Fix A: Two-stage wait strategy to prevent busy-wait
-            // Stage 1: Idle Wait - Sleep indefinitely until we have ANY work or stop signal
+
+            // Stage 1: Idle wait - sleep until queue has work or we're stopping.
             cv.wait(lock, [this]() { return stop_worker_ || !queue.empty(); });
-            
+
             if (stop_worker_ && queue.empty())
             {
                 break;
             }
-            
-            // Stage 2: Batching Wait - If we have work but haven't filled the batch,
-            // wait a tiny bit more to accumulate efficient batches (latency vs. throughput tradeoff)
+
+            // Stage 2: Batching wait - if the queue is below the flush
+            // threshold, give it a brief window to fill so we get larger,
+            // GPU-efficient batches. With multiple workers, peers may also be
+            // waiting on this same queue; once one of them takes a batch the
+            // rest re-evaluate. Workers that are actively in process() (lock
+            // released) are not counted here, which is fine — having one
+            // worker take a small batch while another waits a bit longer for
+            // a bigger one is exactly the desired pipelining behavior.
             if (queue.size() < flush_threshold_)
             {
-                cv.wait_for(lock, flush_timeout_, [this]() { 
-                    return stop_worker_ || queue.size() >= flush_threshold_; 
+                cv.wait_for(lock, flush_timeout_, [this]() {
+                    return stop_worker_ || queue.size() >= flush_threshold_;
                 });
             }
-            
-            // Stage 3: Process - Unlock before calling process() since it locks internally
+
+            // Stage 3: Process - unlock before calling process() since it locks internally.
             lock.unlock();
-            
+
             try
             {
-                process();
+                process(w);
             }
             catch (...)
             {
@@ -1145,24 +1207,13 @@ struct SmallBatchRunner::Impl
     SmallBatchConfig config;
     SmallEngineContext& ctx;
     size_t flush_threshold_{0};
-    std::unique_ptr<nvinfer1::IExecutionContext> exec;
-    std::unique_ptr<CudaStream> stream;
-    // Step 2: Persistent buffers - moved from process() to avoid allocation overhead
-    ResizableDeviceBuffer inputDevice_;
-    ResizableDeviceBuffer policyDevice_;
-    ResizableDeviceBuffer valueDevice_;
-    ResizableDeviceBuffer mlhDevice_;
-    ResizableDeviceBuffer mlhQDevice_;
-    PinnedBuffer hostInputBuffer_;
-    PinnedBuffer hostOutputPolicy_;
-    PinnedBuffer hostOutputValue_;
-    PinnedBuffer hostOutputMlh_;
-    PinnedBuffer hostOutputMlhQ_;
+    // Per-worker IExecutionContext + CUDA stream + buffers. See Worker struct.
+    // Stable storage via unique_ptr so worker threads can hold raw references.
+    std::vector<std::unique_ptr<Worker>> workers_;
     mutable std::mutex mutex;
     std::condition_variable cv;
     bool stop_worker_{false};
     std::deque<SmallPending> queue;
-    std::thread worker;
     // Smaller flush timeout = less GPU idle when the queue is partially filled.
     // 100us is well under typical batch inference latency for the 1.2M-param model
     // at any reasonable batch size, so this is mostly free latency reclaimed.
@@ -1214,7 +1265,11 @@ SmallBatchRunner::Ticket SmallBatchRunner::enqueue(SmallEncodedPosition position
 
 void SmallBatchRunner::process_pending()
 {
-    impl_->process();
+    // Workers are always running; nudge any that may be sleeping to drain
+    // whatever's in the queue. Kept as a no-arg signal for API stability;
+    // inference itself is dispatched by the worker threads on their own
+    // streams/contexts.
+    impl_->notify_all();
 }
 
 size_t SmallBatchRunner::pending() const

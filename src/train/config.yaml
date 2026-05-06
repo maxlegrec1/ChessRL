@@ -33,11 +33,14 @@ data:
 
 selfplay:
   boards: 1024
-  # MCTS worker threads (drives effective inference batch size).
-  # Each thread blocks on futures most of the time so 16x oversubscription
-  # is fine; 256+ on an 8-core CPU has been measured to cause scheduler
-  # thrash. 0 = legacy hardcoded 256.
-  threads: 64
+  # MCTS worker threads. Each thread blocks on inference futures most of
+  # the time, so heavy oversubscription is fine; the practical cap is the
+  # CPU count (256-core box → 256 is the sweet spot). Combine with the
+  # multi-worker inference runner (CHESSRL_INFER_WORKERS) for bigger
+  # batches across multiple CUDA streams. Measured peak on this rig:
+  # threads=256 + W=4 → ~262 moves/s (vs 117 at threads=64, W=1).
+  # 0 = legacy hardcoded 256.
+  threads: 256
   # 0 disables the TT entirely. Profile measured ~1.5% hit rate during
   # self-play (with random-opening plies), making the per-leaf lock+hash
   # overhead net-negative. Re-enable (e.g. 4096) only if hit rate climbs.
