@@ -2,7 +2,10 @@
 #include <pybind11/stl.h>
 #include <algorithm>
 
+#include "chess-library/include/chess.hpp"
 #include "inference.hpp"
+#include "mcts/common.hpp"
+#include "mcts/single_inference.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
 #include "selfplay.hpp"
@@ -43,6 +46,37 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_property_readonly("moves", [](const chessrl::SmallInferenceResult& self) { return self.moves; })
         .def_property_readonly("wdl", [](const chessrl::SmallInferenceResult& self) { return self.wdl; })
         .def_property_readonly("timings", [](const chessrl::SmallInferenceResult& self) { return self.timings; });
+
+    // Encoder parity hook: returns the C++-side input plane vector for a
+    // (FEN, history) pair so the Python parity test can bit-compare it
+    // against fen_encoder.fen_to_tensor. Pure encoding; no NN call.
+    m.def(
+        "encode_position_with_history",
+        [](const std::string& fen, const std::vector<std::string>& moves) {
+            // Build the root board from `fen` and replay `moves` on top.
+            const std::string starting_fen = fen.empty()
+                ? std::string(chess::constants::STARTPOS)
+                : fen;
+            chess::Board board(starting_fen);
+            for (const auto& mv_uci : moves)
+            {
+                chess::Move mv = chess::uci::uciToMove(board, mv_uci);
+                if (mv == chess::Move::NO_MOVE)
+                {
+                    throw std::runtime_error(
+                        "encode_position_with_history: failed to parse move " + mv_uci);
+                }
+                board.makeMove(mv);
+            }
+            // Build the 8-board history stack the same way the runtime does.
+            chessrl::mcts::HistoryStack stack =
+                chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
+            auto encoded = chessrl::mcts::single::encode_small_position(board, stack);
+            return encoded.features;
+        },
+        py::arg("fen"),
+        py::arg("moves"),
+        "Return the C++ encoder's 8x8x111 input plane vector for a FEN + UCI history.");
 
     m.def(
         "small_generate_moves",
