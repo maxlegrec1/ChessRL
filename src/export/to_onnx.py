@@ -6,6 +6,7 @@ from pathlib import Path
 import onnx
 import torch
 
+from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.small_model import SmallModel
 
 
@@ -52,7 +53,7 @@ def export_model(args: argparse.Namespace) -> None:
     model = ExportWrapper(base_model).to(device)
     model.eval()
 
-    dummy_input = torch.randn(args.batch, 8, 8, 19, device=device, dtype=torch.float32)
+    dummy_input = torch.randn(args.batch, 8, 8, INPUT_PLANES, device=device, dtype=torch.float32)
     onnx_path = args.onnx_path
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
 

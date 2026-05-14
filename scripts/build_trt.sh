@@ -32,10 +32,10 @@ trtexec \
   --onnx="$ONNX_PATH" \
   --saveEngine="$TRT_PATH" \
   --fp16 \
-  --minShapes=input:1x8x8x19 \
-  --optShapes=input:256x8x8x19 \
-  --maxShapes=input:1024x8x8x19 \
-  --shapes=input:256x8x8x19 \
+  --minShapes=input:1x8x8x111 \
+  --optShapes=input:256x8x8x111 \
+  --maxShapes=input:1024x8x8x111 \
+  --shapes=input:256x8x8x111 \
 
 TRT_ABS="$(realpath "$TRT_PATH")"
 ITER_FILE_PATH="$ITERATION_FILE"
