@@ -13,10 +13,16 @@
 #include "mcts/common.hpp"
 
 using chessrl::SmallPolicyValue;
+using chessrl::mcts::HistoryStack;
 using chessrl::mcts::MctsOptions;
+using chessrl::mcts::PiecePlanes;
 using chessrl::mcts::SearchInput;
 using chessrl::mcts::SearchTree;
 using chessrl::mcts::TranspositionTable;
+using chessrl::mcts::kHistoryDepth;
+using chessrl::mcts::snapshot_piece_planes;
+using chessrl::mcts::history_stack_push;
+using chessrl::mcts::build_root_history_stack;
 
 // -----------------------------------------------------------------------------
 // CLI / history parsing
@@ -404,4 +410,96 @@ TEST_CASE("detail::refine_wdl_node leaves unvisited subtrees alone")
     CHECK(refined[0] == doctest::Approx(0.4F));
     CHECK(refined[1] == doctest::Approx(0.3F));
     CHECK(refined[2] == doctest::Approx(0.3F));
+}
+
+// -----------------------------------------------------------------------------
+// AlphaZero history stack
+// -----------------------------------------------------------------------------
+
+TEST_CASE("snapshot_piece_planes mirrors chess::Board bitboards in PNBRQK order")
+{
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    PiecePlanes snap = snapshot_piece_planes(startpos);
+    CHECK(snap.valid);
+    // White pawns: rank 2 = bits 8..15 = 0xFF00.
+    CHECK(snap.bitboards[0] == 0x000000000000FF00ULL);
+    // White king: e1 (square 4) = bit 4.
+    CHECK(snap.bitboards[5] == (1ULL << 4));
+    // Black pawns: rank 7 = bits 48..55 = 0x00FF000000000000.
+    CHECK(snap.bitboards[6] == 0x00FF000000000000ULL);
+    // Black king: e8 (square 60).
+    CHECK(snap.bitboards[11] == (1ULL << 60));
+}
+
+TEST_CASE("history_stack_push rotates and drops the oldest slot")
+{
+    HistoryStack stack{};
+    for (int i = 0; i < kHistoryDepth + 3; ++i)
+    {
+        PiecePlanes snap;
+        snap.valid = true;
+        snap.bitboards[0] = static_cast<std::uint64_t>(i);
+        history_stack_push(stack, snap);
+        // Newest is always at slot 0.
+        CHECK(stack[0].bitboards[0] == static_cast<std::uint64_t>(i));
+    }
+    // After kHistoryDepth+3 pushes, slot 0 = last push, slot 7 = push (i = total-8).
+    // Total pushes = kHistoryDepth + 3 = 11; slot 0 = 10; slot 7 = 11 - 8 = 3.
+    CHECK(stack[0].bitboards[0] == 10ULL);
+    CHECK(stack[kHistoryDepth - 1].bitboards[0] == 3ULL);
+}
+
+TEST_CASE("build_root_history_stack populates slots 0 and 1 after one move")
+{
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    chess::Board after_e4 = startpos;
+    chess::Move e4 = chess::uci::uciToMove(after_e4, "e2e4");
+    after_e4.makeMove(e4);
+
+    HistoryStack stack = build_root_history_stack(
+        std::string(chess::constants::STARTPOS),
+        {"e2e4"},
+        after_e4);
+
+    CHECK(stack[0].valid);
+    CHECK(stack[1].valid);
+    // Slot 0 = position AFTER e4: white pawn on e4 (bit 28).
+    CHECK((stack[0].bitboards[0] & (1ULL << 28)) != 0ULL);
+    // Slot 0 should NOT have the pawn on e2 anymore.
+    CHECK((stack[0].bitboards[0] & (1ULL << 12)) == 0ULL);
+    // Slot 1 = startpos: pawn at e2 (bit 12), no pawn at e4.
+    CHECK((stack[1].bitboards[0] & (1ULL << 12)) != 0ULL);
+    CHECK((stack[1].bitboards[0] & (1ULL << 28)) == 0ULL);
+    // Slot 2..7 must be empty.
+    for (int s = 2; s < kHistoryDepth; ++s)
+    {
+        CHECK_FALSE(stack[s].valid);
+    }
+}
+
+TEST_CASE("build_root_history_stack: empty history yields only slot 0")
+{
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    HistoryStack stack = build_root_history_stack(
+        std::string(chess::constants::STARTPOS), {}, startpos);
+    CHECK(stack[0].valid);
+    for (int s = 1; s < kHistoryDepth; ++s)
+    {
+        CHECK_FALSE(stack[s].valid);
+    }
+}
+
+TEST_CASE("build_root_history_stack: knight dance flags current repetition")
+{
+    // Nf3 Nf6 Ng1 Ng8 = startpos repeats.
+    std::vector<std::string> moves{"g1f3", "g8f6", "f3g1", "f6g8"};
+    chess::Board board{std::string{chess::constants::STARTPOS}};
+    for (const auto& m : moves)
+    {
+        chess::Move mv = chess::uci::uciToMove(board, m);
+        board.makeMove(mv);
+    }
+    HistoryStack stack = build_root_history_stack(
+        std::string(chess::constants::STARTPOS), moves, board);
+    CHECK(stack[0].repetition);  // current position is a repeat.
 }

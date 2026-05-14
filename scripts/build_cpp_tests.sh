@@ -26,14 +26,23 @@ INCLUDES=(
     "-I$CPP"
     "-I$CPP/include"
     "-I$CPP/chess-library/include"
-    "-I$TENSORRT_ROOT/include"
     "-I$CUDA_ROOT/include"
+    # System (apt) fallback for TensorRT — matches cpp/setup.py's logic so the
+    # build works on machines without the tarball layout under /usr/local.
+    "-I/usr/include/x86_64-linux-gnu"
+    "-I/usr/include"
 )
+if [ -f "$TENSORRT_ROOT/include/NvInfer.h" ]; then
+    INCLUDES+=("-I$TENSORRT_ROOT/include")
+fi
 
 LIB_DIRS=(
-    "-L$TENSORRT_ROOT/lib"
     "-L$CUDA_ROOT/lib64"
+    "-L/usr/lib/x86_64-linux-gnu"
 )
+if [ -d "$TENSORRT_ROOT/lib" ]; then
+    LIB_DIRS+=("-L$TENSORRT_ROOT/lib")
+fi
 
 LIBS=(-lnvinfer -lcudart -lpthread)
 
