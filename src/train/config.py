@@ -70,6 +70,17 @@ class SelfPlayConfig:
 
 
 @dataclass
+class LossWeightsConfig:
+    """Per-head weights in the trainer's total loss. Defaults preserve the
+    original hardcoded recipe (0.1 * policy + value + value_q + 0.05 * mlh*)."""
+    policy: float = 0.1
+    value: float = 1.0
+    value_q: float = 1.0
+    mlh: float = 0.05
+    mlh_q: float = 0.05
+
+
+@dataclass
 class TrainingConfig:
     device: str = "cuda"
     batch_size: int = 256
@@ -82,6 +93,7 @@ class TrainingConfig:
     wandb: WandbConfig = field(default_factory=WandbConfig)
     data: DataConfig = field(default_factory=DataConfig)
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
+    loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
     amp_dtype: str = "float16"
     resume_path: Optional[Path] = None
     run_name: Optional[str] = None

@@ -364,12 +364,13 @@ class Trainer:
                 (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
             )
 
+            lw = self.config.loss_weights
             total_loss = (
-                0.1 * policy_loss
-                + value_q_loss
-                + value_loss
-                + 0.05 * mlh_loss
-                + 0.05 * mlh_q_loss
+                lw.policy * policy_loss
+                + lw.value_q * value_q_loss
+                + lw.value * value_loss
+                + lw.mlh * mlh_loss
+                + lw.mlh_q * mlh_q_loss
             )
 
         self.scaler.scale(total_loss).backward()
@@ -407,6 +408,13 @@ class Trainer:
         frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
         frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
 
+        # Agreement between the two value targets — flagged because the buffer
+        # audit showed only ~67% agreement on a mature buffer (and ~18% on
+        # eventual-draw positions). Low agreement = the two value losses pull
+        # in opposite directions on a chunk of every batch.
+        agreement_mask = (value_labels == value_q_labels).float()
+        wdl_agreement = float(agreement_mask.mean().detach().item())
+
         # MLH diagnostics: per-head mask coverage and (pred, target) means
         # taken over the masked rows. Diagnostics report values in raw plies
         # (multiply the predicted/target /25 fields by 25) for readability.
@@ -422,6 +430,35 @@ class Trainer:
         mlh_target_mean = _masked_mean(target_mlh, mlh_mask)   * 25.0
         mlh_q_pred_mean   = _masked_mean(mlh_q_pred,   mlh_q_mask) * 25.0
         mlh_q_target_mean = _masked_mean(target_mlh_q, mlh_q_mask) * 25.0
+
+        # Agreement between the two MLH targets, computed only on rows where
+        # both masks are present. Two views:
+        #   - mean |target_mlh - target_mlh_q| in plies (concrete units)
+        #   - Pearson correlation (dimensionless, robust to mean drift)
+        # Useful because the audit showed MCTS-backed-up plies (mlh_q) and raw
+        # game-end plies (mlh) can disagree heavily on early-game positions.
+        both_mask = (mlh_mask * mlh_q_mask).float()
+        denom = both_mask.sum().detach()
+        if denom.item() > 0.0:
+            diff_plies = (target_mlh - target_mlh_q).abs() * 25.0
+            mlh_target_abs_diff_plies = float(
+                (diff_plies * both_mask).sum().detach().item() / denom.item()
+            )
+            # Masked Pearson correlation.
+            a = (target_mlh   * both_mask)
+            b = (target_mlh_q * both_mask)
+            n = denom
+            mean_a = a.sum() / n
+            mean_b = b.sum() / n
+            da = (target_mlh   - mean_a) * both_mask
+            db = (target_mlh_q - mean_b) * both_mask
+            cov = (da * db).sum()
+            var_a = (da * da).sum().clamp_min(1e-12)
+            var_b = (db * db).sum().clamp_min(1e-12)
+            mlh_target_corr = float((cov / (var_a.sqrt() * var_b.sqrt())).detach().item())
+        else:
+            mlh_target_abs_diff_plies = 0.0
+            mlh_target_corr = 0.0
 
         metrics = {
             "loss/total": float(total_loss.detach().item()),
@@ -439,12 +476,15 @@ class Trainer:
             "buffer/frac_L_geq_0.8": frac_l_conf,
             "buffer/frac_D_geq_0.8": frac_d_conf,
             "buffer/frac_near_uniform": frac_uniform,
+            "buffer/wdl_agreement": wdl_agreement,
             "buffer/mlh_mask_frac": mask_frac,
             "buffer/mlh_q_mask_frac": mask_q_frac,
             "mlh/pred_plies": mlh_pred_mean,
             "mlh/target_plies": mlh_target_mean,
             "mlh_q/pred_plies": mlh_q_pred_mean,
             "mlh_q/target_plies": mlh_q_target_mean,
+            "buffer/mlh_target_abs_diff_plies": mlh_target_abs_diff_plies,
+            "buffer/mlh_target_corr": mlh_target_corr,
         }
         return metrics
 

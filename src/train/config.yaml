@@ -63,6 +63,15 @@ selfplay:
   # converged MCTS WDL signal.
   random_opening_plies: 8
 
+loss_weights:
+  # Coefficients on each head's loss in total_loss.
+  # Defaults preserve the previously hardcoded recipe.
+  policy: 0.1
+  value: 1.0
+  value_q: 1.0
+  mlh: 0.05
+  mlh_q: 0.05
+
 wandb:
   project: self_play
   entity: null
