@@ -1,6 +1,7 @@
 #include "mcts/common.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <optional>
 #include <sstream>
@@ -10,6 +11,93 @@
 
 namespace chessrl::mcts
 {
+
+PiecePlanes snapshot_piece_planes(const chess::Board& board)
+{
+    PiecePlanes snap;
+    snap.valid = true;
+    constexpr std::array<chess::PieceType, 6> kTypes{
+        chess::PieceType::PAWN,
+        chess::PieceType::KNIGHT,
+        chess::PieceType::BISHOP,
+        chess::PieceType::ROOK,
+        chess::PieceType::QUEEN,
+        chess::PieceType::KING,
+    };
+    for (int t = 0; t < 6; ++t)
+    {
+        snap.bitboards[t]     = board.pieces(kTypes[t], chess::Color::WHITE).getBits();
+        snap.bitboards[t + 6] = board.pieces(kTypes[t], chess::Color::BLACK).getBits();
+    }
+    return snap;
+}
+
+void history_stack_push(HistoryStack& stack, const PiecePlanes& snap)
+{
+    // Shift slots [0..6] -> [1..7], drop the oldest (was at slot 7).
+    for (int i = kHistoryDepth - 1; i > 0; --i)
+    {
+        stack[i] = stack[i - 1];
+    }
+    stack[0] = snap;
+}
+
+HistoryStack build_root_history_stack(
+    const std::string& fen,
+    const std::vector<std::string>& moves,
+    const chess::Board& root_board)
+{
+    HistoryStack stack;
+    // Slot 0 = current (root) position. Subsequent slots are filled by
+    // replaying the move list and snapshotting before each move.
+    const std::string starting_fen = fen.empty()
+        ? std::string(chess::constants::STARTPOS)
+        : fen;
+    chess::Board board(starting_fen);
+
+    // Collect snapshots in chronological order: snapshots[0] = position
+    // before any history-move was applied, snapshots[n] = position after n
+    // moves. With m moves total, snapshots has m+1 entries.
+    std::vector<PiecePlanes> snapshots;
+    snapshots.reserve(moves.size() + 1);
+    snapshots.push_back(snapshot_piece_planes(board));
+    snapshots.back().repetition = board.isRepetition(1);
+    for (const auto& moveStr : moves)
+    {
+        chess::Move move = chess::uci::uciToMove(board, moveStr);
+        if (move == chess::Move::NO_MOVE)
+        {
+            // Match apply_history's behavior — root construction has already
+            // succeeded by this point, but be defensive about malformed input.
+            break;
+        }
+        board.makeMove(move);
+        snapshots.push_back(snapshot_piece_planes(board));
+        snapshots.back().repetition = board.isRepetition(1);
+    }
+
+    // Sanity: the final snapshot must match root_board piece-wise (we use
+    // root_board's actual state to populate slot 0 so any inconsistency
+    // surfaces immediately rather than silently desynchronizing).
+    stack[0] = snapshot_piece_planes(root_board);
+    stack[0].repetition = root_board.isRepetition(1);
+
+    // Fill historical slots 1..7 from the most recent snapshots, oldest at
+    // the highest slot index. If we don't have enough history, leave the
+    // remaining slots as default-constructed (valid=false, all zeros).
+    const int n_snap = static_cast<int>(snapshots.size());
+    // snapshots[n_snap - 1] corresponds to the root. So slot 1 = snapshots[n_snap - 2].
+    for (int slot = 1; slot < kHistoryDepth; ++slot)
+    {
+        const int idx = n_snap - 1 - slot;
+        if (idx < 0)
+        {
+            break;
+        }
+        stack[slot] = snapshots[idx];
+    }
+    return stack;
+}
 
 struct HistoryEntry
 {

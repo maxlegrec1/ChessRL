@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -21,6 +22,43 @@ struct SearchInput
 struct HistoryEntry;
 
 using HistoryHandle = std::shared_ptr<const HistoryEntry>;
+
+// Compact piece-bitboard snapshot of a board position, used as the
+// per-history-slot payload for the AlphaZero-style 8-board input stack.
+// Layout matches the Python encoder: bitboards[0..5] = white PNBRQK,
+// bitboards[6..11] = black PNBRQK. `valid=false` slots encode as zero
+// piece planes (the all-zero pattern is the "no-history" signal).
+struct PiecePlanes
+{
+    std::array<std::uint64_t, 12> bitboards{};
+    bool valid{false};
+    bool repetition{false};
+};
+
+// 8-slot stack with slot 0 = current position. Older positions live at
+// higher indices (slot 7 = t-7). Used by the C++ encoder to emit the
+// 111-plane input for the NN.
+inline constexpr int kHistoryDepth = 8;
+using HistoryStack = std::array<PiecePlanes, kHistoryDepth>;
+
+// Snapshot a board's piece bitboards into a PiecePlanes value. Order:
+// W:PNBRQK then B:PNBRQK. `repetition` is left untouched — the caller
+// sets it from `board.isRepetition()` knowledge of the surrounding
+// position chain.
+PiecePlanes snapshot_piece_planes(const chess::Board& board);
+
+// Push `snap` onto the front of `stack` (slot 0), shifting older entries
+// down by one. The oldest (formerly slot 7) is dropped.
+void history_stack_push(HistoryStack& stack, const PiecePlanes& snap);
+
+// Build the initial 8-slot stack for a fresh search: slot 0 is the
+// position represented by `root_board`, slots 1..7 are populated by
+// replaying the move list backwards through chess::Board.makeMove (the
+// HistoryHandle linked list only stores moves, not board states).
+HistoryStack build_root_history_stack(
+    const std::string& fen,
+    const std::vector<std::string>& moves,
+    const chess::Board& root_board);
 
 struct MctsOptions
 {

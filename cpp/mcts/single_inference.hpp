@@ -11,6 +11,7 @@
 #include "chess-library/include/chess.hpp"
 
 #include "inference.hpp"
+#include "mcts/common.hpp"
 
 namespace chessrl::mcts::single
 {
@@ -60,7 +61,16 @@ struct BatchStatistics
     double total_inference_ms{0.0};
 };
 
+// No-history convenience: equivalent to encode_small_position(board, {}).
 SmallEncodedPosition encode_small_position(const chess::Board& board);
+
+// History-aware encoder. The 0th slot of `history` is conceptually the
+// current position; the encoder reads piece bitboards from `board` itself
+// (defensive — keeps slot-0 piece planes authoritative even if the
+// caller's ring buffer drifts) but uses `history[0].repetition` for the
+// current-position repetition flag and `history[1..7]` for past slots.
+SmallEncodedPosition encode_small_position(
+    const chess::Board& board, const chessrl::mcts::HistoryStack& history);
 
 struct SmallBatchConfig
 {

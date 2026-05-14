@@ -42,7 +42,24 @@ using chessrl::trt::volume;
 using chessrl::trt::resolve_engine_path;
 
 constexpr int kSmallBoardSize = 8;
-constexpr int kSmallFeaturePlanes = 19;
+// AlphaZero-style stacked input: 8 boards × (12 piece planes + 1 repetition
+// plane) + 7 globals (STM, EP, 4× castling, halfmove clock). See
+// src/models/small/fen_encoder.py for the matching Python layout — these
+// two must agree bit-for-bit (tests/test_encoder_parity.py is gating).
+constexpr int kSmallPiecePlanes = 12;
+constexpr int kSmallHistoryDepth = 8;
+constexpr int kSmallHistBlock = kSmallPiecePlanes + 1; // piece planes + rep
+constexpr int kSmallGlobalPlanes = 7;                   // STM, EP, 4 castling, hmc
+constexpr int kSmallFeaturePlanes =
+    kSmallHistoryDepth * kSmallHistBlock + kSmallGlobalPlanes; // 111
+// Plane indices into the global section (same as Python).
+constexpr int kSmallPlaneSTM = kSmallHistoryDepth * kSmallHistBlock;       // 104
+constexpr int kSmallPlaneEP = kSmallPlaneSTM + 1;                          // 105
+constexpr int kSmallPlaneCastlingWK = kSmallPlaneSTM + 2;                  // 106
+constexpr int kSmallPlaneCastlingWQ = kSmallPlaneSTM + 3;                  // 107
+constexpr int kSmallPlaneCastlingBK = kSmallPlaneSTM + 4;                  // 108
+constexpr int kSmallPlaneCastlingBQ = kSmallPlaneSTM + 5;                  // 109
+constexpr int kSmallPlaneHMC = kSmallPlaneSTM + 6;                         // 110
 constexpr int kSmallPolicySize = 1929;
 constexpr int kSmallValueSize = 3;
 
@@ -364,35 +381,57 @@ size_t encodeSmallIndex(int row, int col, int plane)
         + static_cast<size_t>(plane);
 }
 
-std::vector<float> encodeSmallFeatures(const chess::Board& board)
+// Fill 12 piece planes in `features` starting at channel `base` for one
+// position represented by its 12 piece bitboards (W:PNBRQK then B:PNBRQK).
+// Convention matches the Python encoder: `tensor[7-rank, file, base+plane]`.
+void fillPiecePlanesFromBitboards(
+    std::vector<float>& features,
+    const std::array<std::uint64_t, 12>& bbs,
+    int base)
 {
-    std::vector<float> features(static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes, 0.0F);
-
-    const std::array<std::pair<chess::PieceType, int>, 6> typeOrder{{
-        {chess::PieceType::PAWN, 0},
-        {chess::PieceType::KNIGHT, 1},
-        {chess::PieceType::BISHOP, 2},
-        {chess::PieceType::ROOK, 3},
-        {chess::PieceType::QUEEN, 4},
-        {chess::PieceType::KING, 5},
-    }};
-
-    for (auto color : {chess::Color::WHITE, chess::Color::BLACK})
+    for (int plane = 0; plane < kSmallPiecePlanes; ++plane)
     {
-        const int base = color == chess::Color::WHITE ? 0 : 6;
-        for (const auto& [pieceType, offset] : typeOrder)
+        std::uint64_t bb = bbs[static_cast<size_t>(plane)];
+        while (bb != 0ULL)
         {
-            chess::Bitboard bb = board.pieces(pieceType, color);
-            while (bb)
-            {
-                const int squareIndex = static_cast<int>(bb.pop());
-                const int rank = squareIndex / kSmallBoardSize;
-                const int file = squareIndex % kSmallBoardSize;
-                const int plane = base + offset;
-                features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, plane)] = 1.0F;
-            }
+            const int squareIndex = __builtin_ctzll(bb);
+            bb &= bb - 1;
+            const int rank = squareIndex / kSmallBoardSize;
+            const int file = squareIndex % kSmallBoardSize;
+            features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, base + plane)] = 1.0F;
         }
     }
+}
+
+// Snapshot a chess::Board into the 12 piece bitboards (same order as the
+// PiecePlanes struct). Inline duplicate of snapshot_piece_planes() in
+// common.cpp — keeping it here avoids dragging that dependency into the
+// inference TU and lets the encoder be self-contained.
+std::array<std::uint64_t, 12> currentBoardBitboards(const chess::Board& board)
+{
+    std::array<std::uint64_t, 12> bbs{};
+    constexpr std::array<chess::PieceType, 6> kTypes{
+        chess::PieceType::PAWN,
+        chess::PieceType::KNIGHT,
+        chess::PieceType::BISHOP,
+        chess::PieceType::ROOK,
+        chess::PieceType::QUEEN,
+        chess::PieceType::KING,
+    };
+    for (int t = 0; t < 6; ++t)
+    {
+        bbs[static_cast<size_t>(t)]     = board.pieces(kTypes[t], chess::Color::WHITE).getBits();
+        bbs[static_cast<size_t>(t + 6)] = board.pieces(kTypes[t], chess::Color::BLACK).getBits();
+    }
+    return bbs;
+}
+
+std::vector<float> encodeSmallFeatures(
+    const chess::Board& board,
+    const chessrl::mcts::HistoryStack& history)
+{
+    std::vector<float> features(
+        static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes, 0.0F);
 
     auto fillPlane = [&](int plane, float value) {
         for (int r = 0; r < kSmallBoardSize; ++r)
@@ -404,7 +443,34 @@ std::vector<float> encodeSmallFeatures(const chess::Board& board)
         }
     };
 
-    fillPlane(12, board.sideToMove() == chess::Color::WHITE ? 1.0F : 0.0F);
+    // Slot 0: current position. We always use `board`'s actual bitboards
+    // (rather than history[0]) so that a stale or incorrectly-maintained
+    // ring buffer cannot poison the current planes.
+    const auto current_bbs = currentBoardBitboards(board);
+    fillPiecePlanesFromBitboards(features, current_bbs, /*base=*/0);
+    if (history[0].repetition)
+    {
+        fillPlane(kSmallPiecePlanes, 1.0F);  // plane 12
+    }
+
+    // Slots 1..7: historical positions. base = 13 + (slot-1)*13.
+    for (int slot = 1; slot < kSmallHistoryDepth; ++slot)
+    {
+        const auto& past = history[static_cast<size_t>(slot)];
+        if (!past.valid)
+        {
+            continue;
+        }
+        const int base = kSmallPiecePlanes + 1 + (slot - 1) * kSmallHistBlock;
+        fillPiecePlanesFromBitboards(features, past.bitboards, base);
+        if (past.repetition)
+        {
+            fillPlane(base + kSmallPiecePlanes, 1.0F);
+        }
+    }
+
+    // Globals (planes 104..110).
+    fillPlane(kSmallPlaneSTM, board.sideToMove() == chess::Color::WHITE ? 1.0F : 0.0F);
 
     const auto enPassant = board.enpassantSq();
     if (enPassant.is_valid())
@@ -412,37 +478,48 @@ std::vector<float> encodeSmallFeatures(const chess::Board& board)
         const int idxSq = enPassant.index();
         const int rank = idxSq / kSmallBoardSize;
         const int file = idxSq % kSmallBoardSize;
-        features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, 13)] = 1.0F;
-    }
-    else
-    {
-        fillPlane(13, 0.0F);
+        features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, kSmallPlaneEP)] = 1.0F;
     }
 
     const auto castling = board.castlingRights();
-    fillPlane(
-        14,
+    fillPlane(kSmallPlaneCastlingWK,
         castling.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::KING_SIDE) ? 1.0F : 0.0F);
-    fillPlane(
-        15,
+    fillPlane(kSmallPlaneCastlingWQ,
         castling.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::QUEEN_SIDE) ? 1.0F : 0.0F);
-    fillPlane(
-        16,
+    fillPlane(kSmallPlaneCastlingBK,
         castling.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::KING_SIDE) ? 1.0F : 0.0F);
-    fillPlane(
-        17,
+    fillPlane(kSmallPlaneCastlingBQ,
         castling.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::QUEEN_SIDE) ? 1.0F : 0.0F);
 
     const float halfMoveNorm = std::min(1.0F, static_cast<float>(board.halfMoveClock()) / 100.0F);
-    fillPlane(18, halfMoveNorm);
+    fillPlane(kSmallPlaneHMC, halfMoveNorm);
 
     return features;
+}
+
+// Convenience wrapper: encode a board with no history (slots 1..7 zero,
+// current repetition flag = 0). Used by `evaluateSmall` (single-shot
+// inference helper).
+std::vector<float> encodeSmallFeaturesNoHistory(const chess::Board& board)
+{
+    chessrl::mcts::HistoryStack empty{};
+    empty[0].valid = true;  // slot 0 bitboards are overwritten from `board` anyway
+    return encodeSmallFeatures(board, empty);
+}
+
+SmallEncodedPosition build_small_encoded_position(
+    const chess::Board& board,
+    const chessrl::mcts::HistoryStack& history)
+{
+    SmallEncodedPosition encoded;
+    encoded.features = encodeSmallFeatures(board, history);
+    return encoded;
 }
 
 SmallEncodedPosition build_small_encoded_position(const chess::Board& board)
 {
     SmallEncodedPosition encoded;
-    encoded.features = encodeSmallFeatures(board);
+    encoded.features = encodeSmallFeaturesNoHistory(board);
     return encoded;
 }
 
@@ -473,6 +550,24 @@ SmallRawOutputs runSmallInference(
     if (!exec->setInputShape(ctx.inputName().c_str(), requestedInput))
     {
         throw std::runtime_error("Failed to set small-model input shape.");
+    }
+
+    // Defensive: refuse to run if the loaded TRT engine's input dim doesn't
+    // match kSmallFeaturePlanes. Catches stale engines built against the
+    // legacy 19-plane layout (the exact bug class we just suffered with the
+    // cache rank-flip — silent decode mismatch).
+    {
+        const auto profile_max = engine.getProfileShape(
+            ctx.inputName().c_str(), 0, nvinfer1::OptProfileSelector::kMAX);
+        if (profile_max.nbDims >= 4
+            && profile_max.d[3] != kSmallFeaturePlanes)
+        {
+            throw std::runtime_error(
+                "TRT engine input channels (" + std::to_string(profile_max.d[3])
+                + ") != expected kSmallFeaturePlanes ("
+                + std::to_string(kSmallFeaturePlanes)
+                + "). Rebuild the engine with the matching layout.");
+        }
     }
 
     const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
@@ -696,6 +791,8 @@ SmallPolicyValue evaluateSmall(
     const std::string fenString = fen.empty() ? std::string(chess::constants::STARTPOS) : std::string(fen);
     chess::Board board(fenString);
 
+    // No-history one-shot eval: caller is responsible for passing the FEN of
+    // the position they care about. Historical slots stay zero.
     SmallEncodedPosition encoded = build_small_encoded_position(board);
     SmallEngineContext& ctx = getSmallEngineContext(engine_path);
     SmallRawOutputs raw = runSmallInference(ctx, encoded.features);
@@ -740,6 +837,13 @@ void fulfillWithException(std::vector<Pending>& work, const std::exception_ptr& 
 SmallEncodedPosition encode_small_position(const chess::Board& board)
 {
     return build_small_encoded_position(board);
+}
+
+SmallEncodedPosition encode_small_position(
+    const chess::Board& board,
+    const chessrl::mcts::HistoryStack& history)
+{
+    return build_small_encoded_position(board, history);
 }
 
 struct SmallBatchRunner::Impl

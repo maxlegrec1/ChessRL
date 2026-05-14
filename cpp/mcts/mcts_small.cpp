@@ -197,6 +197,11 @@ public:
         // Phase B: Store root board for state reconstruction during traversal
         root_board_ = apply_history(options_.request);
         tree_.add_root(root_board_, options_.request.history);
+        // Build the initial AlphaZero-style 8-board history stack by
+        // replaying the move history. Slots 1..7 capture positions t-1..t-7
+        // before reaching the root. Used as the per-simulation seed.
+        root_history_stack_ = build_root_history_stack(
+            options_.request.fen, options_.request.history, root_board_);
         const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
         tree_.reserve(expected_nodes);
         path_buffer_.reserve(64);
@@ -204,9 +209,9 @@ public:
 
     MctsSummary run()
     {
-        // Phase B: Pass root board to evaluate_node
-        evaluate_node(0, root_board_);
-        
+        // Phase B: Pass root board + initial history stack to evaluate_node.
+        evaluate_node(0, root_board_, root_history_stack_);
+
         for (int i = 0; i < options_.simulations; ++i)
         {
             run_simulation();
@@ -236,9 +241,14 @@ private:
         path_buffer_.push_back(0);
         std::vector<int>& path = path_buffer_;
         int node_index = 0;
-        
-        // Phase B: Maintain local board state, initialized to root at start of simulation
+
+        // Phase B: Maintain local board state, initialized to root at start of simulation.
         chess::Board current_board = root_board_;
+        // Per-simulation history ring. Starts as the root stack (which
+        // captures the real-game history t-7..t-1 + current). Rotated and
+        // refreshed on every makeMove during tree descent. Lives on the
+        // stack ⇒ inherently per-thread.
+        HistoryStack history_stack = root_history_stack_;
 
         while (true)
         {
@@ -254,7 +264,7 @@ private:
 
             if (!node.expanded || node.children.empty())
             {
-                evaluate_node(node_index, current_board);
+                evaluate_node(node_index, current_board, history_stack);
                 const TreeNode& evaluated = tree_.nodes[node_index];
                 detail::backpropagate_full(
                     tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
@@ -264,15 +274,19 @@ private:
             const int child_index = select_child(node_index);
             if (child_index < 0)
             {
-                evaluate_node(node_index, current_board);
+                evaluate_node(node_index, current_board, history_stack);
                 const TreeNode& evaluated = tree_.nodes[node_index];
                 detail::backpropagate_full(
                     tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
                 return;
             }
 
-            // Phase B: Apply the move to our local board tracker when selecting a child
+            // Phase B: Apply the move to our local board tracker and shift
+            // the history ring before descending.
             current_board.makeMove(tree_.nodes[child_index].move_from_parent);
+            PiecePlanes snap = snapshot_piece_planes(current_board);
+            snap.repetition = current_board.isRepetition(1);
+            history_stack_push(history_stack, snap);
             node_index = child_index;
             path.push_back(node_index);
         }
@@ -336,7 +350,10 @@ private:
         return best_child;
     }
 
-    float evaluate_node(int node_index, const chess::Board& board_state)
+    float evaluate_node(
+        int node_index,
+        const chess::Board& board_state,
+        const HistoryStack& history)
     {
         TreeNode& node = tree_.nodes[node_index];
         if (node.expanded && !node.children.empty())
@@ -356,11 +373,14 @@ private:
         }
 
         // Phase B: Use passed board_state for encoding
-        // Check cache
+        // Cache key includes the history-stack contents because the NN's
+        // output now depends on the full 8-board stack, not just the
+        // current position. Two visits to the same zobrist with different
+        // surrounding history MUST NOT share an entry.
         SmallPolicyValue eval;
         bool cache_hit = false;
-        uint64_t hash = board_state.zobrist();
-        
+        uint64_t hash = compute_cache_key(board_state.zobrist(), history);
+
         if (cache_)
         {
             if (auto cached = cache_->get(hash))
@@ -372,10 +392,10 @@ private:
 
         if (!cache_hit)
         {
-            auto encoded = acquire_small_encoding(node.history, board_state);
+            auto encoded = acquire_small_encoding(history, board_state);
             auto ticket = small_batch_runner_->enqueue(*encoded);
             eval = ticket.get();
-            
+
             if (cache_)
             {
                 cache_->put(hash, eval);
@@ -803,18 +823,51 @@ private:
     }
 
     std::shared_ptr<const single::SmallEncodedPosition> acquire_small_encoding(
-        const HistoryHandle& /*history*/,
+        const HistoryStack& history,
         const chess::Board& board)
     {
         // Each leaf in MCTS is by definition unvisited; the prior encoding cache
         // (keyed on HistoryEntry*) had near-zero hit rate but locked a mutex on
         // every leaf, serializing the worker threads of a single board. Drop it.
-        return std::make_shared<single::SmallEncodedPosition>(single::encode_small_position(board));
+        return std::make_shared<single::SmallEncodedPosition>(
+            single::encode_small_position(board, history));
+    }
+
+    // Fold the history stack into a 64-bit hash by combining each slot's
+    // bitboards with a Murmur-style mixer. Used to ensure the TT cache
+    // doesn't return stale evaluations when two visits to the same physical
+    // position have different surrounding histories.
+    static std::uint64_t compute_cache_key(std::uint64_t zobrist, const HistoryStack& history)
+    {
+        auto mix = [](std::uint64_t h) {
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33;
+            h *= 0xc4ceb9fe1a85ec53ULL;
+            h ^= h >> 33;
+            return h;
+        };
+        std::uint64_t h = zobrist;
+        for (int slot = 0; slot < kHistoryDepth; ++slot)
+        {
+            const auto& p = history[static_cast<size_t>(slot)];
+            for (int k = 0; k < 12; ++k)
+            {
+                h = mix(h ^ (p.bitboards[static_cast<size_t>(k)]
+                             + static_cast<std::uint64_t>(slot * 31 + k)));
+            }
+            if (p.repetition)
+            {
+                h = mix(h ^ (0x9e3779b97f4a7c15ULL + static_cast<std::uint64_t>(slot)));
+            }
+        }
+        return h;
     }
 
     MctsOptions options_;
     SearchTree tree_;
     chess::Board root_board_; // Phase B: Store root board for state reconstruction
+    HistoryStack root_history_stack_;  // Initial 8-slot piece-plane stack at root.
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> vocab_index_;
     single::SmallBatchConfig small_batch_config_;
