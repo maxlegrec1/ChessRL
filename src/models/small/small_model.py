@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .vocab import policy_index, policy_to_idx
-from .fen_encoder import fen_to_tensor
+from .fen_encoder import fen_to_tensor, INPUT_PLANES
 import bulletchess
 
 class ResBlock(nn.Module):
@@ -28,7 +28,7 @@ class ResBlock(nn.Module):
 class SmallModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.input_conv = nn.Conv2d(19, 64, 3, padding=1, bias=False)
+        self.input_conv = nn.Conv2d(INPUT_PLANES, 64, 3, padding=1, bias=False)
         self.input_bn = nn.BatchNorm2d(64)
         
         # 4 Residual Blocks
@@ -143,7 +143,7 @@ class SmallModel(nn.Module):
         
         # Encode FEN
         tensor = fen_to_tensor(fen)
-        x = torch.from_numpy(tensor).unsqueeze(0).to(device) # [1, 8, 8, 19]
+        x = torch.from_numpy(tensor).unsqueeze(0).to(device) # [1, 8, 8, INPUT_PLANES]
         
         self.eval()
         with torch.no_grad():
