@@ -36,6 +36,32 @@ namespace chessrl::mcts::single
 namespace
 {
 
+// Process-wide encoder time accumulators. Updated under no lock — relaxed
+// atomic increments. Used only for benchmarking and never read by the hot
+// path, so contention is one inc per leaf and negligible vs the encoder's
+// own bit-unpack cost.
+std::atomic<std::uint64_t> g_encoder_calls{0};
+std::atomic<std::uint64_t> g_encoder_nanos{0};
+
+} // namespace
+
+EncoderTotals encoder_totals()
+{
+    EncoderTotals t;
+    t.calls = g_encoder_calls.load(std::memory_order_relaxed);
+    t.nanos = g_encoder_nanos.load(std::memory_order_relaxed);
+    return t;
+}
+
+void encoder_totals_reset()
+{
+    g_encoder_calls.store(0, std::memory_order_relaxed);
+    g_encoder_nanos.store(0, std::memory_order_relaxed);
+}
+
+namespace
+{
+
 using chessrl::trt::Logger;
 using chessrl::trt::element_size;
 using chessrl::trt::volume;
@@ -511,15 +537,29 @@ SmallEncodedPosition build_small_encoded_position(
     const chess::Board& board,
     const chessrl::mcts::HistoryStack& history)
 {
+    const auto t0 = std::chrono::steady_clock::now();
     SmallEncodedPosition encoded;
     encoded.features = encodeSmallFeatures(board, history);
+    const auto t1 = std::chrono::steady_clock::now();
+    g_encoder_calls.fetch_add(1, std::memory_order_relaxed);
+    g_encoder_nanos.fetch_add(
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+        std::memory_order_relaxed);
     return encoded;
 }
 
 SmallEncodedPosition build_small_encoded_position(const chess::Board& board)
 {
+    const auto t0 = std::chrono::steady_clock::now();
     SmallEncodedPosition encoded;
     encoded.features = encodeSmallFeaturesNoHistory(board);
+    const auto t1 = std::chrono::steady_clock::now();
+    g_encoder_calls.fetch_add(1, std::memory_order_relaxed);
+    g_encoder_nanos.fetch_add(
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()),
+        std::memory_order_relaxed);
     return encoded;
 }
 

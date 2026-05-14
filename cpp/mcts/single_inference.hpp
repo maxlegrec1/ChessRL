@@ -61,6 +61,17 @@ struct BatchStatistics
     double total_inference_ms{0.0};
 };
 
+// Process-wide encoder time accumulators. Updated by encodeSmallFeatures /
+// encodeSmallFeaturesNoHistory; read by the perf bench. Atomic because the
+// encoder runs on N MCTS worker threads concurrently.
+struct EncoderTotals
+{
+    uint64_t calls{0};
+    uint64_t nanos{0};
+};
+EncoderTotals encoder_totals();
+void encoder_totals_reset();
+
 // No-history convenience: equivalent to encode_small_position(board, {}).
 SmallEncodedPosition encode_small_position(const chess::Board& board);
 

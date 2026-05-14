@@ -568,9 +568,25 @@ size_t SelfPlayWorker::get_buffer_size() const
     {
         return 0;
     }
-    
+
     size_t file_size = std::filesystem::file_size(p);
     return file_size / kRecordSize;
+}
+
+SelfPlayInferenceStats SelfPlayWorker::inference_stats() const
+{
+    SelfPlayInferenceStats out;
+    if (impl_->runner)
+    {
+        const auto rs = impl_->runner->statistics();
+        out.batches = static_cast<int64_t>(rs.batches);
+        out.positions_in_batches = static_cast<int64_t>(rs.positions);
+        out.total_inference_ms = rs.total_inference_ms;
+    }
+    const auto et = chessrl::mcts::single::encoder_totals();
+    out.encoder_calls = static_cast<int64_t>(et.calls);
+    out.total_encoder_ms = static_cast<double>(et.nanos) / 1.0e6;
+    return out;
 }
 
 } // namespace chessrl

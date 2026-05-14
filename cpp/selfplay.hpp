@@ -36,6 +36,18 @@ struct SelfPlayMetrics
     double runtime_seconds = 0.0;
 };
 
+// Snapshot of the inference runner's lifetime totals, plus the process-wide
+// encoder timing accumulator. Exposed for the perf bench; not used by the
+// trainer.
+struct SelfPlayInferenceStats
+{
+    int64_t batches = 0;
+    int64_t positions_in_batches = 0;
+    double total_inference_ms = 0.0;
+    int64_t encoder_calls = 0;
+    double total_encoder_ms = 0.0;
+};
+
 class SelfPlayWorker
 {
 public:
@@ -45,7 +57,10 @@ public:
     // Run one batch of MCTS simulations for all boards
     // Returns metrics for this step
     SelfPlayMetrics step();
-    
+
+    // Inspect lifetime inference counters (per-runner + per-encoder).
+    SelfPlayInferenceStats inference_stats() const;
+
     // Get approximate number of positions in buffer
     size_t get_buffer_size() const;
 

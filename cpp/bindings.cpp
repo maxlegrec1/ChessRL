@@ -197,6 +197,13 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readonly("nodes_evaluated", &chessrl::SelfPlayMetrics::nodes_evaluated)
         .def_readonly("runtime_seconds", &chessrl::SelfPlayMetrics::runtime_seconds);
 
+    py::class_<chessrl::SelfPlayInferenceStats>(m, "SelfPlayInferenceStats")
+        .def_readonly("batches", &chessrl::SelfPlayInferenceStats::batches)
+        .def_readonly("positions_in_batches", &chessrl::SelfPlayInferenceStats::positions_in_batches)
+        .def_readonly("total_inference_ms", &chessrl::SelfPlayInferenceStats::total_inference_ms)
+        .def_readonly("encoder_calls", &chessrl::SelfPlayInferenceStats::encoder_calls)
+        .def_readonly("total_encoder_ms", &chessrl::SelfPlayInferenceStats::total_encoder_ms);
+
     py::class_<chessrl::SelfPlayWorker>(m, "SelfPlayWorker")
         .def(py::init([](const std::string& engine_path,
                          const std::string& output_path,
@@ -253,6 +260,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("dirichlet_epsilon") = 0.05f,
         py::arg("random_opening_plies") = 0)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
+        .def("inference_stats", &chessrl::SelfPlayWorker::inference_stats)
         .def("get_buffer_size", &chessrl::SelfPlayWorker::get_buffer_size);
 }
 
