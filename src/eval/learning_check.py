@@ -265,7 +265,7 @@ def best_legal_uci(policy_logits: np.ndarray, fen: str) -> str:
     return best_uci or ""
 
 
-RECORD_SIZE = 148
+RECORD_SIZE = 832
 VALUE_OUTCOME_OFFSET = 116
 VALUE_MCTS_OFFSET = 128
 

@@ -1,4 +1,5 @@
 #include "selfplay.hpp"
+#include "mcts/common.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/single_inference.hpp"
 #include "mcts/cache.hpp"
@@ -6,7 +7,9 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,22 +32,43 @@ struct SelfPlayRecord
     int ply_index{0};                   // 0-based ply index within the game
     float plies_remaining{-1.0f};       // total_plies - ply_index, set at game end
     float backed_plies{-1.0f};          // MCTS-backed plies-remaining at root
+    // AlphaZero-style history: 7 past piece-plane snapshots (index 0 = t-1
+    // .. index 6 = t-7) plus a per-slot repetition flag and a flag for the
+    // current position. All zeros means "no history available".
+    std::array<std::array<std::uint64_t, 12>, 7> past_bitboards{};
+    std::array<std::uint8_t, 7> past_repetition_flags{};
+    std::uint8_t current_repetition_flag{0};
 };
 
-// On-disk record layout (148 bytes, fixed):
+// On-disk record layout (832 bytes, fixed):
 //   [0..100)   FEN (null-padded)
 //   [100..116) policy UCI (null-padded)
 //   [116..128) value_outcome (3 x float32)
 //   [128..140) value_mcts    (3 x float32)
 //   [140..144) plies_remaining (1 x float32) — true plies to game end (set at game end)
 //   [144..148) backed_plies   (1 x float32) — MCTS-backed plies estimate at root
-constexpr size_t kRecordSize = 148;
+//   [148..155) past_repetition_flags (7 x u8) — slot 1..7 repetition flags
+//   [155..156) current_repetition_flag (1 x u8) — slot 0 repetition flag
+//   [156..160) padding (4 bytes, keeps the next field 8-byte aligned)
+//   [160..832) past_bitboards (7 slots * 12 uint64 bitboards = 672 bytes)
+//             newest-first: offsets 160 (t-1), 256 (t-2), ..., 736 (t-7).
+//             Each slot: 12 uint64 in W:PNBRQK then B:PNBRQK order.
+constexpr size_t kRecordSize = 832;
 constexpr size_t kFenOffset = 0;
 constexpr size_t kPolicyOffset = 100;
 constexpr size_t kValueOutcomeOffset = 116;
 constexpr size_t kValueMctsOffset = 128;
 constexpr size_t kPliesRemainingOffset = 140;
 constexpr size_t kBackedPliesOffset = 144;
+constexpr size_t kPastRepetitionOffset = 148;  // 7 bytes, slot 1..7
+constexpr size_t kCurrentRepetitionOffset = 155;
+// (offsets 156..159 padded for alignment of the bitboards section)
+constexpr size_t kPastBitboardsOffset = 160;
+constexpr size_t kBitboardsPerSlot = 12;
+constexpr size_t kHistoricalSlots = 7;
+constexpr size_t kBitboardSlotBytes = kBitboardsPerSlot * sizeof(std::uint64_t); // 96
+static_assert(kPastBitboardsOffset + kHistoricalSlots * kBitboardSlotBytes == kRecordSize,
+              "record layout math is inconsistent");
 
 struct BoardSlot
 {
@@ -52,6 +76,11 @@ struct BoardSlot
     std::vector<std::string> history;
     std::vector<SelfPlayRecord> pending_records;
     int ply_count = 0;
+    // Rolling deque of recent past piece-plane snapshots (newest first).
+    // At record-creation time, the first 7 entries describe positions t-1
+    // .. t-7 relative to the current `board`. Pushed on every makeMove,
+    // trimmed to at most 7 entries.
+    std::deque<chessrl::mcts::PiecePlanes> past_planes;
 };
 
 
@@ -82,6 +111,7 @@ struct SelfPlayWorker::Impl
         slot.history.clear();
         slot.pending_records.clear();
         slot.ply_count = 0;
+        slot.past_planes.clear();
 
         const int n = config.random_opening_plies;
         for (int i = 0; i < n; ++i)
@@ -92,6 +122,13 @@ struct SelfPlayWorker::Impl
             if (moves.size() == 0) break;
             std::uniform_int_distribution<size_t> dist(0, moves.size() - 1);
             const auto& m = moves[dist(opening_rng)];
+            // Snapshot the pre-move position into the past_planes deque so
+            // that subsequent records carry the random opening as history.
+            chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
+            pre.repetition = slot.board.isRepetition(1);
+            slot.past_planes.push_front(pre);
+            if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
+
             slot.history.push_back(chess::uci::moveToUci(m, slot.board.chess960()));
             slot.board.makeMove(m);
         }
@@ -265,6 +302,18 @@ SelfPlayMetrics SelfPlayWorker::step()
         // position; available immediately from the MCTS summary, no game-end
         // information needed. Negative sentinel if MCTS produced none.
         record.backed_plies = summary.backed_plies;
+
+        // AlphaZero-style history payload: copy up to 7 past piece-plane
+        // snapshots from the slot's rolling deque (slot 1 = t-1 .. slot 7 =
+        // t-7). Unused slots stay zero, which is the "no-history" signal.
+        for (size_t k = 0; k < slot.past_planes.size() && k < 7; ++k)
+        {
+            const auto& past = slot.past_planes[k];
+            record.past_bitboards[k] = past.bitboards;
+            record.past_repetition_flags[k] = past.repetition ? 1u : 0u;
+        }
+        record.current_repetition_flag = slot.board.isRepetition(1) ? 1u : 0u;
+
         slot.pending_records.push_back(record);
         metrics.positions_generated++;
 
@@ -276,6 +325,14 @@ SelfPlayMetrics SelfPlayWorker::step()
         {
             if (chess::uci::moveToUci(m, slot.board.chess960()) == summary.action)
             {
+                // Snapshot the pre-move position into the past_planes deque
+                // BEFORE applying the move, so the next record sees this
+                // position at slot 1 (t-1).
+                chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
+                pre.repetition = slot.board.isRepetition(1);
+                slot.past_planes.push_front(pre);
+                if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
+
                 slot.board.makeMove(m);
                 slot.history.push_back(summary.action);
                 slot.ply_count++;
@@ -353,6 +410,17 @@ SelfPlayMetrics SelfPlayWorker::step()
                 std::memcpy(buffer + kValueMctsOffset,     rec.value_mcts.data(),    12);
                 std::memcpy(buffer + kPliesRemainingOffset, &rec.plies_remaining,    4);
                 std::memcpy(buffer + kBackedPliesOffset,    &rec.backed_plies,       4);
+
+                std::memcpy(buffer + kPastRepetitionOffset,
+                            rec.past_repetition_flags.data(),
+                            rec.past_repetition_flags.size());
+                buffer[kCurrentRepetitionOffset] = static_cast<char>(rec.current_repetition_flag);
+                for (size_t k = 0; k < kHistoricalSlots; ++k)
+                {
+                    std::memcpy(buffer + kPastBitboardsOffset + k * kBitboardSlotBytes,
+                                rec.past_bitboards[k].data(),
+                                kBitboardSlotBytes);
+                }
 
                 if (impl_->current_records < impl_->config.max_buffer_size)
                 {
