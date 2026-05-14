@@ -119,6 +119,14 @@ def _write_run_config(base_config: Path, run_dir: Path,
     wb["dir"] = str((run_dir / "wandb").resolve())
     if resume_from:
         cfg["resume_path"] = str(resume_from.resolve())
+        # Carry over wandb.resume_id from a previously written in-run config so
+        # repeated resumes keep appending to the same W&B run.
+        existing = run_dir / "config.yaml"
+        if existing.is_file():
+            prev = yaml.safe_load(existing.read_text()) or {}
+            prev_id = (prev.get("wandb") or {}).get("resume_id")
+            if prev_id and not wb.get("resume_id"):
+                wb["resume_id"] = prev_id
     out = run_dir / "config.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out

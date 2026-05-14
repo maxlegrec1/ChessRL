@@ -151,13 +151,17 @@ class Trainer:
         wandb_dir = self.config.wandb.dir
         if wandb_dir is not None:
             Path(wandb_dir).mkdir(parents=True, exist_ok=True)
-        run = wandb.init(
+        init_kwargs = dict(
             project=self.config.wandb.project,
             entity=self.config.wandb.entity,
             name=self.config.wandb.run_name or self.config.run_name,
             config=self.config.to_dict(),
             dir=str(wandb_dir) if wandb_dir is not None else None,
         )
+        if self.config.wandb.resume_id:
+            init_kwargs["id"] = self.config.wandb.resume_id
+            init_kwargs["resume"] = "allow"
+        run = wandb.init(**init_kwargs)
         return run
 
     # ------------------------------------------------------------------ #

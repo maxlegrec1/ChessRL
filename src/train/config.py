@@ -14,6 +14,9 @@ class WandbConfig:
     run_name: Optional[str] = None
     enabled: bool = True
     dir: Optional[Path] = None
+    # If set, attach to an existing wandb run (use the W&B run id, e.g. "lcctm9xo"),
+    # appending metrics to its history rather than starting a fresh run.
+    resume_id: Optional[str] = None
 
 
 @dataclass
