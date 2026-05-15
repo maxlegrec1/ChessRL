@@ -71,6 +71,7 @@ def _build_worker(engine_path: str, buffer_path: Path, sp: SelfPlayConfig):
         dirichlet_alpha=sp.dirichlet_alpha,
         dirichlet_epsilon=sp.dirichlet_epsilon,
         random_opening_plies=sp.random_opening_plies,
+        virtual_loss_width=sp.virtual_loss_width,
     )
 
 

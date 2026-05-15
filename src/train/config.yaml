@@ -33,14 +33,12 @@ data:
 
 selfplay:
   boards: 1024
-  # MCTS worker threads. Each thread blocks on inference futures most of
-  # the time, so heavy oversubscription is fine; the practical cap is the
-  # CPU count (256-core box → 256 is the sweet spot). Combine with the
-  # multi-worker inference runner (CHESSRL_INFER_WORKERS) for bigger
-  # batches across multiple CUDA streams. Measured peak on this rig:
-  # threads=256 + W=4 → ~262 moves/s (vs 117 at threads=64, W=1).
+  # MCTS worker threads. With virtual-loss batched descent (width>1) each
+  # thread holds W leaves in flight, so fewer threads is better: the bench
+  # sweep on the 4090 found width=8 + threads=128 → 347 pos/sec, beating
+  # threads=256 (293) — larger thread counts inflate per-batch latency.
   # 0 = legacy hardcoded 256.
-  threads: 256
+  threads: 128
   # 0 disables the TT entirely. Profile measured ~1.5% hit rate during
   # self-play (with random-opening plies), making the per-leaf lock+hash
   # overhead net-negative. Re-enable (e.g. 4096) only if hit rate climbs.
@@ -49,6 +47,13 @@ selfplay:
   cpuct: 0.65
   temperature: 1.3
   temperature_at_root: 1.0
+  # Virtual-loss batched-descent width. 1 = legacy strict-sequential MCTS
+  # (search quality every existing model was trained on, ~168 pos/sec).
+  # 8 = throughput knee on the 4090 (~356 pos/sec steady-state, 2.1×) at
+  # the cost of blurrier search. Off-knee widths buy little (w=48 only
+  # ~356 too, but Elo craters). This is a NEW quality/throughput tradeoff
+  # — pre-overhaul self-play always ran at the width=1 equivalent.
+  virtual_loss_width: 8
   use_dirichlet: true
   dirichlet_alpha: 0.12
   dirichlet_epsilon: 0.05
