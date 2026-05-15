@@ -62,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dirichlet-alpha", type=float, default=0.12)
     ap.add_argument("--dirichlet-epsilon", type=float, default=0.05)
     ap.add_argument("--random-opening-plies", type=int, default=0)
+    ap.add_argument("--virtual-loss-width", type=int, default=1,
+                    help="MCTS virtual-loss batched-descent width. 1 = legacy single-leaf descent.")
     ap.add_argument("--scratch-dir", default="artifacts/perf/scratch")
     ap.add_argument("--label", default=None, help="Free-form label saved into the JSON (e.g. phase0, phase1).")
     ap.add_argument("--out", required=True, help="Where to write the JSON snapshot.")
@@ -103,6 +105,7 @@ def main() -> int:
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_epsilon=args.dirichlet_epsilon,
         random_opening_plies=args.random_opening_plies,
+        virtual_loss_width=args.virtual_loss_width,
         max_games=-1,
         save_pgn=False,
     )

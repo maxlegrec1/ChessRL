@@ -66,7 +66,18 @@ struct MctsOptions
     int simulations{800};
     float cpuct{1.5F};
     float temperature_at_root{0.0F};
+    // Per-leaf virtual loss weight. Each in-flight visit adds this much
+    // "phantom win for the child" to its value_sum, making the parent's
+    // PUCT view of that child correspondingly worse — discourages two
+    // batched descents from picking the same leaf in the same round.
+    // c_vloss = 1.0 is the LeelaChess / KataGo convention.
     float virtual_loss{1.0F};
+    // Number of leaves to collect per inference round. width=1 reduces to
+    // the single-leaf-per-descent behavior we had before virtual loss was
+    // wired up. width>1 lets one MCTS worker contribute multiple leaves
+    // to the GPU batch per round — the main throughput lever once the
+    // encoder/inference paths are fast.
+    int virtual_loss_width{1};
     float dirichlet_alpha{0.3F};
     float dirichlet_epsilon{0.25F};
     bool use_dirichlet{false};

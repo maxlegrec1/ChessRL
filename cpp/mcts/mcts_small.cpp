@@ -209,18 +209,108 @@ public:
 
     MctsSummary run()
     {
-        // Phase B: Pass root board + initial history stack to evaluate_node.
+        // The root is evaluated synchronously (single-leaf inference call)
+        // because every subsequent descent depends on its expansion.
         evaluate_node(0, root_board_, root_history_stack_);
 
-        for (int i = 0; i < options_.simulations; ++i)
+        const int width = std::max(1, options_.virtual_loss_width);
+        const int total_sims = options_.simulations;
+
+        std::vector<DescentState> pending;
+        pending.reserve(static_cast<size_t>(width));
+        std::vector<single::BatchTicket<SmallPolicyValue>> tickets;
+        tickets.reserve(static_cast<size_t>(width));
+        std::vector<SmallPolicyValue> cached_evals;
+        cached_evals.reserve(static_cast<size_t>(width));
+        std::vector<bool> have_cached;
+        have_cached.reserve(static_cast<size_t>(width));
+
+        int sims_done = 0;
+        while (sims_done < total_sims)
         {
-            run_simulation();
+            const int round_width = std::min(width, total_sims - sims_done);
+
+            pending.clear();
+            tickets.clear();
+            cached_evals.assign(static_cast<size_t>(round_width), SmallPolicyValue{});
+            have_cached.assign(static_cast<size_t>(round_width), false);
+
+            // ---- Phase 1: do `round_width` descents, applying vloss along the way. ----
+            for (int i = 0; i < round_width; ++i)
+            {
+                DescentState d = descend();
+                apply_virtual_loss(d.path);
+
+                if (d.is_terminal)
+                {
+                    // Revert vloss before backup so terminal hits don't double-count.
+                    revert_virtual_loss(d.path);
+                    detail::backpropagate_full(
+                        tree_, d.path, d.terminal_value, d.terminal_wdl, /*leaf_plies=*/0.0F);
+                    ++sims_done;
+                    continue;
+                }
+
+                pending.push_back(std::move(d));
+            }
+
+            // ---- Phase 2: enqueue eval requests for non-terminal leaves. ----
+            // Cache lookups happen synchronously; misses go onto the GPU queue.
+            for (size_t i = 0; i < pending.size(); ++i)
+            {
+                const auto& d = pending[i];
+                if (cache_)
+                {
+                    const uint64_t hash = compute_cache_key(d.leaf_board.zobrist(), d.leaf_history);
+                    if (auto cached = cache_->get(hash))
+                    {
+                        cached_evals[i] = *cached;
+                        have_cached[i] = true;
+                        continue;
+                    }
+                }
+                auto encoded = acquire_small_encoding(d.leaf_history, d.leaf_board);
+                tickets.push_back(small_batch_runner_->enqueue(*encoded));
+            }
+
+            // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----
+            size_t ticket_idx = 0;
+            for (size_t i = 0; i < pending.size(); ++i)
+            {
+                DescentState& d = pending[i];
+                SmallPolicyValue eval;
+                if (have_cached[i])
+                {
+                    eval = std::move(cached_evals[i]);
+                }
+                else
+                {
+                    eval = tickets[ticket_idx++].get();
+                    if (cache_)
+                    {
+                        const uint64_t hash = compute_cache_key(
+                            d.leaf_board.zobrist(), d.leaf_history);
+                        cache_->put(hash, eval);
+                    }
+                }
+
+                revert_virtual_loss(d.path);
+
+                // If another descent in this same batch already expanded the
+                // leaf, expand_node() is a no-op. We still want to backup with
+                // the leaf's value so this descent counts as one visit.
+                expand_node(d.leaf_node_index, d.leaf_board, eval);
+                const TreeNode& expanded = tree_.nodes[d.leaf_node_index];
+                detail::backpropagate_full(
+                    tree_, d.path, expanded.value_prior, expanded.wdl, expanded.leaf_plies);
+                ++sims_done;
+            }
         }
 
         refine_wdl_recursive();
 
         MctsSummary summary = summarize();
-        
+
         if (small_batch_config_.enable_telemetry)
         {
             auto stats = small_batch_runner_->statistics();
@@ -235,20 +325,29 @@ public:
     }
 
 private:
-    void run_simulation()
+    struct DescentState
     {
-        path_buffer_.clear();
-        path_buffer_.push_back(0);
-        std::vector<int>& path = path_buffer_;
-        int node_index = 0;
+        std::vector<int> path;
+        int leaf_node_index{-1};
+        chess::Board leaf_board;
+        HistoryStack leaf_history;
+        bool is_terminal{false};
+        float terminal_value{0.0F};
+        std::array<float, 3> terminal_wdl{{0.0F, 0.0F, 0.0F}};
+    };
 
-        // Phase B: Maintain local board state, initialized to root at start of simulation.
-        chess::Board current_board = root_board_;
-        // Per-simulation history ring. Starts as the root stack (which
-        // captures the real-game history t-7..t-1 + current). Rotated and
-        // refreshed on every makeMove during tree descent. Lives on the
-        // stack ⇒ inherently per-thread.
-        HistoryStack history_stack = root_history_stack_;
+    // Walk the tree from root applying the PUCT selection rule until we
+    // either reach a terminal node or a yet-to-be-expanded leaf. Reads (but
+    // does NOT mutate) virtual_loss along the path, so siblings already
+    // chosen by an in-flight descent are deprioritized. The caller is
+    // responsible for apply_virtual_loss / revert_virtual_loss.
+    DescentState descend()
+    {
+        DescentState d;
+        d.path.push_back(0);
+        d.leaf_board = root_board_;
+        d.leaf_history = root_history_stack_;
+        int node_index = 0;
 
         while (true)
         {
@@ -256,39 +355,51 @@ private:
 
             if (node.terminal)
             {
-                const float value = terminal_value(current_board).value_or(node.value_prior);
-                const std::array<float, 3> leaf_wdl = wdl_from_terminal(value);
-                detail::backpropagate_full(tree_, path, value, leaf_wdl, /*leaf_plies=*/0.0F);
-                return;
+                d.is_terminal = true;
+                const float value = terminal_value(d.leaf_board).value_or(node.value_prior);
+                d.terminal_value = value;
+                d.terminal_wdl = wdl_from_terminal(value);
+                d.leaf_node_index = node_index;
+                return d;
             }
 
             if (!node.expanded || node.children.empty())
             {
-                evaluate_node(node_index, current_board, history_stack);
-                const TreeNode& evaluated = tree_.nodes[node_index];
-                detail::backpropagate_full(
-                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
-                return;
+                d.is_terminal = false;
+                d.leaf_node_index = node_index;
+                return d;
             }
 
             const int child_index = select_child(node_index);
             if (child_index < 0)
             {
-                evaluate_node(node_index, current_board, history_stack);
-                const TreeNode& evaluated = tree_.nodes[node_index];
-                detail::backpropagate_full(
-                    tree_, path, evaluated.value_prior, evaluated.wdl, evaluated.leaf_plies);
-                return;
+                d.is_terminal = false;
+                d.leaf_node_index = node_index;
+                return d;
             }
 
-            // Phase B: Apply the move to our local board tracker and shift
-            // the history ring before descending.
-            current_board.makeMove(tree_.nodes[child_index].move_from_parent);
-            PiecePlanes snap = snapshot_piece_planes(current_board);
-            snap.repetition = current_board.isRepetition(1);
-            history_stack_push(history_stack, snap);
+            d.leaf_board.makeMove(tree_.nodes[child_index].move_from_parent);
+            PiecePlanes snap = snapshot_piece_planes(d.leaf_board);
+            snap.repetition = d.leaf_board.isRepetition(1);
+            history_stack_push(d.leaf_history, snap);
             node_index = child_index;
-            path.push_back(node_index);
+            d.path.push_back(node_index);
+        }
+    }
+
+    void apply_virtual_loss(const std::vector<int>& path)
+    {
+        for (int idx : path)
+        {
+            tree_.nodes[idx].virtual_loss += 1.0F;
+        }
+    }
+
+    void revert_virtual_loss(const std::vector<int>& path)
+    {
+        for (int idx : path)
+        {
+            tree_.nodes[idx].virtual_loss -= 1.0F;
         }
     }
 
@@ -325,9 +436,21 @@ private:
             const int child_index = node.children[i];
             const TreeNode& child = tree_.nodes[child_index];
             const float prior = node.child_priors[i];
-            const float child_mean = child.visit_count > 0 ? child.value_sum / static_cast<float>(child.visit_count) : 0.0F;
+            // Virtual loss: each in-flight visit on this child counts as a
+            // "phantom win for the child" (= phantom loss for the parent).
+            // Increases the effective visit count denominator AND shifts
+            // value_sum toward what the child would prefer (1.0 from child's
+            // POV per phantom visit), which becomes a penalty from the
+            // parent's PUCT view. width=1 ⇒ vloss never accumulates, formula
+            // collapses to the pre-batching version.
+            const float vloss = child.virtual_loss;
+            const float effective_visits = static_cast<float>(child.visit_count) + vloss;
+            const float effective_value_sum = child.value_sum + options_.virtual_loss * vloss;
+            const float child_mean = effective_visits > 0.0F
+                ? effective_value_sum / effective_visits
+                : 0.0F;
             const float q = -child_mean;
-            const float u = options_.cpuct * prior * sqrt_visits / (1.0F + static_cast<float>(child.visit_count));
+            const float u = options_.cpuct * prior * sqrt_visits / (1.0F + effective_visits);
 
             float mlh_modifier = 0.0F;
             if (child.visit_count > 0)
@@ -350,6 +473,8 @@ private:
         return best_child;
     }
 
+    // Synchronous evaluate-and-expand. Used for the root only; batched
+    // descents call expand_node() directly with a pre-computed eval.
     float evaluate_node(
         int node_index,
         const chess::Board& board_state,
@@ -361,7 +486,6 @@ private:
             return node.value_prior;
         }
 
-        // Phase B: Use passed board_state instead of node.board
         if (auto terminal = terminal_value(board_state))
         {
             node.expanded = true;
@@ -372,14 +496,9 @@ private:
             return node.value_prior;
         }
 
-        // Phase B: Use passed board_state for encoding
-        // Cache key includes the history-stack contents because the NN's
-        // output now depends on the full 8-board stack, not just the
-        // current position. Two visits to the same zobrist with different
-        // surrounding history MUST NOT share an entry.
         SmallPolicyValue eval;
         bool cache_hit = false;
-        uint64_t hash = compute_cache_key(board_state.zobrist(), history);
+        const uint64_t hash = compute_cache_key(board_state.zobrist(), history);
 
         if (cache_)
         {
@@ -395,33 +514,65 @@ private:
             auto encoded = acquire_small_encoding(history, board_state);
             auto ticket = small_batch_runner_->enqueue(*encoded);
             eval = ticket.get();
-
             if (cache_)
             {
                 cache_->put(hash, eval);
             }
         }
 
-        if (eval.policy_logits.size() != chessrl::small_policy_size())
+        expand_node(node_index, board_state, eval);
+        return tree_.nodes[node_index].value_prior;
+    }
+
+    // Pure expansion: write the eval into the node, generate priors, attach
+    // children. Idempotent — if another descent already expanded this leaf,
+    // we just return without rewriting state. Used by both the synchronous
+    // root path and the batched-descent leaf path.
+    void expand_node(
+        int node_index,
+        const chess::Board& board_state,
+        const SmallPolicyValue& eval)
+    {
+        TreeNode& node = tree_.nodes[node_index];
+        if (node.expanded && !node.children.empty())
         {
-            throw std::runtime_error("Single-batch small inference returned unexpected policy size.");
+            return;
+        }
+        if (node.terminal)
+        {
+            return;
         }
 
-        // WDL is already in side-to-move perspective: [win, draw, loss]
+        // Terminal-position detection on the eval path. The batched descent
+        // does NOT recheck terminal_value() on every node (it relies on
+        // node.terminal having been set during a prior expansion), so the
+        // first time we visit a checkmated/stalemated position we'll arrive
+        // here with the position still flagged as a regular leaf.
+        if (auto terminal = terminal_value(board_state))
+        {
+            node.expanded = true;
+            node.terminal = true;
+            node.value_prior = *terminal;
+            node.wdl = wdl_from_terminal(*terminal);
+            node.leaf_plies = 0.0F;
+            return;
+        }
+
+        if (eval.policy_logits.size() != chessrl::small_policy_size())
+        {
+            throw std::runtime_error("Small inference returned unexpected policy size.");
+        }
+
         node.wdl = eval.wdl;
         node.value_prior = node.wdl[0] - node.wdl[2];
-        // mlh_q is the search-aware head, output as plies/25. Convert to raw
-        // plies for the +depth backup math. Clamp at 0 so a negative-prediction
-        // outlier doesn't pollute the running plies-remaining estimate.
         node.leaf_plies = std::max(0.0F, eval.mlh_q * 25.0F);
 
-        // Phase B: Use passed board_state for computing priors
         std::vector<MovePrior> priors = compute_priors(board_state, eval);
         if (priors.empty())
         {
             node.terminal = true;
             node.expanded = true;
-            return node.value_prior;
+            return;
         }
 
         if (node.parent == -1 && options_.use_dirichlet)
@@ -429,20 +580,14 @@ private:
             apply_dirichlet_noise(priors);
         }
 
-        // Phase B: Use passed board_state as parent board
-        const chess::Board parent_board = board_state;
-        const float value_prior = node.value_prior;
         for (const auto& entry : priors)
         {
-            chess::Board child_board = parent_board;
+            chess::Board child_board = board_state;
             child_board.makeMove(entry.move);
             tree_.add_child(node_index, entry.move, entry.prior, child_board);
         }
 
-        TreeNode& refreshed = tree_.nodes[node_index];
-        refreshed.expanded = true;
-
-        return value_prior;
+        tree_.nodes[node_index].expanded = true;
     }
 
 

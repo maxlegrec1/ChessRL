@@ -139,11 +139,12 @@ struct SelfPlayWorker::Impl
         chessrl::mcts::single::SmallBatchConfig batch_config;
         batch_config.engine_path = config.engine_path;
         batch_config.enable_telemetry = true;
-        // Cap max_batch_size to the realistic concurrency. The runner uses this
-        // value as its flush threshold: with N MCTS workers, the queue can never
-        // hold more than N pending requests, so a 1024-cap forces every batch
-        // through a 100us flush timeout. Sizing the threshold to the worker
-        // count lets a fully-populated queue dispatch immediately.
+        // Batch dispatch threshold. Sized to the worker count, not the
+        // per-batch in-flight peak (which would be threads × width with
+        // virtual loss). Measured: capping at ~threads keeps per-batch
+        // latency ~1 ms; larger caps (≥256) push it past 5 ms and net-
+        // regress total pos/sec because MCTS threads spend longer blocked
+        // on ticket.get(). The 4 GPU workers pipeline well at this size.
         const int realistic_concurrency = (config.threads > 0)
             ? config.threads
             : std::min(config.concurrency, 256);
@@ -246,6 +247,7 @@ SelfPlayMetrics SelfPlayWorker::step()
         opt.cpuct = impl_->config.cpuct;
         opt.temperature = impl_->config.temperature;
         opt.temperature_at_root = impl_->config.temperature_at_root;
+        opt.virtual_loss_width = impl_->config.virtual_loss_width;
         opt.use_dirichlet = impl_->config.use_dirichlet;
         opt.dirichlet_alpha = impl_->config.dirichlet_alpha;
         opt.dirichlet_epsilon = impl_->config.dirichlet_epsilon;

@@ -18,6 +18,10 @@ struct SelfPlayConfig
     float cpuct = 0.65f;
     float temperature = 1.3f;
     float temperature_at_root = 1.0f;
+    // Virtual-loss batched-descent width. 1 = legacy single-leaf descent;
+    // >1 = up to N leaves collected per inference round, dramatically
+    // increasing GPU batch fill. Phase 2c of the throughput overhaul.
+    int virtual_loss_width = 1;
     bool use_dirichlet = true;
     float dirichlet_alpha = 0.12f;
     float dirichlet_epsilon = 0.05f;

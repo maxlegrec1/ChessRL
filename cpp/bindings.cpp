@@ -99,7 +99,8 @@ PYBIND11_MODULE(_inference_cpp, m)
            float temperature_at_root,
            bool use_dirichlet,
            float dirichlet_alpha,
-           float dirichlet_epsilon) {
+           float dirichlet_epsilon,
+           int virtual_loss_width) {
             std::vector<chessrl::mcts::MctsOptions> requests;
             requests.reserve(fens.size());
             for (const auto& fen : fens)
@@ -114,6 +115,7 @@ PYBIND11_MODULE(_inference_cpp, m)
                 options.use_dirichlet = use_dirichlet;
                 options.dirichlet_alpha = dirichlet_alpha;
                 options.dirichlet_epsilon = dirichlet_epsilon;
+                options.virtual_loss_width = virtual_loss_width;
                 requests.push_back(std::move(options));
             }
 
@@ -135,6 +137,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,
         py::arg("dirichlet_epsilon") = 0.25F,
+        py::arg("virtual_loss_width") = 1,
         "Execute small-model MCTS searches for a batch of root FENs and return per-root action, policy, and Q-values.");
 
     // History-based entry point to avoid reconstructing FEN strings in Python.
@@ -149,7 +152,8 @@ PYBIND11_MODULE(_inference_cpp, m)
            float temperature_at_root,
            bool use_dirichlet,
            float dirichlet_alpha,
-           float dirichlet_epsilon) {
+           float dirichlet_epsilon,
+           int virtual_loss_width) {
             std::vector<chessrl::mcts::MctsOptions> requests;
             requests.reserve(histories.size());
             for (size_t i = 0; i < histories.size(); ++i)
@@ -167,6 +171,7 @@ PYBIND11_MODULE(_inference_cpp, m)
                 options.use_dirichlet = use_dirichlet;
                 options.dirichlet_alpha = dirichlet_alpha;
                 options.dirichlet_epsilon = dirichlet_epsilon;
+                options.virtual_loss_width = virtual_loss_width;
                 requests.push_back(std::move(options));
             }
 
@@ -189,6 +194,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,
         py::arg("dirichlet_epsilon") = 0.25F,
+        py::arg("virtual_loss_width") = 1,
         "Execute small-model MCTS searches for a batch of move histories and return per-root action, policy, and Q-values.");
 
     py::class_<chessrl::SelfPlayMetrics>(m, "SelfPlayMetrics")
@@ -221,7 +227,8 @@ PYBIND11_MODULE(_inference_cpp, m)
                          bool use_dirichlet,
                          float dirichlet_alpha,
                          float dirichlet_epsilon,
-                         int random_opening_plies) {
+                         int random_opening_plies,
+                         int virtual_loss_width) {
             chessrl::SelfPlayConfig config;
             config.engine_path = engine_path;
             config.output_path = output_path;
@@ -240,6 +247,7 @@ PYBIND11_MODULE(_inference_cpp, m)
             config.dirichlet_alpha = dirichlet_alpha;
             config.dirichlet_epsilon = dirichlet_epsilon;
             config.random_opening_plies = random_opening_plies;
+            config.virtual_loss_width = virtual_loss_width;
             return new chessrl::SelfPlayWorker(config);
         }),
         py::arg("engine_path"),
@@ -258,7 +266,8 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("use_dirichlet") = true,
         py::arg("dirichlet_alpha") = 0.12f,
         py::arg("dirichlet_epsilon") = 0.05f,
-        py::arg("random_opening_plies") = 0)
+        py::arg("random_opening_plies") = 0,
+        py::arg("virtual_loss_width") = 1)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
         .def("inference_stats", &chessrl::SelfPlayWorker::inference_stats)
         .def("get_buffer_size", &chessrl::SelfPlayWorker::get_buffer_size);
