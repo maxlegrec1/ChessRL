@@ -610,6 +610,126 @@ std::vector<float> encodeSmallFeaturesNoHistory(const chess::Board& board)
     return encodeSmallFeatures(board, empty);
 }
 
+// ---------------------------------------------------------------------------
+// Packed-input path (host-side reference).
+//
+// Instead of marshalling a dense 7104-float tensor per leaf (the measured
+// ~0.78 ms/batch host-memory bottleneck), we carry a tiny ~776-byte packed
+// snapshot and expand it to the 111 planes. expand_packed_to_dense() below
+// is the CPU REFERENCE: it MUST be bit-identical to encodeSmallFeatures()
+// for the same logical position. The GPU kernel (Step 2) mirrors this
+// reference; the runtime path (Step 3) replaces the dense marshalling with
+// packed-transfer + GPU expansion. Gated by tests/test_packed_parity.py.
+// ---------------------------------------------------------------------------
+
+void pack_small_position_impl(
+    const chess::Board& board,
+    const chessrl::mcts::HistoryStack& history,
+    SmallPackedPosition& out)
+{
+    out = SmallPackedPosition{};
+
+    // Slot 0 piece planes always come from the live board (matches
+    // encodeSmallFeatures: defensive against a drifted ring buffer).
+    const auto cur = currentBoardBitboards(board);
+    for (int k = 0; k < kSmallPiecePlanes; ++k)
+        out.bitboards[0][static_cast<size_t>(k)] = cur[static_cast<size_t>(k)];
+    out.slot_valid = 0x01u;                                   // slot 0 always valid
+    if (history[0].repetition) out.slot_rep |= 0x01u;         // current-rep flag
+
+    for (int slot = 1; slot < kSmallHistoryDepth; ++slot)
+    {
+        const auto& past = history[static_cast<size_t>(slot)];
+        if (!past.valid) continue;                            // zero slot ⇒ no-history
+        for (int k = 0; k < kSmallPiecePlanes; ++k)
+            out.bitboards[slot][static_cast<size_t>(k)] =
+                past.bitboards[static_cast<size_t>(k)];
+        out.slot_valid |= static_cast<std::uint8_t>(1u << slot);
+        if (past.repetition)
+            out.slot_rep |= static_cast<std::uint8_t>(1u << slot);
+    }
+
+    out.stm = (board.sideToMove() == chess::Color::WHITE) ? 1u : 0u;
+
+    const auto ep = board.enpassantSq();
+    out.ep_square = ep.is_valid()
+        ? static_cast<std::int16_t>(ep.index())
+        : static_cast<std::int16_t>(-1);
+
+    const auto cr = board.castlingRights();
+    std::uint8_t cb = 0;
+    if (cr.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::KING_SIDE))  cb |= 0x1u;
+    if (cr.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::QUEEN_SIDE)) cb |= 0x2u;
+    if (cr.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::KING_SIDE))  cb |= 0x4u;
+    if (cr.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::QUEEN_SIDE)) cb |= 0x8u;
+    out.castling = cb;
+
+    const auto hm = board.halfMoveClock();
+    out.halfmove = static_cast<std::uint8_t>(hm > 255u ? 255u : hm);
+}
+
+// CPU reference expansion. Bit-identical to encodeSmallFeatures() — same
+// plane indices, same rank-flip (row = 7 - rank), same globals. The GPU
+// kernel must reproduce this exactly.
+std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p)
+{
+    std::vector<float> features(
+        static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes,
+        0.0F);
+
+    auto fillPlane = [&](int plane, float value) {
+        for (int r = 0; r < kSmallBoardSize; ++r)
+            for (int c = 0; c < kSmallBoardSize; ++c)
+                features[encodeSmallIndex(r, c, plane)] = value;
+    };
+    auto fillPieces = [&](const std::uint64_t* bbs, int base) {
+        for (int plane = 0; plane < kSmallPiecePlanes; ++plane)
+        {
+            std::uint64_t bb = bbs[plane];
+            while (bb != 0ULL)
+            {
+                const int sq = __builtin_ctzll(bb);
+                bb &= bb - 1;
+                const int rank = sq / kSmallBoardSize;
+                const int file = sq % kSmallBoardSize;
+                features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, base + plane)] = 1.0F;
+            }
+        }
+    };
+
+    // Slot 0 (always valid).
+    fillPieces(p.bitboards[0], 0);
+    if (p.slot_rep & 0x01u) fillPlane(kSmallPiecePlanes, 1.0F);
+
+    for (int slot = 1; slot < kSmallHistoryDepth; ++slot)
+    {
+        if (!((p.slot_valid >> slot) & 1u)) continue;
+        const int base = kSmallPiecePlanes + 1 + (slot - 1) * kSmallHistBlock;
+        fillPieces(p.bitboards[slot], base);
+        if ((p.slot_rep >> slot) & 1u) fillPlane(base + kSmallPiecePlanes, 1.0F);
+    }
+
+    fillPlane(kSmallPlaneSTM, p.stm ? 1.0F : 0.0F);
+
+    if (p.ep_square >= 0)
+    {
+        const int idxSq = p.ep_square;
+        const int rank = idxSq / kSmallBoardSize;
+        const int file = idxSq % kSmallBoardSize;
+        features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, kSmallPlaneEP)] = 1.0F;
+    }
+
+    fillPlane(kSmallPlaneCastlingWK, (p.castling & 0x1u) ? 1.0F : 0.0F);
+    fillPlane(kSmallPlaneCastlingWQ, (p.castling & 0x2u) ? 1.0F : 0.0F);
+    fillPlane(kSmallPlaneCastlingBK, (p.castling & 0x4u) ? 1.0F : 0.0F);
+    fillPlane(kSmallPlaneCastlingBQ, (p.castling & 0x8u) ? 1.0F : 0.0F);
+
+    const float hmNorm = std::min(1.0F, static_cast<float>(p.halfmove) / 100.0F);
+    fillPlane(kSmallPlaneHMC, hmNorm);
+
+    return features;
+}
+
 SmallEncodedPosition build_small_encoded_position(
     const chess::Board& board,
     const chessrl::mcts::HistoryStack& history)
@@ -961,6 +1081,19 @@ SmallEncodedPosition encode_small_position(
     const chessrl::mcts::HistoryStack& history)
 {
     return build_small_encoded_position(board, history);
+}
+
+SmallPackedPosition pack_small_position(
+    const chess::Board& board, const chessrl::mcts::HistoryStack& history)
+{
+    SmallPackedPosition p;
+    pack_small_position_impl(board, history, p);
+    return p;
+}
+
+std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed)
+{
+    return expand_packed_to_dense_impl(packed);
 }
 
 struct SmallBatchRunner::Impl

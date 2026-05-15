@@ -78,6 +78,35 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("moves"),
         "Return the C++ encoder's 8x8x111 input plane vector for a FEN + UCI history.");
 
+    // Packed-path parity hook: build the same (board, history), pack into the
+    // ~776 B snapshot, then CPU-expand it. MUST be bit-identical to
+    // encode_position_with_history (tests/test_packed_parity.py gates this).
+    m.def(
+        "encode_position_packed_roundtrip",
+        [](const std::string& fen, const std::vector<std::string>& moves) {
+            const std::string starting_fen = fen.empty()
+                ? std::string(chess::constants::STARTPOS)
+                : fen;
+            chess::Board board(starting_fen);
+            for (const auto& mv_uci : moves)
+            {
+                chess::Move mv = chess::uci::uciToMove(board, mv_uci);
+                if (mv == chess::Move::NO_MOVE)
+                {
+                    throw std::runtime_error(
+                        "encode_position_packed_roundtrip: failed to parse move " + mv_uci);
+                }
+                board.makeMove(mv);
+            }
+            chessrl::mcts::HistoryStack stack =
+                chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
+            auto packed = chessrl::mcts::single::pack_small_position(board, stack);
+            return chessrl::mcts::single::expand_packed_to_dense(packed);
+        },
+        py::arg("fen"),
+        py::arg("moves"),
+        "Pack a FEN+history then CPU-expand it; must match encode_position_with_history.");
+
     m.def(
         "small_generate_moves",
         [](const std::vector<std::string>& fens, float temperature, int iterations, const std::string& engine_path) {
