@@ -1,0 +1,67 @@
+{
+  "label": "post_revert",
+  "engine": "artifacts/legal_ceiling_v7_history_arch/v7.trt",
+  "gpu": "NVIDIA H200",
+  "host": "fa8312fb6cf1",
+  "ts": 1778838120.471549,
+  "config": {
+    "concurrency": 1024,
+    "threads": 128,
+    "sims": 800,
+    "hash_size": 0,
+    "max_buffer_size": 1000000,
+    "temperature": 1.3,
+    "temperature_at_root": 1.0,
+    "cpuct": 0.65,
+    "use_dirichlet": true,
+    "dirichlet_alpha": 0.12,
+    "dirichlet_epsilon": 0.05,
+    "random_opening_plies": 0
+  },
+  "wall_clock_sec": 20.95541669568047,
+  "warmup_sec": 6.0,
+  "steps": 7,
+  "positions": 7168,
+  "games": 0,
+  "nodes": 5734400,
+  "throughput": {
+    "positions_per_sec": 342.0595306738776,
+    "games_per_sec": 0.0,
+    "nodes_per_sec": 273647.6245391021
+  },
+  "inference": {
+    "batches": 45647,
+    "positions_in_batches": 5739605,
+    "total_inference_ms": 50000.22918900028,
+    "mean_batch_size": 125.73893136460228,
+    "mean_infer_ms_per_batch": 1.0953672571910593
+  },
+  "encoder": {
+    "calls": 5739605,
+    "total_encoder_ms_aggregate": 19584.336509,
+    "mean_us_per_leaf": 3.4121401227087924,
+    "leaves_per_batch": 125.73893136460228,
+    "thread_busy_frac": 0.007301340326394028
+  },
+  "samples": [
+    {
+      "t": 5.976956447120756,
+      "positions": 2048,
+      "games": 0,
+      "nodes": 1638400
+    },
+    {
+      "t": 11.846628560684621,
+      "positions": 4096,
+      "games": 0,
+      "nodes": 3276800
+    },
+    {
+      "t": 17.881871744059026,
+      "positions": 6144,
+      "games": 0,
+      "nodes": 4915200
+    }
+  ],
+  "buffer_path": "artifacts/perf/scratch/bench_1778838092.bin"
+}

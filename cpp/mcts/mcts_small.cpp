@@ -269,8 +269,8 @@ public:
                         continue;
                     }
                 }
-                tickets.push_back(small_batch_runner_->enqueue(
-                    acquire_small_encoding(d.leaf_history, d.leaf_board)));
+                auto encoded = acquire_small_encoding(d.leaf_history, d.leaf_board);
+                tickets.push_back(small_batch_runner_->enqueue(*encoded));
             }
 
             // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----
@@ -511,8 +511,8 @@ private:
 
         if (!cache_hit)
         {
-            auto ticket = small_batch_runner_->enqueue(
-                acquire_small_encoding(history, board_state));
+            auto encoded = acquire_small_encoding(history, board_state);
+            auto ticket = small_batch_runner_->enqueue(*encoded);
             eval = ticket.get();
             if (cache_)
             {
@@ -967,14 +967,15 @@ private:
         return summary;
     }
 
-    // Produce the compact ~776 B packed snapshot for a leaf. The dense 111
-    // planes are materialized on the GPU (launch_expand_planes) just before
-    // the TRT enqueue — no per-leaf 28 KB float tensor on the host path.
-    single::SmallPackedPosition acquire_small_encoding(
+    std::shared_ptr<const single::SmallEncodedPosition> acquire_small_encoding(
         const HistoryStack& history,
         const chess::Board& board)
     {
-        return single::pack_small_position(board, history);
+        // Each leaf in MCTS is by definition unvisited; the prior encoding cache
+        // (keyed on HistoryEntry*) had near-zero hit rate but locked a mutex on
+        // every leaf, serializing the worker threads of a single board. Drop it.
+        return std::make_shared<single::SmallEncodedPosition>(
+            single::encode_small_position(board, history));
     }
 
     // Fold the history stack into a 64-bit hash by combining each slot's

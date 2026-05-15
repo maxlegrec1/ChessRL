@@ -1,13 +1,7 @@
-// Packed → dense plane expansion. Mirrors expand_packed_to_dense() (CPU
-// reference, single_inference.cpp) bit-for-bit. Validated GPU-vs-CPU by
+// Packed → dense plane expansion kernel. Mirrors expand_packed_to_dense()
+// (CPU reference, single_inference.cpp) bit-for-bit: same plane indices,
+// same 7-rank flip (row = 7 - rank), same globals. Validated GPU-vs-CPU by
 // tests/test_packed_gpu_parity.py.
-//
-// Design: ONE THREAD PER OUTPUT ELEMENT (batch * 7104). Every element is
-// written exactly once (no memset), and consecutive threads write
-// consecutive memory (the dense layout is plane-contiguous), so stores are
-// fully coalesced. This replaces a naive one-thread-per-sample kernel that
-// did ~1000 scattered writes/sample + a 3.6 MB memset and was slower than
-// the host marshalling it removed.
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -22,67 +16,68 @@ namespace
 __device__ __forceinline__ void store(float* p, float v) { *p = v; }
 __device__ __forceinline__ void store(__half* p, float v) { *p = __float2half(v); }
 
+// dense index: b*7104 + (row*8 + col)*111 + plane
+__device__ __forceinline__ int didx(int b, int row, int col, int plane)
+{
+    return b * kPackElems + (row * kPackBoard + col) * kPackPlanes + plane;
+}
+
 template <typename T>
 __global__ void expand_kernel(const SmallPackedPosition* __restrict__ packed,
-                              T* __restrict__ out, long long total)
+                              T* __restrict__ out, int batch)
 {
-    const long long stride = (long long)gridDim.x * blockDim.x;
-    for (long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-         idx < total; idx += stride)
-    {
-        // Decompose flat index → (b, row, col, plane). Layout:
-        //   idx = b*7104 + (row*8 + col)*111 + plane
-        const int plane = (int)(idx % kPackPlanes);
-        long long t = idx / kPackPlanes;          // = b*64 + row*8 + col
-        const int col = (int)(t % kPackBoard);
-        t /= kPackBoard;
-        const int row = (int)(t % kPackBoard);
-        const int b = (int)(t / kPackBoard);
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= batch) return;
+    const SmallPackedPosition& p = packed[b];
 
-        const SmallPackedPosition& p = packed[b];
-        float v = 0.0f;
-
-        if (plane < kPackHistory * kPackHistBlock)            // 0..103
+    auto fill_plane = [&](int plane, float v) {
+        for (int r = 0; r < kPackBoard; ++r)
+            for (int c = 0; c < kPackBoard; ++c)
+                store(&out[didx(b, r, c, plane)], v);
+    };
+    auto fill_pieces = [&](const unsigned long long* bbs, int base) {
+        for (int k = 0; k < kPackPiecePlanes; ++k)
         {
-            const int slot = plane / kPackHistBlock;          // 0..7
-            const int within = plane % kPackHistBlock;        // 0..12
-            const bool slot_ok = (slot == 0)
-                ? true : (((p.slot_valid >> slot) & 1u) != 0u);
-            if (slot_ok)
+            unsigned long long bb = bbs[k];
+            while (bb != 0ULL)
             {
-                if (within < kPackPiecePlanes)
-                {
-                    // Encoder lit (row=7-rank, col=file) for set bit at sq
-                    // (rank=sq/8, file=sq%8) ⇒ source sq = (7-row)*8 + col.
-                    const int sq = (kPackBoard - 1 - row) * kPackBoard + col;
-                    const unsigned long long bb =
-                        (unsigned long long)p.bitboards[slot][within];
-                    v = ((bb >> sq) & 1ULL) ? 1.0f : 0.0f;
-                }
-                else // repetition plane (within == 12), full-plane 0/1
-                {
-                    v = ((p.slot_rep >> slot) & 1u) ? 1.0f : 0.0f;
-                }
+                const int sq = __ffsll(static_cast<long long>(bb)) - 1;
+                bb &= bb - 1;
+                const int rank = sq / kPackBoard;
+                const int file = sq % kPackBoard;
+                store(&out[didx(b, kPackBoard - 1 - rank, file, base + k)], 1.0f);
             }
         }
-        else if (plane == kPackPlaneSTM)   v = p.stm ? 1.0f : 0.0f;
-        else if (plane == kPackPlaneEP)
-        {
-            const int sq = (kPackBoard - 1 - row) * kPackBoard + col;
-            v = (p.ep_square >= 0 && p.ep_square == sq) ? 1.0f : 0.0f;
-        }
-        else if (plane == kPackPlaneCWK)   v = (p.castling & 0x1u) ? 1.0f : 0.0f;
-        else if (plane == kPackPlaneCWQ)   v = (p.castling & 0x2u) ? 1.0f : 0.0f;
-        else if (plane == kPackPlaneCBK)   v = (p.castling & 0x4u) ? 1.0f : 0.0f;
-        else if (plane == kPackPlaneCBQ)   v = (p.castling & 0x8u) ? 1.0f : 0.0f;
-        else if (plane == kPackPlaneHMC)
-        {
-            const float hm = (float)p.halfmove / 100.0f;
-            v = hm < 1.0f ? hm : 1.0f;
-        }
+    };
 
-        store(&out[idx], v);
+    // Slot 0 (always valid).
+    fill_pieces(reinterpret_cast<const unsigned long long*>(p.bitboards[0]), 0);
+    if (p.slot_rep & 0x01u) fill_plane(kPackPiecePlanes, 1.0f);
+
+    for (int slot = 1; slot < kPackHistory; ++slot)
+    {
+        if (!((p.slot_valid >> slot) & 1u)) continue;
+        const int base = kPackPiecePlanes + 1 + (slot - 1) * kPackHistBlock;
+        fill_pieces(reinterpret_cast<const unsigned long long*>(p.bitboards[slot]), base);
+        if ((p.slot_rep >> slot) & 1u) fill_plane(base + kPackPiecePlanes, 1.0f);
     }
+
+    if (p.stm) fill_plane(kPackPlaneSTM, 1.0f);  // 0 already from memset
+
+    if (p.ep_square >= 0)
+    {
+        const int sq = p.ep_square;
+        store(&out[didx(b, kPackBoard - 1 - sq / kPackBoard, sq % kPackBoard,
+                        kPackPlaneEP)], 1.0f);
+    }
+
+    if (p.castling & 0x1u) fill_plane(kPackPlaneCWK, 1.0f);
+    if (p.castling & 0x2u) fill_plane(kPackPlaneCWQ, 1.0f);
+    if (p.castling & 0x4u) fill_plane(kPackPlaneCBK, 1.0f);
+    if (p.castling & 0x8u) fill_plane(kPackPlaneCBQ, 1.0f);
+
+    const float hm = static_cast<float>(p.halfmove) / 100.0f;
+    fill_plane(kPackPlaneHMC, hm < 1.0f ? hm : 1.0f);
 }
 
 } // namespace
@@ -96,19 +91,19 @@ cudaError_t launch_expand_planes(
 {
     if (batch <= 0) return cudaSuccess;
 
-    // Every element is written exactly once → no memset needed.
-    const long long total = (long long)batch * kPackElems;
-    const int threads = 256;
-    const int max_blocks = 65535;
-    long long want = (total + threads - 1) / threads;
-    const int blocks = (int)(want < max_blocks ? want : max_blocks);
+    const size_t elem = out_is_half ? sizeof(__half) : sizeof(float);
+    cudaError_t e = cudaMemsetAsync(
+        d_out, 0, static_cast<size_t>(batch) * kPackElems * elem, stream);
+    if (e != cudaSuccess) return e;
 
+    const int threads = 128;
+    const int blocks = (batch + threads - 1) / threads;
     if (out_is_half)
         expand_kernel<__half><<<blocks, threads, 0, stream>>>(
-            d_packed, static_cast<__half*>(d_out), total);
+            d_packed, static_cast<__half*>(d_out), batch);
     else
         expand_kernel<float><<<blocks, threads, 0, stream>>>(
-            d_packed, static_cast<float*>(d_out), total);
+            d_packed, static_cast<float*>(d_out), batch);
     return cudaGetLastError();
 }
 

@@ -35,7 +35,6 @@
 
 #include "chess-library/include/chess.hpp"
 #include "include/trt_utils.hpp"
-#include "mcts/expand_kernel.hpp"
 
 namespace chessrl::mcts::single
 {
@@ -1113,7 +1112,7 @@ struct SmallBatchRunner::Impl
 {
     struct SmallPending
     {
-        SmallPackedPosition position;  // expanded to dense planes on the GPU
+        SmallEncodedPosition position;
         std::shared_ptr<std::promise<SmallPolicyValue>> promise;
     };
 
@@ -1129,13 +1128,12 @@ struct SmallBatchRunner::Impl
         std::thread thread;
         std::unique_ptr<nvinfer1::IExecutionContext> exec;  // dynamic-shape, fallback path
         std::unique_ptr<CudaStream> stream;
-        ResizableDeviceBuffer packedDevice;  // ~776 B/leaf, H2D'd then expanded
-        ResizableDeviceBuffer inputDevice;   // dense fp16 [B,8,8,111], kernel out
+        ResizableDeviceBuffer inputDevice;
         ResizableDeviceBuffer policyDevice;
         ResizableDeviceBuffer valueDevice;
         ResizableDeviceBuffer mlhDevice;
         ResizableDeviceBuffer mlhQDevice;
-        PinnedBuffer hostPacked;             // packed snapshots staged for H2D
+        PinnedBuffer hostInput;
         PinnedBuffer hostPolicy;
         PinnedBuffer hostValue;
         PinnedBuffer hostMlh;
@@ -1266,8 +1264,14 @@ struct SmallBatchRunner::Impl
         }
     }
 
-    BatchTicket<SmallPolicyValue> enqueue(SmallPackedPosition position)
+    BatchTicket<SmallPolicyValue> enqueue(SmallEncodedPosition position)
     {
+        const size_t expected = static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes;
+        if (position.features.size() != expected)
+        {
+            throw std::runtime_error("Small batch request provided incorrect feature vector length.");
+        }
+
         auto promise = std::make_shared<std::promise<SmallPolicyValue>>();
         auto future = promise->get_future().share();
         {
@@ -1372,12 +1376,6 @@ struct SmallBatchRunner::Impl
 
             inputDims.d[0] = static_cast<int>(engineBatch);
 
-            // packedDevice/hostPacked: the compact ~776 B/leaf snapshots.
-            // inputDevice: the dense [B,8,8,111] tensor the GPU kernel writes
-            // and TRT reads (no host dense tensor exists anymore).
-            const size_t packedBytes = engineBatch * sizeof(SmallPackedPosition);
-            w.packedDevice.ensure(sizeBatch * sizeof(SmallPackedPosition));
-            w.hostPacked.ensure(sizeBatch * sizeof(SmallPackedPosition));
             w.inputDevice.ensure(sizeBatch * inputElements * element_size(inputType));
             w.policyDevice.ensure(sizeBatch * policyElements * element_size(policyType));
             w.valueDevice.ensure(sizeBatch * valueElements * element_size(valueType));
@@ -1390,30 +1388,69 @@ struct SmallBatchRunner::Impl
             if (hasMlh) w.mlhDevice.ensure(sizeBatch * mlhElements * element_size(mlhType));
             if (hasMlhQ) w.mlhQDevice.ensure(sizeBatch * mlhElements * element_size(mlhQType));
 
+            const size_t inputBytes = engineBatch * inputElements * element_size(inputType);
             const size_t policyBytes = engineBatch * policyElements * element_size(policyType);
             const size_t valueBytes = engineBatch * valueElements * element_size(valueType);
+            w.hostInput.ensure(sizeBatch * inputElements * element_size(inputType));
             w.hostPolicy.ensure(sizeBatch * policyElements * element_size(policyType));
             w.hostValue.ensure(sizeBatch * valueElements * element_size(valueType));
             if (hasMlh) w.hostMlh.ensure(sizeBatch * mlhElements * element_size(mlhType));
             if (hasMlhQ) w.hostMlhQ.ensure(sizeBatch * mlhElements * element_size(mlhQType));
-            const int out_is_half = (inputType == nvinfer1::DataType::kHALF) ? 1 : 0;
 
             const auto t_asm0 = std::chrono::steady_clock::now();
-            // Step 3: Input assembly is now a flat memcpy of the compact
-            // ~776 B packed snapshots into the pinned staging buffer (the
-            // ~0.78 ms scalar-fp16-conversion of 28 KB dense tensors is
-            // gone). Pad rows [actualCount,engineBatch) are zeroed: a zeroed
-            // SmallPackedPosition has slot_valid=0 ⇒ the kernel emits all-
-            // zero planes for it. Pad outputs are discarded, but a captured
-            // graph copies the full bucket region every replay so the pad
-            // must be deterministic.
+            // Step 3: Input assembly — real rows [0,actualCount), then a
+            // zeroed pad up to engineBatch (graph path only). Pad outputs are
+            // discarded but a captured graph copies the full bucket region
+            // every replay, so the pad must be deterministic zeros.
+            float* hostInputFloat = static_cast<float*>(w.hostInput.data());
+            __half* hostInputHalf = static_cast<__half*>(w.hostInput.data());
+
+            for (size_t i = 0; i < actualCount; ++i)
             {
-                auto* hp = static_cast<SmallPackedPosition*>(w.hostPacked.data());
-                for (size_t i = 0; i < actualCount; ++i)
-                    hp[i] = work[i].position;
-                if (engineBatch > actualCount)
-                    std::memset(hp + actualCount, 0,
-                        (engineBatch - actualCount) * sizeof(SmallPackedPosition));
+                const auto& features = work[i].position.features;
+                const size_t offset = i * inputElements;
+
+                if (inputType == nvinfer1::DataType::kFLOAT)
+                {
+                    std::memcpy(hostInputFloat + offset, features.data(), inputElements * sizeof(float));
+                }
+                else if (inputType == nvinfer1::DataType::kHALF)
+                {
+                    const float* src = features.data();
+                    __half* dst = hostInputHalf + offset;
+                    size_t j = 0;
+#if defined(__F16C__)
+                    // F16C: 8 fp32 -> 8 IEEE-fp16 per instruction. Round-to-
+                    // nearest-even matches __float2half, so this is bit-
+                    // identical to the scalar path (the encoder emits only
+                    // 0.0/1.0/halfmove-frac, all exactly representable). This
+                    // is the dominant per-batch cost — ~0.78 ms of scalar
+                    // conversion over ~900K floats becomes ~0.1 ms.
+                    for (; j + 8 <= inputElements; j += 8)
+                    {
+                        __m256 v = _mm256_loadu_ps(src + j);
+                        __m128i h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+                        _mm_storeu_si128(
+                            reinterpret_cast<__m128i*>(dst + j), h);
+                    }
+#endif
+                    for (; j < inputElements; ++j)
+                    {
+                        dst[j] = __float2half(src[j]);
+                    }
+                }
+                else
+                {
+                    throw std::runtime_error("Unsupported small-model batch input tensor type.");
+                }
+            }
+            if (engineBatch > actualCount)
+            {
+                const size_t esz = element_size(inputType);
+                std::memset(
+                    static_cast<char*>(w.hostInput.data()) + actualCount * inputElements * esz,
+                    0,
+                    (engineBatch - actualCount) * inputElements * esz);
             }
 
             auto bind_addresses = [&](nvinfer1::IExecutionContext* ex) -> bool {
@@ -1425,19 +1462,6 @@ struct SmallBatchRunner::Impl
                 if (ok && hasMlhQ)
                     ok = ex->setTensorAddress(ctx.mlhQName().c_str(), w.mlhQDevice.data());
                 return ok;
-            };
-
-            // H2D the packed snapshots, then expand them to the dense fp16
-            // input tensor on the GPU. Both ops go on `s` so the whole thing
-            // is captured inside a CUDA graph. Replaces the old dense H2D.
-            auto submit_input = [&](cudaStream_t s) -> bool {
-                if (cudaMemcpyAsync(w.packedDevice.data(), w.hostPacked.data(),
-                        packedBytes, cudaMemcpyHostToDevice, s) != cudaSuccess)
-                    return false;
-                return launch_expand_planes(
-                    static_cast<const SmallPackedPosition*>(w.packedDevice.data()),
-                    w.inputDevice.data(), static_cast<int>(engineBatch),
-                    out_is_half, s) == cudaSuccess;
             };
 
             const auto t_gpu0 = std::chrono::steady_clock::now();
@@ -1480,7 +1504,8 @@ struct SmallBatchRunner::Impl
 
                     bool enqueue_ok = true;
                     const bool captured = g.capture(w.stream->get(), [&]() {
-                        if (!submit_input(w.stream->get())) enqueue_ok = false;
+                        cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(),
+                            inputBytes, cudaMemcpyHostToDevice, w.stream->get());
                         if (!gctx->enqueueV3(w.stream->get())) enqueue_ok = false;
                         cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(),
                             policyBytes, cudaMemcpyDeviceToHost, w.stream->get());
@@ -1514,8 +1539,9 @@ struct SmallBatchRunner::Impl
                 else
                 {
                     // Capture unavailable: run the same frozen context directly.
-                    if (!submit_input(w.stream->get()))
-                        throw std::runtime_error("submit_input (gfb) failed.");
+                    if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(),
+                            inputBytes, cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb H2D) failed.");
                     if (!gctx->enqueueV3(w.stream->get()))
                         throw std::runtime_error("graph-fallback enqueueV3 failed.");
                     if (cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(),
@@ -1541,8 +1567,9 @@ struct SmallBatchRunner::Impl
                 // Original dynamic-shape path (graphs disabled).
                 if (!w.exec->setInputShape(ctx.inputName().c_str(), inputDims))
                     throw std::runtime_error("Failed to set small-model batch input shape.");
-                if (!submit_input(w.stream->get()))
-                    throw std::runtime_error("submit_input (no-graph) failed.");
+                if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(), inputBytes,
+                        cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
                 if (!bind_addresses(w.exec.get()))
                     throw std::runtime_error("Failed to set small-model batch tensor addresses.");
                 if (!w.exec->enqueueV3(w.stream->get()))
@@ -1820,7 +1847,7 @@ SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
     impl_ = std::move(fresh);
 }
 
-SmallBatchRunner::Ticket SmallBatchRunner::enqueue(SmallPackedPosition position)
+SmallBatchRunner::Ticket SmallBatchRunner::enqueue(SmallEncodedPosition position)
 {
     return impl_->enqueue(std::move(position));
 }
