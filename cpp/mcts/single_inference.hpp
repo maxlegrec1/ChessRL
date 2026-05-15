@@ -110,7 +110,9 @@ public:
 
     explicit SmallBatchRunner(SmallBatchConfig config = {});
 
-    Ticket enqueue(SmallEncodedPosition position);
+    // Carries the compact packed snapshot; the dense planes are produced on
+    // the GPU (launch_expand_planes) just before the TRT enqueue.
+    Ticket enqueue(SmallPackedPosition position);
     void process_pending();
     size_t pending() const;
     BatchStatistics statistics() const;
