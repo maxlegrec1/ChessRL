@@ -29,6 +29,10 @@
 
 #include "cuda_fp16.h"
 
+#if defined(__F16C__)
+#include <immintrin.h>
+#endif
+
 #include "chess-library/include/chess.hpp"
 #include "include/trt_utils.hpp"
 
@@ -1267,9 +1271,27 @@ struct SmallBatchRunner::Impl
                 }
                 else if (inputType == nvinfer1::DataType::kHALF)
                 {
-                    for (size_t j = 0; j < inputElements; ++j)
+                    const float* src = features.data();
+                    __half* dst = hostInputHalf + offset;
+                    size_t j = 0;
+#if defined(__F16C__)
+                    // F16C: 8 fp32 -> 8 IEEE-fp16 per instruction. Round-to-
+                    // nearest-even matches __float2half, so this is bit-
+                    // identical to the scalar path (the encoder emits only
+                    // 0.0/1.0/halfmove-frac, all exactly representable). This
+                    // is the dominant per-batch cost — ~0.78 ms of scalar
+                    // conversion over ~900K floats becomes ~0.1 ms.
+                    for (; j + 8 <= inputElements; j += 8)
                     {
-                        hostInputHalf[offset + j] = __float2half(features[j]);
+                        __m256 v = _mm256_loadu_ps(src + j);
+                        __m128i h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT);
+                        _mm_storeu_si128(
+                            reinterpret_cast<__m128i*>(dst + j), h);
+                    }
+#endif
+                    for (; j < inputElements; ++j)
+                    {
+                        dst[j] = __float2half(src[j]);
                     }
                 }
                 else
