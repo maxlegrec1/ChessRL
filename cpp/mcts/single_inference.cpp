@@ -23,6 +23,7 @@
 #include <string>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -42,6 +43,18 @@ namespace
 // own bit-unpack cost.
 std::atomic<std::uint64_t> g_encoder_calls{0};
 std::atomic<std::uint64_t> g_encoder_nanos{0};
+
+// CUDA-graph dispatch counters (benchmark only). graph = batch served by a
+// captured+replayed graph; fallback = batch served by the enqueueV3 path.
+std::atomic<std::uint64_t> g_graph_batches{0};
+std::atomic<std::uint64_t> g_fallback_batches{0};
+
+// Coarse per-batch sub-phase timers (ns), benchmark only. Localizes where
+// the ~1 ms/batch goes: CPU input marshalling vs GPU launch+sync vs CPU
+// output distribution.
+std::atomic<std::uint64_t> g_t_assembly_ns{0};
+std::atomic<std::uint64_t> g_t_gpu_ns{0};
+std::atomic<std::uint64_t> g_t_dist_ns{0};
 
 } // namespace
 
@@ -240,7 +253,10 @@ class CudaStream
 public:
     CudaStream()
     {
-        if (cudaStreamCreate(&mStream) != cudaSuccess)
+        // Non-blocking: required for stream capture (a stream that implicitly
+        // syncs with the legacy default stream cannot be captured). Also
+        // removes false serialization against the default stream.
+        if (cudaStreamCreateWithFlags(&mStream, cudaStreamNonBlocking) != cudaSuccess)
         {
             throw std::runtime_error("Failed to create CUDA stream.");
         }
@@ -258,6 +274,63 @@ public:
 
 private:
     cudaStream_t mStream{};
+};
+
+// RAII for an instantiated CUDA graph (the executable form). Holds both the
+// captured cudaGraph_t and its cudaGraphExec_t; both are released on destroy.
+class CudaGraphExec
+{
+public:
+    CudaGraphExec() = default;
+    ~CudaGraphExec() { reset(); }
+
+    CudaGraphExec(const CudaGraphExec&) = delete;
+    CudaGraphExec& operator=(const CudaGraphExec&) = delete;
+
+    void reset()
+    {
+        if (mExec) { cudaGraphExecDestroy(mExec); mExec = nullptr; }
+        if (mGraph) { cudaGraphDestroy(mGraph); mGraph = nullptr; }
+    }
+
+    // Capture the work submitted to `stream` by `submit()` and instantiate it.
+    // Returns false (and leaves this empty) on any CUDA error so the caller
+    // can fall back to the non-graph path.
+    template <typename SubmitFn>
+    bool capture(cudaStream_t stream, SubmitFn&& submit)
+    {
+        reset();
+        if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess)
+        {
+            return false;
+        }
+        submit();
+        cudaGraph_t graph = nullptr;
+        if (cudaStreamEndCapture(stream, &graph) != cudaSuccess || graph == nullptr)
+        {
+            return false;
+        }
+        cudaGraphExec_t exec = nullptr;
+        if (cudaGraphInstantiate(&exec, graph, 0) != cudaSuccess || exec == nullptr)
+        {
+            cudaGraphDestroy(graph);
+            return false;
+        }
+        mGraph = graph;
+        mExec = exec;
+        return true;
+    }
+
+    bool valid() const noexcept { return mExec != nullptr; }
+
+    cudaError_t launch(cudaStream_t stream) const
+    {
+        return cudaGraphLaunch(mExec, stream);
+    }
+
+private:
+    cudaGraph_t mGraph{nullptr};
+    cudaGraphExec_t mExec{nullptr};
 };
 
 // -------------------------------------------------------------
@@ -904,7 +977,7 @@ struct SmallBatchRunner::Impl
     struct Worker
     {
         std::thread thread;
-        std::unique_ptr<nvinfer1::IExecutionContext> exec;
+        std::unique_ptr<nvinfer1::IExecutionContext> exec;  // dynamic-shape, fallback path
         std::unique_ptr<CudaStream> stream;
         ResizableDeviceBuffer inputDevice;
         ResizableDeviceBuffer policyDevice;
@@ -916,6 +989,15 @@ struct SmallBatchRunner::Impl
         PinnedBuffer hostValue;
         PinnedBuffer hostMlh;
         PinnedBuffer hostMlhQ;
+        // CUDA-graph state. One frozen-shape IExecutionContext + one captured
+        // graph per bucket. The contexts are shape-pinned (created once at
+        // their bucket size, never reshaped) so the kernels/internal device
+        // memory the graph captured stay valid across replays. Buckets that
+        // fail capture go in graph_failed and permanently use the fallback.
+        std::unordered_map<int, std::unique_ptr<nvinfer1::IExecutionContext>> graph_ctx;
+        std::unordered_map<int, CudaGraphExec> graphs;
+        std::unordered_set<int> graph_failed;
+        bool buffers_sized_for_graphs{false};
     };
 
     explicit Impl(SmallBatchConfig cfg)
@@ -943,6 +1025,47 @@ struct SmallBatchRunner::Impl
             const int parsed = std::atoi(env);
             if (parsed > 0) n = parsed;
         }
+        // CUDA-graph config. Default ON; CHESSRL_CUDA_GRAPHS=0 disables
+        // (instant rollback, no rebuild). CHESSRL_GRAPH_BUCKETS overrides the
+        // ascending bucket list.
+        if (const char* env = std::getenv("CHESSRL_CUDA_GRAPHS"))
+        {
+            graphs_enabled_ = (std::atoi(env) != 0);
+        }
+        {
+            std::string spec = "32,64,128,256";
+            if (const char* env = std::getenv("CHESSRL_GRAPH_BUCKETS"))
+            {
+                if (env[0] != '\0') spec = env;
+            }
+            std::stringstream ss(spec);
+            std::string tok;
+            while (std::getline(ss, tok, ','))
+            {
+                const int b = std::atoi(tok.c_str());
+                if (b > 0) graph_buckets_.push_back(b);
+            }
+            std::sort(graph_buckets_.begin(), graph_buckets_.end());
+            graph_buckets_.erase(
+                std::unique(graph_buckets_.begin(), graph_buckets_.end()),
+                graph_buckets_.end());
+            // Guarantee the top bucket covers any batch the queue can hand us,
+            // so the device/pinned buffers are sized once (to the top bucket)
+            // and never reallocated — captured graph pointers stay valid.
+            if (graph_buckets_.empty()
+                || graph_buckets_.back() < config.max_batch_size)
+            {
+                graph_buckets_.push_back(config.max_batch_size);
+            }
+            // Drop buckets larger than max_batch_size except the (single)
+            // covering one — they can never be selected.
+            while (graph_buckets_.size() >= 2
+                   && graph_buckets_[graph_buckets_.size() - 2] >= config.max_batch_size)
+            {
+                graph_buckets_.pop_back();
+            }
+        }
+
         workers_.reserve(static_cast<size_t>(n));
         for (int i = 0; i < n; ++i)
         {
@@ -967,6 +1090,27 @@ struct SmallBatchRunner::Impl
             if (w && w->thread.joinable())
             {
                 w->thread.join();
+            }
+        }
+        if (telemetry_enabled_)
+        {
+            const auto g = g_graph_batches.load(std::memory_order_relaxed);
+            const auto f = g_fallback_batches.load(std::memory_order_relaxed);
+            if (g + f > 0)
+            {
+                const double n = static_cast<double>(g + f);
+                std::cerr << "[cuda-graph] batches: graph=" << g
+                          << " fallback=" << f << " ("
+                          << (100.0 * static_cast<double>(g) / n)
+                          << "% on graphs)\n";
+                std::cerr << "[phase-timers] per-batch avg (ms): "
+                          << "assembly="
+                          << (g_t_assembly_ns.load(std::memory_order_relaxed) / 1e6 / n)
+                          << " gpu(launch+sync)="
+                          << (g_t_gpu_ns.load(std::memory_order_relaxed) / 1e6 / n)
+                          << " distribute="
+                          << (g_t_dist_ns.load(std::memory_order_relaxed) / 1e6 / n)
+                          << "\n";
             }
         }
     }
@@ -1059,54 +1203,70 @@ struct SmallBatchRunner::Impl
                 throw std::runtime_error("Loaded engine is static! Please generate a dynamic engine with trtexec --minShapes/--optShapes/--maxShapes.");
             }
             
-            // Step B: Remove padding logic - use exact batch size
-            const size_t engineBatch = actualCount;
-            inputDims.d[0] = static_cast<int>(engineBatch);
-            if (!w.exec->setInputShape(ctx.inputName().c_str(), inputDims))
+            // ---- Path + engine batch -------------------------------------
+            // Graph path: smallest bucket >= actualCount, fixed-shape captured
+            // graph (engineBatch = bucket, pad rows zero-filled). Fallback:
+            // dynamic shape, engineBatch = actualCount, original enqueueV3.
+            const bool use_graph = graphs_enabled_ && !graph_buckets_.empty();
+            int bucket = 0;
+            if (use_graph)
             {
-                throw std::runtime_error("Failed to set small-model batch input shape.");
+                auto it = std::lower_bound(
+                    graph_buckets_.begin(), graph_buckets_.end(),
+                    static_cast<int>(actualCount));
+                bucket = (it == graph_buckets_.end())
+                    ? graph_buckets_.back() : *it;
             }
+            const size_t engineBatch = use_graph
+                ? static_cast<size_t>(bucket) : actualCount;
+            // Size buffers to the TOP bucket when graphs are on so device /
+            // pinned pointers never move after a graph captured them
+            // (ResizableDeviceBuffer::ensure only ever grows).
+            const size_t sizeBatch = use_graph
+                ? static_cast<size_t>(graph_buckets_.back()) : actualCount;
 
-            // Step 2: Use persistent buffers (per-worker)
-            w.inputDevice.ensure(engineBatch * inputElements * element_size(inputType));
-            w.policyDevice.ensure(engineBatch * policyElements * element_size(policyType));
-            w.valueDevice.ensure(engineBatch * valueElements * element_size(valueType));
+            inputDims.d[0] = static_cast<int>(engineBatch);
+
+            w.inputDevice.ensure(sizeBatch * inputElements * element_size(inputType));
+            w.policyDevice.ensure(sizeBatch * policyElements * element_size(policyType));
+            w.valueDevice.ensure(sizeBatch * valueElements * element_size(valueType));
             const size_t mlhBytes = hasMlh
                 ? engineBatch * mlhElements * element_size(mlhType)
                 : 0;
             const size_t mlhQBytes = hasMlhQ
                 ? engineBatch * mlhElements * element_size(mlhQType)
                 : 0;
-            if (hasMlh) w.mlhDevice.ensure(mlhBytes);
-            if (hasMlhQ) w.mlhQDevice.ensure(mlhQBytes);
+            if (hasMlh) w.mlhDevice.ensure(sizeBatch * mlhElements * element_size(mlhType));
+            if (hasMlhQ) w.mlhQDevice.ensure(sizeBatch * mlhElements * element_size(mlhQType));
 
-            // Step 2: Ensure pinned host buffers (per-worker)
             const size_t inputBytes = engineBatch * inputElements * element_size(inputType);
             const size_t policyBytes = engineBatch * policyElements * element_size(policyType);
             const size_t valueBytes = engineBatch * valueElements * element_size(valueType);
-            w.hostInput.ensure(inputBytes);
-            w.hostPolicy.ensure(policyBytes);
-            w.hostValue.ensure(valueBytes);
-            if (hasMlh) w.hostMlh.ensure(mlhBytes);
-            if (hasMlhQ) w.hostMlhQ.ensure(mlhQBytes);
+            w.hostInput.ensure(sizeBatch * inputElements * element_size(inputType));
+            w.hostPolicy.ensure(sizeBatch * policyElements * element_size(policyType));
+            w.hostValue.ensure(sizeBatch * valueElements * element_size(valueType));
+            if (hasMlh) w.hostMlh.ensure(sizeBatch * mlhElements * element_size(mlhType));
+            if (hasMlhQ) w.hostMlhQ.ensure(sizeBatch * mlhElements * element_size(mlhQType));
 
-            // Step 3: Input assembly - write directly into pinned buffer
-            // Step C: Simplified copy loops - no padding needed since engineBatch == actualCount
+            const auto t_asm0 = std::chrono::steady_clock::now();
+            // Step 3: Input assembly — real rows [0,actualCount), then a
+            // zeroed pad up to engineBatch (graph path only). Pad outputs are
+            // discarded but a captured graph copies the full bucket region
+            // every replay, so the pad must be deterministic zeros.
             float* hostInputFloat = static_cast<float*>(w.hostInput.data());
             __half* hostInputHalf = static_cast<__half*>(w.hostInput.data());
-            
+
             for (size_t i = 0; i < actualCount; ++i)
             {
                 const auto& features = work[i].position.features;
                 const size_t offset = i * inputElements;
-                
+
                 if (inputType == nvinfer1::DataType::kFLOAT)
                 {
                     std::memcpy(hostInputFloat + offset, features.data(), inputElements * sizeof(float));
                 }
                 else if (inputType == nvinfer1::DataType::kHALF)
                 {
-                    // Convert directly into pinned buffer
                     for (size_t j = 0; j < inputElements; ++j)
                     {
                         hostInputHalf[offset + j] = __float2half(features[j]);
@@ -1117,54 +1277,158 @@ struct SmallBatchRunner::Impl
                     throw std::runtime_error("Unsupported small-model batch input tensor type.");
                 }
             }
-            
-            if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(), inputBytes, cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
+            if (engineBatch > actualCount)
             {
-                throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
+                const size_t esz = element_size(inputType);
+                std::memset(
+                    static_cast<char*>(w.hostInput.data()) + actualCount * inputElements * esz,
+                    0,
+                    (engineBatch - actualCount) * inputElements * esz);
             }
 
-            if (!w.exec->setTensorAddress(ctx.inputName().c_str(), w.inputDevice.data())
-                || !w.exec->setTensorAddress(ctx.policyName().c_str(), w.policyDevice.data())
-                || !w.exec->setTensorAddress(ctx.valueName().c_str(), w.valueDevice.data()))
+            auto bind_addresses = [&](nvinfer1::IExecutionContext* ex) -> bool {
+                bool ok = ex->setTensorAddress(ctx.inputName().c_str(), w.inputDevice.data())
+                    && ex->setTensorAddress(ctx.policyName().c_str(), w.policyDevice.data())
+                    && ex->setTensorAddress(ctx.valueName().c_str(), w.valueDevice.data());
+                if (ok && hasMlh)
+                    ok = ex->setTensorAddress(ctx.mlhName().c_str(), w.mlhDevice.data());
+                if (ok && hasMlhQ)
+                    ok = ex->setTensorAddress(ctx.mlhQName().c_str(), w.mlhQDevice.data());
+                return ok;
+            };
+
+            const auto t_gpu0 = std::chrono::steady_clock::now();
+            g_t_assembly_ns.fetch_add(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(t_gpu0 - t_asm0).count()),
+                std::memory_order_relaxed);
+
+            bool did_graph = false;
+
+            if (use_graph)
             {
-                throw std::runtime_error("Failed to set small-model batch tensor addresses.");
-            }
-            if (hasMlh && !w.exec->setTensorAddress(ctx.mlhName().c_str(), w.mlhDevice.data()))
-            {
-                throw std::runtime_error("Failed to set small-model batch mlh tensor address.");
-            }
-            if (hasMlhQ && !w.exec->setTensorAddress(ctx.mlhQName().c_str(), w.mlhQDevice.data()))
-            {
-                throw std::runtime_error("Failed to set small-model batch mlh_q tensor address.");
+                // Per-bucket frozen-shape context: created once, shape and
+                // tensor addresses fixed forever (buffers were sized to the
+                // top bucket above so the device pointers never move).
+                auto& gctx = w.graph_ctx[bucket];
+                if (!gctx)
+                {
+                    gctx.reset(ctx.engine().createExecutionContext());
+                    if (!gctx)
+                        throw std::runtime_error("Failed to create graph exec context.");
+                    nvinfer1::Dims gd = engine.getTensorShape(ctx.inputName().c_str());
+                    gd.d[0] = bucket;
+                    if (!gctx->setInputShape(ctx.inputName().c_str(), gd))
+                        throw std::runtime_error("Failed to set graph context input shape.");
+                    if (!bind_addresses(gctx.get()))
+                        throw std::runtime_error("Failed to bind graph context addresses.");
+                }
+
+                CudaGraphExec& g = w.graphs[bucket];
+                const bool failed = w.graph_failed.count(bucket) != 0;
+                if (!g.valid() && !failed)
+                {
+                    // Warmup OUTSIDE capture so TRT finalizes internal device
+                    // allocations / tactic selection for this shape.
+                    if (!gctx->enqueueV3(w.stream->get()))
+                        throw std::runtime_error("Graph warmup enqueueV3 failed.");
+                    if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("Graph warmup sync failed.");
+
+                    bool enqueue_ok = true;
+                    const bool captured = g.capture(w.stream->get(), [&]() {
+                        cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(),
+                            inputBytes, cudaMemcpyHostToDevice, w.stream->get());
+                        if (!gctx->enqueueV3(w.stream->get())) enqueue_ok = false;
+                        cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(),
+                            policyBytes, cudaMemcpyDeviceToHost, w.stream->get());
+                        cudaMemcpyAsync(w.hostValue.data(), w.valueDevice.data(),
+                            valueBytes, cudaMemcpyDeviceToHost, w.stream->get());
+                        if (hasMlh)
+                            cudaMemcpyAsync(w.hostMlh.data(), w.mlhDevice.data(),
+                                mlhBytes, cudaMemcpyDeviceToHost, w.stream->get());
+                        if (hasMlhQ)
+                            cudaMemcpyAsync(w.hostMlhQ.data(), w.mlhQDevice.data(),
+                                mlhQBytes, cudaMemcpyDeviceToHost, w.stream->get());
+                    });
+                    if (!captured || !enqueue_ok)
+                    {
+                        g.reset();
+                        w.graph_failed.insert(bucket);
+                        std::cerr << "[cuda-graph] capture failed for bucket "
+                                  << bucket << " — using enqueueV3 fallback\n";
+                    }
+                }
+
+                if (g.valid())
+                {
+                    if (g.launch(w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaGraphLaunch failed.");
+                    if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaStreamSynchronize (graph) failed.");
+                    did_graph = true;
+                    g_graph_batches.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    // Capture unavailable: run the same frozen context directly.
+                    if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(),
+                            inputBytes, cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb H2D) failed.");
+                    if (!gctx->enqueueV3(w.stream->get()))
+                        throw std::runtime_error("graph-fallback enqueueV3 failed.");
+                    if (cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(),
+                            policyBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb policy) failed.");
+                    if (cudaMemcpyAsync(w.hostValue.data(), w.valueDevice.data(),
+                            valueBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb value) failed.");
+                    if (hasMlh && cudaMemcpyAsync(w.hostMlh.data(), w.mlhDevice.data(),
+                            mlhBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb mlh) failed.");
+                    if (hasMlhQ && cudaMemcpyAsync(w.hostMlhQ.data(), w.mlhQDevice.data(),
+                            mlhQBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaMemcpyAsync (gfb mlh_q) failed.");
+                    if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
+                        throw std::runtime_error("cudaStreamSynchronize (gfb) failed.");
+                    g_fallback_batches.fetch_add(1, std::memory_order_relaxed);
+                }
             }
 
-            if (!w.exec->enqueueV3(w.stream->get()))
+            if (!use_graph)
             {
-                throw std::runtime_error("Small-model batched TensorRT enqueue failed.");
+                // Original dynamic-shape path (graphs disabled).
+                if (!w.exec->setInputShape(ctx.inputName().c_str(), inputDims))
+                    throw std::runtime_error("Failed to set small-model batch input shape.");
+                if (cudaMemcpyAsync(w.inputDevice.data(), w.hostInput.data(), inputBytes,
+                        cudaMemcpyHostToDevice, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch H2D) failed.");
+                if (!bind_addresses(w.exec.get()))
+                    throw std::runtime_error("Failed to set small-model batch tensor addresses.");
+                if (!w.exec->enqueueV3(w.stream->get()))
+                    throw std::runtime_error("Small-model batched TensorRT enqueue failed.");
+                if (cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(), policyBytes,
+                        cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch policy D2H) failed.");
+                if (cudaMemcpyAsync(w.hostValue.data(), w.valueDevice.data(), valueBytes,
+                        cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
+                if (hasMlh && cudaMemcpyAsync(w.hostMlh.data(), w.mlhDevice.data(), mlhBytes,
+                        cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch mlh D2H) failed.");
+                if (hasMlhQ && cudaMemcpyAsync(w.hostMlhQ.data(), w.mlhQDevice.data(), mlhQBytes,
+                        cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaMemcpyAsync (small batch mlh_q D2H) failed.");
+                if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
+                    throw std::runtime_error("cudaStreamSynchronize (small batch) failed.");
+                g_fallback_batches.fetch_add(1, std::memory_order_relaxed);
             }
-
-            // Step 3: D2H transfer - copy directly into pinned buffers
-            if (cudaMemcpyAsync(w.hostPolicy.data(), w.policyDevice.data(), policyBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
-            {
-                throw std::runtime_error("cudaMemcpyAsync (small batch policy D2H) failed.");
-            }
-            if (cudaMemcpyAsync(w.hostValue.data(), w.valueDevice.data(), valueBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
-            {
-                throw std::runtime_error("cudaMemcpyAsync (small batch value D2H) failed.");
-            }
-            if (hasMlh && cudaMemcpyAsync(w.hostMlh.data(), w.mlhDevice.data(), mlhBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
-            {
-                throw std::runtime_error("cudaMemcpyAsync (small batch mlh D2H) failed.");
-            }
-            if (hasMlhQ && cudaMemcpyAsync(w.hostMlhQ.data(), w.mlhQDevice.data(), mlhQBytes, cudaMemcpyDeviceToHost, w.stream->get()) != cudaSuccess)
-            {
-                throw std::runtime_error("cudaMemcpyAsync (small batch mlh_q D2H) failed.");
-            }
-
-            if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
-            {
-                throw std::runtime_error("cudaStreamSynchronize (small batch) failed.");
-            }
+            (void)did_graph;
+            const auto t_dist0 = std::chrono::steady_clock::now();
+            g_t_gpu_ns.fetch_add(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(t_dist0 - t_gpu0).count()),
+                std::memory_order_relaxed);
 
             if (telemetry_enabled_)
             {
@@ -1280,6 +1544,11 @@ struct SmallBatchRunner::Impl
 
                 work[i].promise->set_value(std::move(result));
             }
+            g_t_dist_ns.fetch_add(
+                static_cast<std::uint64_t>(std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t_dist0).count()),
+                std::memory_order_relaxed);
         }
         catch (...)
         {
@@ -1371,6 +1640,15 @@ struct SmallBatchRunner::Impl
     size_t batches_{0};
     size_t positions_{0};
     double total_infer_ms_{0.0};
+
+    // CUDA-graph capture config. graphs_enabled_ is gated by
+    // CHESSRL_CUDA_GRAPHS (default on). graph_buckets_ is the ascending set
+    // of fixed batch shapes we capture; the largest is always >=
+    // max_batch_size so a bucket always covers any drained batch (no
+    // size-based fallback that would force a device-buffer realloc and
+    // invalidate captured pointers).
+    bool graphs_enabled_{true};
+    std::vector<int> graph_buckets_;
 };
 
 SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
