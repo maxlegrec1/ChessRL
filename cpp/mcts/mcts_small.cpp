@@ -58,6 +58,17 @@ std::unordered_map<std::string, int> build_vocab_index(const std::vector<std::st
     return index;
 }
 
+// The vocab and its name→index map are constant for the process. They were
+// being copy-constructed / rebuilt in EVERY SmallMctsRunner ctor (one per
+// board per ply). Build once, share by const-ref. Function-local static ⇒
+// thread-safe one-time init (C++11).
+const std::unordered_map<std::string, int>& small_vocab_index()
+{
+    static const std::unordered_map<std::string, int> index =
+        build_vocab_index(small_policy_vocabulary());
+    return index;
+}
+
 // Flat LUT keyed by (from_sq * 64 + to_sq) * 5 + promo. promo: 0=none, 1=Q,
 // 2=R, 3=B, 4=N. Knight promos in self-play are stripped to no-promo to mirror
 // the existing string-key behavior. -1 means "not in vocab".
@@ -185,8 +196,7 @@ public:
                     std::shared_ptr<single::SmallBatchRunner> shared_runner = {},
                     std::shared_ptr<TranspositionTable> cache = {})
         : options_(std::move(options))
-        , vocab_(small_policy_vocabulary())
-        , vocab_index_(build_vocab_index(vocab_))
+        , vocab_index_(small_vocab_index())  // shared static, built once
         , small_batch_config_(make_small_batch_config(options_))
         , small_batch_runner_(
               shared_runner ? std::move(shared_runner)
@@ -1024,8 +1034,7 @@ private:
     SearchTree tree_;
     chess::Board root_board_; // Phase B: Store root board for state reconstruction
     HistoryStack root_history_stack_;  // Initial 8-slot piece-plane stack at root.
-    std::vector<std::string> vocab_;
-    std::unordered_map<std::string, int> vocab_index_;
+    const std::unordered_map<std::string, int>& vocab_index_;
     single::SmallBatchConfig small_batch_config_;
     std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
     std::shared_ptr<TranspositionTable> cache_;
