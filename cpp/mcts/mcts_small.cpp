@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -158,6 +159,28 @@ int read_batch_size_env(const char* specific)
     return 1024;
 }
 
+// Ground-truth MCTS phase timers (external profilers — perf/ptrace/py-spy
+// — are all blocked in this container). Gated by CHESSRL_MCTS_PHASES;
+// process-wide relaxed atomics, summed across the 128 worker threads,
+// printed per step in run_small_mcts_batch_shared. Zero cost when off
+// (single predictable static-bool branch).
+std::atomic<std::uint64_t> g_ph_descent_ns{0};
+std::atomic<std::uint64_t> g_ph_enqueue_ns{0};
+std::atomic<std::uint64_t> g_ph_wait_ns{0};
+std::atomic<std::uint64_t> g_ph_expand_ns{0};
+std::atomic<std::uint64_t> g_ph_ctor_ns{0};
+inline bool mcts_phases_on()
+{
+    static const bool on = (std::getenv("CHESSRL_MCTS_PHASES") != nullptr);
+    return on;
+}
+inline std::uint64_t now_ns()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 bool telemetry_enabled_env()
 {
     if (const char* value = std::getenv("CHESSRL_MCTS_TELEMETRY"))
@@ -204,6 +227,8 @@ public:
         , cache_(std::move(cache))
         , rng_(std::random_device{}())
     {
+        const bool ph = mcts_phases_on();
+        const std::uint64_t t_ctor = ph ? now_ns() : 0;
         // Phase B: Store root board for state reconstruction during traversal
         root_board_ = apply_history(options_.request);
         tree_.add_root(root_board_, options_.request.history);
@@ -224,6 +249,7 @@ public:
         const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
         tree_.reserve(expected_nodes);
         path_buffer_.reserve(64);
+        if (ph) g_ph_ctor_ns.fetch_add(now_ns() - t_ctor, std::memory_order_relaxed);
     }
 
     MctsSummary run()
@@ -254,7 +280,10 @@ public:
             cached_evals.assign(static_cast<size_t>(round_width), SmallPolicyValue{});
             have_cached.assign(static_cast<size_t>(round_width), false);
 
+            const bool ph = mcts_phases_on();
+
             // ---- Phase 1: do `round_width` descents, applying vloss along the way. ----
+            const std::uint64_t t_p1 = ph ? now_ns() : 0;
             for (int i = 0; i < round_width; ++i)
             {
                 DescentState d = descend();
@@ -272,9 +301,11 @@ public:
 
                 pending.push_back(std::move(d));
             }
+            if (ph) g_ph_descent_ns.fetch_add(now_ns() - t_p1, std::memory_order_relaxed);
 
             // ---- Phase 2: enqueue eval requests for non-terminal leaves. ----
             // Cache lookups happen synchronously; misses go onto the GPU queue.
+            const std::uint64_t t_p2 = ph ? now_ns() : 0;
             for (size_t i = 0; i < pending.size(); ++i)
             {
                 const auto& d = pending[i];
@@ -291,6 +322,7 @@ public:
                 tickets.push_back(small_batch_runner_->enqueue(
                     acquire_small_encoding(d.leaf_history, d.leaf_board)));
             }
+            if (ph) g_ph_enqueue_ns.fetch_add(now_ns() - t_p2, std::memory_order_relaxed);
 
             // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----
             size_t ticket_idx = 0;
@@ -304,7 +336,9 @@ public:
                 }
                 else
                 {
+                    const std::uint64_t t_w = ph ? now_ns() : 0;
                     eval = tickets[ticket_idx++].get();
+                    if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
                     if (cache_)
                     {
                         const uint64_t hash = compute_cache_key(
@@ -313,6 +347,7 @@ public:
                     }
                 }
 
+                const std::uint64_t t_e = ph ? now_ns() : 0;
                 revert_virtual_loss(d.path);
 
                 // If another descent in this same batch already expanded the
@@ -323,6 +358,7 @@ public:
                 detail::backpropagate_full(
                     tree_, d.path, expanded.value_prior, expanded.wdl, expanded.leaf_plies);
                 ++sims_done;
+                if (ph) g_ph_expand_ns.fetch_add(now_ns() - t_e, std::memory_order_relaxed);
             }
         }
 
@@ -1100,6 +1136,23 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
         {
             worker.join();
         }
+    }
+
+    if (mcts_phases_on())
+    {
+        // Sums are across all worker threads (wall ≈ sum / num_threads).
+        const double ms = 1.0e6;
+        std::cerr << "[mcts-phases] (thread-summed ms) ctor="
+                  << g_ph_ctor_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " descent="
+                  << g_ph_descent_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " encode+enqueue="
+                  << g_ph_enqueue_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " inference-wait="
+                  << g_ph_wait_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " expand+backup="
+                  << g_ph_expand_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " (threads=" << num_threads << ")\n";
     }
 
     return summaries;
