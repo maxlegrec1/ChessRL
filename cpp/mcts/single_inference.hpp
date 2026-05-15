@@ -13,6 +13,10 @@
 
 #include "inference.hpp"
 #include "mcts/common.hpp"
+// SmallPackedPosition + plane-layout constants: standalone header (only
+// <cstdint>) shared with the CUDA expansion kernel so nvcc never parses
+// chess-library / TensorRT.
+#include "mcts/packed_position.hpp"
 
 namespace chessrl::mcts::single
 {
@@ -53,28 +57,6 @@ private:
 struct SmallEncodedPosition
 {
     std::vector<float> features;
-};
-
-// Compact per-leaf snapshot (~776 B) that replaces the dense 7104-float
-// tensor on the host→queue→H2D path. Trivially copyable POD so it can be
-// memcpy'd into a pinned buffer and DMA'd in one shot, then expanded to the
-// 111 dense planes on the GPU. Layout (slot 0 = current position):
-//   bitboards[s][k]: slot s, piece plane k (W:PNBRQK then B:PNBRQK)
-//   slot_valid : bit s ⇒ slot s piece planes present (bit 0 always set)
-//   slot_rep   : bit s ⇒ slot s repetition plane lit (bit 0 = current-rep)
-//   stm        : 1 if white to move
-//   ep_square  : 0..63 board square index, or -1 if none
-//   castling   : bit0 WK, bit1 WQ, bit2 BK, bit3 BQ
-//   halfmove   : raw clock; expansion emits min(1, halfmove/100)
-struct SmallPackedPosition
-{
-    std::uint64_t bitboards[8][12]{};
-    std::uint8_t  slot_valid{0};
-    std::uint8_t  slot_rep{0};
-    std::uint8_t  stm{0};
-    std::int16_t  ep_square{-1};
-    std::uint8_t  castling{0};
-    std::uint8_t  halfmove{0};
 };
 
 // Pack a (board, history) pair into the compact snapshot.

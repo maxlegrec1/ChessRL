@@ -106,6 +106,18 @@ constexpr int kSmallPlaneHMC = kSmallPlaneSTM + 6;                         // 11
 constexpr int kSmallPolicySize = 1929;
 constexpr int kSmallValueSize = 3;
 
+// Drift guard: the kernel-shared constants in packed_position.hpp MUST
+// match the encoder's. If anyone edits one set, this fails to compile.
+static_assert(kSmallBoardSize == kPackBoard, "board size drift");
+static_assert(kSmallPiecePlanes == kPackPiecePlanes, "piece planes drift");
+static_assert(kSmallHistoryDepth == kPackHistory, "history depth drift");
+static_assert(kSmallHistBlock == kPackHistBlock, "hist block drift");
+static_assert(kSmallFeaturePlanes == kPackPlanes, "plane count drift");
+static_assert(kSmallPlaneSTM == kPackPlaneSTM, "STM plane drift");
+static_assert(kSmallPlaneEP == kPackPlaneEP, "EP plane drift");
+static_assert(kSmallPlaneCastlingWK == kPackPlaneCWK, "castling WK drift");
+static_assert(kSmallPlaneHMC == kPackPlaneHMC, "HMC plane drift");
+
 constexpr float kIllegalScore = -1e9F;
 
 // Volume excluding the batch dimension (works for both static and dynamic shapes).

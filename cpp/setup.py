@@ -1,7 +1,8 @@
 import os
+import subprocess
 from pathlib import Path
 
-from pybind11.setup_helpers import Pybind11Extension, build_ext
+from pybind11.setup_helpers import Pybind11Extension, build_ext as _pybind_build_ext
 from setuptools import setup
 
 ROOT = Path(__file__).resolve().parent
@@ -55,6 +56,42 @@ ext_modules = [
         ],
     )
 ]
+
+CU_SOURCES = ["mcts/expand_kernel.cu"]
+
+
+class build_ext(_pybind_build_ext):
+    """pybind11 build_ext + an nvcc pre-pass for the .cu expansion kernel.
+
+    The project is otherwise pure g++; nvcc only ever sees expand_kernel.cu
+    and packed_position.hpp (deliberately free of chess-library / TRT). The
+    compiled object is linked into the extension via extra_objects.
+    """
+
+    def build_extensions(self):
+        nvcc = os.environ.get("NVCC") or str(CUDA_ROOT / "bin" / "nvcc")
+        obj_dir = Path(self.build_temp) / "cu"
+        obj_dir.mkdir(parents=True, exist_ok=True)
+        for ext in self.extensions:
+            for cu in CU_SOURCES:
+                src = ROOT / cu
+                obj = obj_dir / (Path(cu).stem + ".o")
+                cmd = [
+                    nvcc, "-c", str(src), "-o", str(obj),
+                    "-O3", "-std=c++17",
+                    "-Xcompiler", "-fPIC",
+                    # H200 = Hopper sm_90. -arch=native (CUDA 12.x) would also
+                    # work; sm_90 is explicit and fails loudly if mismatched.
+                    "-gencode", "arch=compute_90,code=sm_90",
+                    f"-I{ROOT}",
+                    f"-I{ROOT / 'include'}",
+                    f"-I{CUDA_ROOT / 'include'}",
+                ]
+                print("[nvcc]", " ".join(cmd))
+                subprocess.run(cmd, check=True)
+                ext.extra_objects = list(ext.extra_objects or []) + [str(obj)]
+        super().build_extensions()
+
 
 setup(
     name="chessrl_inference_cpp",

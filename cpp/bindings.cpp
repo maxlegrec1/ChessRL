@@ -4,8 +4,11 @@
 
 #include "chess-library/include/chess.hpp"
 #include "inference.hpp"
+#include <cuda_runtime_api.h>
+
 #include "mcts/common.hpp"
 #include "mcts/single_inference.hpp"
+#include "mcts/expand_kernel.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
 #include "selfplay.hpp"
@@ -106,6 +109,56 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("fen"),
         py::arg("moves"),
         "Pack a FEN+history then CPU-expand it; must match encode_position_with_history.");
+
+    // GPU-path parity hook: pack on host, upload, run the CUDA expansion
+    // kernel (fp32 for an exact compare), download. Must equal the CPU
+    // reference (tests/test_packed_gpu_parity.py gates this).
+    m.def(
+        "expand_packed_gpu",
+        [](const std::string& fen, const std::vector<std::string>& moves) {
+            const std::string starting_fen = fen.empty()
+                ? std::string(chess::constants::STARTPOS)
+                : fen;
+            chess::Board board(starting_fen);
+            for (const auto& mv_uci : moves)
+            {
+                chess::Move mv = chess::uci::uciToMove(board, mv_uci);
+                if (mv == chess::Move::NO_MOVE)
+                    throw std::runtime_error("expand_packed_gpu: bad move " + mv_uci);
+                board.makeMove(mv);
+            }
+            chessrl::mcts::HistoryStack stack =
+                chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
+            auto packed = chessrl::mcts::single::pack_small_position(board, stack);
+
+            using chessrl::mcts::single::SmallPackedPosition;
+            using chessrl::mcts::single::kPackElems;
+            SmallPackedPosition* dPacked = nullptr;
+            float* dOut = nullptr;
+            if (cudaMalloc(reinterpret_cast<void**>(&dPacked), sizeof(SmallPackedPosition)) != cudaSuccess
+                || cudaMalloc(reinterpret_cast<void**>(&dOut), sizeof(float) * kPackElems) != cudaSuccess)
+            {
+                if (dPacked) cudaFree(dPacked);
+                if (dOut) cudaFree(dOut);
+                throw std::runtime_error("expand_packed_gpu: cudaMalloc failed");
+            }
+            cudaMemcpy(dPacked, &packed, sizeof(packed), cudaMemcpyHostToDevice);
+            auto err = chessrl::mcts::single::launch_expand_planes(
+                dPacked, dOut, 1, /*out_is_half=*/0, /*stream=*/0);
+            cudaDeviceSynchronize();
+            std::vector<float> host(static_cast<size_t>(kPackElems));
+            if (err == cudaSuccess)
+                cudaMemcpy(host.data(), dOut, sizeof(float) * kPackElems,
+                           cudaMemcpyDeviceToHost);
+            cudaFree(dPacked);
+            cudaFree(dOut);
+            if (err != cudaSuccess)
+                throw std::runtime_error("expand_packed_gpu: kernel launch failed");
+            return host;
+        },
+        py::arg("fen"),
+        py::arg("moves"),
+        "Pack + GPU-expand (fp32); must match encode_position_packed_roundtrip.");
 
     m.def(
         "small_generate_moves",
