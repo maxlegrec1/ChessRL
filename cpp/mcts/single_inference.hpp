@@ -110,7 +110,10 @@ public:
 
     explicit SmallBatchRunner(SmallBatchConfig config = {});
 
-    Ticket enqueue(SmallEncodedPosition position);
+    // Carries a POINTER to the compact packed snapshot (keeps the shared-
+    // queue critical section pointer-sized). Dense planes are produced on
+    // the GPU (launch_expand_planes) just before the TRT enqueue.
+    Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position);
     void process_pending();
     size_t pending() const;
     BatchStatistics statistics() const;
