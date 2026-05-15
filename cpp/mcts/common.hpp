@@ -12,13 +12,6 @@
 namespace chessrl::mcts
 {
 
-struct SearchInput
-{
-    std::string fen;
-    std::vector<std::string> history;
-    std::optional<chess::Board> board;
-};
-
 struct HistoryEntry;
 
 using HistoryHandle = std::shared_ptr<const HistoryEntry>;
@@ -40,6 +33,19 @@ struct PiecePlanes
 // 111-plane input for the NN.
 inline constexpr int kHistoryDepth = 8;
 using HistoryStack = std::array<PiecePlanes, kHistoryDepth>;
+
+struct SearchInput
+{
+    std::string fen;
+    std::vector<std::string> history;
+    std::optional<chess::Board> board;
+    // Precomputed AlphaZero history stack. When set, the runner uses it
+    // directly instead of O(plies) replaying the whole game in
+    // build_root_history_stack() on every MCTS call (self-play already
+    // maintains the rolling snapshots — see SelfPlayWorker::step). Mirrors
+    // the `board` short-circuit in apply_history().
+    std::optional<HistoryStack> history_stack;
+};
 
 // Snapshot a board's piece bitboards into a PiecePlanes value. Order:
 // W:PNBRQK then B:PNBRQK. `repetition` is left untouched — the caller

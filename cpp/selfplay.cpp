@@ -243,6 +243,25 @@ SelfPlayMetrics SelfPlayWorker::step()
         opt.request.fen = slot.board.getFen();
         opt.request.history = slot.history;
         opt.request.board = slot.board;
+        // Supply the AlphaZero history stack directly from the rolling
+        // snapshots we already maintain (slot.past_planes), so the runner
+        // skips the O(plies) build_root_history_stack replay it would
+        // otherwise do on EVERY ply ⇒ O(plies^2)/game. Bit-identical to
+        // build_root_history_stack: slot 0 = snapshot(slot.board) + its
+        // isRepetition(1); slots 1..7 = past_planes[0..6] (each captured
+        // pre-move with its repetition flag, newest-first — same ordering).
+        {
+            chessrl::mcts::HistoryStack hs{};
+            hs[0] = chessrl::mcts::snapshot_piece_planes(slot.board);
+            hs[0].repetition = slot.board.isRepetition(1);
+            for (int s = 1; s < chessrl::mcts::kHistoryDepth; ++s)
+            {
+                const size_t k = static_cast<size_t>(s - 1);
+                if (k < slot.past_planes.size())
+                    hs[static_cast<size_t>(s)] = slot.past_planes[k];
+            }
+            opt.request.history_stack = hs;
+        }
         opt.simulations = impl_->config.simulations;
         opt.cpuct = impl_->config.cpuct;
         opt.temperature = impl_->config.temperature;

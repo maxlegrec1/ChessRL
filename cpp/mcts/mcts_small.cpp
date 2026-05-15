@@ -197,11 +197,51 @@ public:
         // Phase B: Store root board for state reconstruction during traversal
         root_board_ = apply_history(options_.request);
         tree_.add_root(root_board_, options_.request.history);
-        // Build the initial AlphaZero-style 8-board history stack by
-        // replaying the move history. Slots 1..7 capture positions t-1..t-7
-        // before reaching the root. Used as the per-simulation seed.
-        root_history_stack_ = build_root_history_stack(
-            options_.request.fen, options_.request.history, root_board_);
+        // AlphaZero-style 8-board history stack (per-simulation seed). If the
+        // caller supplied it (self-play already tracks the rolling snapshots),
+        // use it directly — otherwise rebuild it by replaying the whole move
+        // list, which is O(plies) PER MCTS CALL ⇒ O(plies^2) per game.
+        // CHESSRL_NO_HISTORY_STACK=1 forces the old O(plies^2) replay path
+        // even when a stack was supplied — A/B-only, to isolate #1's win.
+        static const bool force_replay =
+            (std::getenv("CHESSRL_NO_HISTORY_STACK") != nullptr);
+        if (options_.request.history_stack && !force_replay)
+        {
+            root_history_stack_ = *options_.request.history_stack;
+            // One-time correctness gate: with CHESSRL_VERIFY_HISTORY=1 the
+            // supplied stack MUST equal the replay-built one bit-for-bit
+            // (rank-flip-class risk). Throws loudly on any drift.
+            if (std::getenv("CHESSRL_VERIFY_HISTORY"))
+            {
+                // Reference uses EMPTY fen ⇒ replay from STARTPOS over the
+                // full move list (the CORRECT contract). NB: self-play has
+                // been passing request.fen = current-position FEN, so the
+                // old build_root_history_stack(request.fen, history) replayed
+                // the whole game ON TOP of the current position → garbage
+                // history slots fed to the NN at inference. This path fixes
+                // that; the reference must therefore be the startpos replay.
+                const HistoryStack ref = build_root_history_stack(
+                    std::string{}, options_.request.history, root_board_);
+                for (int s = 0; s < kHistoryDepth; ++s)
+                {
+                    const auto& a = root_history_stack_[static_cast<size_t>(s)];
+                    const auto& b = ref[static_cast<size_t>(s)];
+                    if (a.valid != b.valid || a.repetition != b.repetition
+                        || a.bitboards != b.bitboards)
+                    {
+                        throw std::runtime_error(
+                            "CHESSRL_VERIFY_HISTORY: supplied history_stack "
+                            "diverges from build_root_history_stack at slot "
+                            + std::to_string(s));
+                    }
+                }
+            }
+        }
+        else
+        {
+            root_history_stack_ = build_root_history_stack(
+                options_.request.fen, options_.request.history, root_board_);
+        }
         const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
         tree_.reserve(expected_nodes);
         path_buffer_.reserve(64);
