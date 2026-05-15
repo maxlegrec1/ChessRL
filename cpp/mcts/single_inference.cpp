@@ -54,13 +54,6 @@ std::atomic<std::uint64_t> g_encoder_nanos{0};
 std::atomic<std::uint64_t> g_graph_batches{0};
 std::atomic<std::uint64_t> g_fallback_batches{0};
 
-// Coarse per-batch sub-phase timers (ns), benchmark only. Localizes where
-// the ~1 ms/batch goes: CPU input marshalling vs GPU launch+sync vs CPU
-// output distribution.
-std::atomic<std::uint64_t> g_t_assembly_ns{0};
-std::atomic<std::uint64_t> g_t_gpu_ns{0};
-std::atomic<std::uint64_t> g_t_dist_ns{0};
-
 } // namespace
 
 EncoderTotals encoder_totals()
@@ -1259,14 +1252,6 @@ struct SmallBatchRunner::Impl
                           << " fallback=" << f << " ("
                           << (100.0 * static_cast<double>(g) / n)
                           << "% on graphs)\n";
-                std::cerr << "[phase-timers] per-batch avg (ms): "
-                          << "assembly="
-                          << (g_t_assembly_ns.load(std::memory_order_relaxed) / 1e6 / n)
-                          << " gpu(launch+sync)="
-                          << (g_t_gpu_ns.load(std::memory_order_relaxed) / 1e6 / n)
-                          << " distribute="
-                          << (g_t_dist_ns.load(std::memory_order_relaxed) / 1e6 / n)
-                          << "\n";
             }
         }
     }
@@ -1403,7 +1388,6 @@ struct SmallBatchRunner::Impl
             if (hasMlhQ) w.hostMlhQ.ensure(sizeBatch * mlhElements * element_size(mlhQType));
             const int out_is_half = (inputType == nvinfer1::DataType::kHALF) ? 1 : 0;
 
-            const auto t_asm0 = std::chrono::steady_clock::now();
             // Step 3: Input assembly is now a flat memcpy of the compact
             // ~776 B packed snapshots into the pinned staging buffer (the
             // ~0.78 ms scalar-fp16-conversion of 28 KB dense tensors is
@@ -1445,13 +1429,6 @@ struct SmallBatchRunner::Impl
                     out_is_half, s) == cudaSuccess;
             };
 
-            const auto t_gpu0 = std::chrono::steady_clock::now();
-            g_t_assembly_ns.fetch_add(
-                static_cast<std::uint64_t>(std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(t_gpu0 - t_asm0).count()),
-                std::memory_order_relaxed);
-
-            bool did_graph = false;
 
             if (use_graph)
             {
@@ -1513,7 +1490,6 @@ struct SmallBatchRunner::Impl
                         throw std::runtime_error("cudaGraphLaunch failed.");
                     if (cudaStreamSynchronize(w.stream->get()) != cudaSuccess)
                         throw std::runtime_error("cudaStreamSynchronize (graph) failed.");
-                    did_graph = true;
                     g_graph_batches.fetch_add(1, std::memory_order_relaxed);
                 }
                 else
@@ -1568,12 +1544,6 @@ struct SmallBatchRunner::Impl
                     throw std::runtime_error("cudaStreamSynchronize (small batch) failed.");
                 g_fallback_batches.fetch_add(1, std::memory_order_relaxed);
             }
-            (void)did_graph;
-            const auto t_dist0 = std::chrono::steady_clock::now();
-            g_t_gpu_ns.fetch_add(
-                static_cast<std::uint64_t>(std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(t_dist0 - t_gpu0).count()),
-                std::memory_order_relaxed);
 
             if (telemetry_enabled_)
             {
@@ -1689,11 +1659,6 @@ struct SmallBatchRunner::Impl
 
                 work[i].promise->set_value(std::move(result));
             }
-            g_t_dist_ns.fetch_add(
-                static_cast<std::uint64_t>(std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t_dist0).count()),
-                std::memory_order_relaxed);
         }
         catch (...)
         {
