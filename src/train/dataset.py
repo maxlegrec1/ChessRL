@@ -226,6 +226,11 @@ def mirror_fen(fen: str) -> str:
     return mirrored.fen()
 
 def mirror_policy_str(policy_str: str) -> str:
-    i,j = int(policy_str[1]),int(policy_str[3])
-
-    return f"{policy_str[0]}{9-j}{policy_str[2]}{9-i}{policy_str[4:]}"
+    # python-chess board.mirror() is a VERTICAL flip only (ranks 1<->8, files
+    # unchanged). So flip each square's rank in place: from-rank stays with the
+    # from-square, to-rank with the to-square. The previous code transposed the
+    # from/to rank pairing (9-j on the from-square, 9-i on the to-square),
+    # making ~63% of mirrored labels illegal for their mirrored FEN — and since
+    # sample_batch mirrors 50% of samples, ~32% of ALL policy labels were
+    # illegal-for-position garbage, capping policy legal-prob at ~0.58.
+    return f"{policy_str[0]}{9-int(policy_str[1])}{policy_str[2]}{9-int(policy_str[3])}{policy_str[4:]}"
