@@ -1,5 +1,8 @@
 device: cuda
-batch_size: 1024
+# 2048 (was 1024): lower-variance updates + better trainer-GPU use + fewer
+# trainer steps per unit data. LR deliberately left at 0.001 — flag if
+# convergence shifts (a ~1.4x LR bump is the usual large-batch pairing).
+batch_size: 2048
 learning_rate: 0.001
 weight_decay: 0.0
 beta1: 0.9
@@ -12,7 +15,11 @@ teacher_weight: 0.2
 
 checkpoint:
   dir: artifacts/checkpoints
-  every_steps: 100
+  # 500 (was 100): self-play is ~2.2x faster and target_k makes the trainer
+  # step-rate track it, so at 100 the TRT engine rebuilt ~2.2x too often in
+  # wall-clock (perma-convert + data-gen model churning too fast). 500
+  # restores a slow, stable engine cadence and amortizes the TRT build cost.
+  every_steps: 500
   keep_last: 999999
   build_script: scripts/build_trt.sh
   engine_dir: artifacts/engines
@@ -21,11 +28,11 @@ checkpoint:
 data:
   dataset_path: artifacts/buffers/buffer.bin
   reload_seconds: 20
-  # Half of selfplay.max_buffer_size below — wait until the replay buffer is
-  # half full before training starts, so the first batches are drawn from
+  # ~10% of selfplay.max_buffer_size — wait until the replay buffer has this
+  # many records before training starts, so the first batches are drawn from
   # diverse data and the steady-state samples-per-insertion ratio is the
-  # constraint rather than the initial transient.
-  min_samples_to_start: 100000
+  # constraint rather than the initial transient. Scaled with the 2x buffer.
+  min_samples_to_start: 200000
   warmup_poll_seconds: 5
   # Trainer pacing: each record gets sampled this many times on average over its
   # buffer lifetime. Sleep auto-adjusts to track the live self-play rate.
@@ -55,9 +62,21 @@ selfplay:
   # — pre-overhaul self-play always ran at the width=1 equivalent.
   virtual_loss_width: 8
   use_dirichlet: true
-  dirichlet_alpha: 0.12
-  dirichlet_epsilon: 0.05
-  max_buffer_size: 1000000
+  # Canonical AlphaZero chess values (Silver et al. 2018):
+  #   α = 0.3, ε = 0.25 (verified against the AlphaZero/AlphaGo-Zero papers
+  #   and the Lc0 implementation). Previously 0.12 / 0.05 — both dialled well
+  #   below canonical, which starves rare actions (e.g. castling: only 132
+  #   true castles in 2M buffer records, model ranks O-O dead-last 48/48 in a
+  #   position where its own V_q recognises O-O as the BEST post-move value).
+  #   Restoring the canonical values puts ~25% noise mass on root priors,
+  #   giving MCTS exploration a real shot at low-prior legal moves.
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  # 2,000,000 (was 1,000,000): self-play is ~2.2x faster, so a 1M buffer was
+  # fully cycled ~2.2x faster — each record's wall-clock lifetime / effective
+  # data age shrank, making the training distribution move too fast. 2M
+  # restores the old effective data window. ~832 B/record => ~1.7 GB on disk.
+  max_buffer_size: 2000000
   flush_interval: 1
   poll_seconds: 300
   save_pgn: false

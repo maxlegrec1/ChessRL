@@ -14,9 +14,20 @@ from torch import amp, optim
 
 import wandb
 import bulletchess
+import chess
+import numpy as np
 
 from src.models.small.small_model import SmallModel
-from src.models.small.vocab import policy_to_idx
+from src.models.small.vocab import policy_index, policy_to_idx
+
+
+# Vocab indices of the four "king→destination" castle UCIs. Used by the
+# per-batch buffer/castle_rate metric: castling is a rare action (~0.007% of
+# the buffer historically, vs ~0.8–1% in real chess) so the metric tracks
+# whether tuning (Dirichlet, cpuct, etc.) lifts it back toward canonical.
+_CASTLE_CAND_INDICES = np.array(sorted({
+    policy_to_idx[u] for u in ("e1g1", "e1c1", "e8g8", "e8c8")
+}), dtype=np.int64)
 
 from .config import TrainingConfig
 from .dataset import NULL_POLICY_INDEX, RECORD_SIZE, SelfPlayBatch, SelfPlayDataset
@@ -408,6 +419,30 @@ class Trainer:
         frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
         frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
 
+        # Castle rate in the batch (rare-action diagnostic). The UCI strings
+        # "e1g1", "e1c1", "e8g8", "e8c8" *can* also encode rook/queen moves
+        # to those squares, so we filter on candidate indices first (cheap
+        # vectorised np.isin, ~0.3% of records hit) and then verify the few
+        # candidates with python-chess `is_castling` to avoid counting
+        # rook/queen moves as castles. Castling historically appears in only
+        # ~0.007% of buffer records (vs ~0.8-1% in real chess), so we expect
+        # this metric to be near 0 and want to watch it climb after tuning.
+        pi_np = batch.policy_indices
+        sample_total = int((pi_np != NULL_POLICY_INDEX).sum())
+        castle_count = 0
+        if sample_total > 0:
+            cand_idx = np.where(np.isin(pi_np, _CASTLE_CAND_INDICES))[0]
+            for i in cand_idx:
+                idx_int = int(pi_np[i])
+                try:
+                    mv = chess.Move.from_uci(policy_index[idx_int])
+                    b = chess.Board(batch.fens[int(i)])
+                    if mv in b.legal_moves and b.is_castling(mv):
+                        castle_count += 1
+                except Exception:
+                    pass
+        castle_rate = castle_count / max(1, sample_total)
+
         # Agreement between the two value targets — flagged because the buffer
         # audit showed only ~67% agreement on a mature buffer (and ~18% on
         # eventual-draw positions). Low agreement = the two value losses pull
@@ -476,6 +511,7 @@ class Trainer:
             "buffer/frac_L_geq_0.8": frac_l_conf,
             "buffer/frac_D_geq_0.8": frac_d_conf,
             "buffer/frac_near_uniform": frac_uniform,
+            "buffer/castle_rate": castle_rate,
             "buffer/wdl_agreement": wdl_agreement,
             "buffer/mlh_mask_frac": mask_frac,
             "buffer/mlh_q_mask_frac": mask_q_frac,
