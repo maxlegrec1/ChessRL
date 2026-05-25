@@ -1,17 +1,19 @@
 """ChessRL training dashboard.
 
-Single-page Streamlit dashboard surfacing three live metrics:
+Single-page Streamlit dashboard surfacing four live signals:
 
-1. Win rate vs Stockfish-1400 (from autobrawl daemon's state.json).
-2. Elo chain — per-5k-step ΔElo + cumulative (from model_chain_brawl CSVs).
-3. Castle rate (from W&B history, if accessible; rare-action learning signal).
+1. Live throughput (self-play pos/sec + trainer steps/sec, refreshed every 5 s).
+2. Win rate vs Stockfish-1400 (from autobrawl daemon's state.json).
+3. Elo chain — per-5k-step ΔElo + cumulative (from model_chain_brawl CSVs).
+4. Castle rate (from W&B history, if accessible; rare-action learning signal).
 
 Run:
     uv run streamlit run scripts/dashboard.py
 Then open http://localhost:8501.
 
-Auto-refreshes once per minute. Pure read-only — never modifies training,
-the autobrawl daemon, or any artifact under artifacts/runs/.
+Throughput refreshes every 5 s via st.fragment; the slower-moving sections
+auto-refresh once per minute. Pure read-only — never modifies training, the
+autobrawl daemon, or any artifact under artifacts/runs/.
 """
 
 from __future__ import annotations
@@ -22,11 +24,13 @@ import math
 import re
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import plotly.graph_objects as go
 import streamlit as st
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTOBRAWL_STATE = ROOT / "artifacts/exp/sf1400_autobrawl/state.json"
@@ -138,6 +142,87 @@ def _find_wandb_run_id() -> Path | None:
     return candidates[0] if candidates else None
 
 
+@st.cache_data(ttl=600)
+def load_run_config(run_path_str: str) -> dict:
+    """Read batch_size + log_every from the run's frozen config snapshot."""
+    try:
+        cfg = yaml.safe_load(Path(run_path_str, "config.yaml").read_text())
+    except (FileNotFoundError, OSError):
+        return {}
+    return {
+        "batch_size": int(cfg.get("batch_size", 0)) or None,
+        "log_every": int(cfg.get("log_every", 0)) or None,
+    }
+
+
+def _read_writes_counter(run_path: Path) -> int | None:
+    """Monotonic write counter from the C++ self-play sidecar. None on miss."""
+    try:
+        return int((run_path / "buffer" / "buffer.bin.writes").read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+_STEP_LINE_RE = re.compile(
+    r"\[step\s+(\d+)\].*?pps=([\d,]+)\s+g=([\d.]+)/s\s+k=([\d.]+)"
+)
+
+
+def _tail_training_log(run_path: Path, max_bytes: int = 65536) -> str:
+    """Return the last `max_bytes` of training.log decoded as utf-8."""
+    p = run_path / "training.log"
+    try:
+        sz = p.stat().st_size
+        with p.open("rb") as fh:
+            if sz > max_bytes:
+                fh.seek(sz - max_bytes)
+            return fh.read().decode("utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def _parse_latest_step(log_text: str) -> dict | None:
+    """Find the most recent `[step N] ... pps=... g=.../s k=...` entry."""
+    for line in reversed(log_text.splitlines()):
+        m = _STEP_LINE_RE.search(line)
+        if m:
+            return {
+                "step": int(m.group(1)),
+                "pps": int(m.group(2).replace(",", "")),
+                "g": float(m.group(3)),
+                "k": float(m.group(4)),
+            }
+    return None
+
+
+def _sample_and_rate(
+    key: str, now: float, value: int | None, window_s: float
+) -> float | None:
+    """Append (now, value) to a session_state deque and return rate over `window_s`.
+
+    Returns None until at least two samples are present and the value has
+    moved. Trims history to the last 5 min / 200 samples.
+    """
+    if value is None:
+        return None
+    hist: list[tuple[float, int]] = st.session_state.setdefault(key, [])
+    hist.append((now, value))
+    cutoff = now - 300.0
+    hist = [s for s in hist if s[0] >= cutoff][-200:]
+    st.session_state[key] = hist
+    if len(hist) < 2:
+        return None
+    anchor_t, anchor_v = hist[0]
+    for t, v in hist:
+        if now - t < window_s:
+            break
+        anchor_t, anchor_v = t, v
+    dt = max(1e-3, now - anchor_t)
+    if value == anchor_v:
+        return 0.0
+    return max(0.0, (value - anchor_v) / dt)
+
+
 @st.cache_data(ttl=60)
 def find_active_run() -> dict:
     """Discover the latest training run directory + its start time."""
@@ -160,6 +245,73 @@ def find_active_run() -> dict:
         except ValueError:
             pass
     return {"name": latest.name, "path": latest, "started": started}
+
+
+# ──────────────────────────────────────────────────────────────────────────── #
+# Live throughput fragment (reruns every 5 s, independent of the main page)
+# ──────────────────────────────────────────────────────────────────────────── #
+@st.fragment(run_every=5)
+def throughput_panel() -> None:
+    info = find_active_run()
+    run_path = info["path"]
+    st.subheader("Throughput (live)")
+    if run_path is None:
+        st.info("No active run under `artifacts/runs/`.")
+        return
+
+    now = time.time()
+    writes = _read_writes_counter(run_path)
+    log_text = _tail_training_log(run_path)
+    latest = _parse_latest_step(log_text)
+    cfg = load_run_config(str(run_path))
+
+    sp_pos_per_sec = _sample_and_rate(
+        f"thr_writes::{run_path.name}", now, writes, window_s=30.0
+    )
+    steps_per_sec = _sample_and_rate(
+        f"thr_step::{run_path.name}",
+        now,
+        latest["step"] if latest else None,
+        window_s=30.0,
+    )
+
+    cols = st.columns(4)
+    cols[0].metric(
+        "self-play pos/sec",
+        f"{sp_pos_per_sec:,.0f}" if sp_pos_per_sec is not None else "—",
+        help="positions/sec written to buffer; 30 s sliding window over the "
+        "`buffer.bin.writes` sidecar (works during warmup too).",
+    )
+    cols[1].metric(
+        "trainer steps/sec",
+        f"{steps_per_sec:.2f}" if steps_per_sec is not None else "—",
+        help="training steps/sec; 30 s sliding window over `[step N]` log lines. "
+        "Shows '—' until the trainer is past warmup.",
+    )
+    cols[2].metric(
+        "trainer pos/sec",
+        f"{latest['pps']:,d}" if latest else "—",
+        help="positions/sec consumed by trainer (= batch_size × steps/sec). "
+        "Parsed from the trainer's own `pps=` log field.",
+    )
+    cols[3].metric(
+        "latest step",
+        f"{latest['step']:,d}" if latest else "warming up",
+        help=(
+            f"k_actual={latest['k']:.2f}  (target_k from config)"
+            if latest
+            else "Trainer is still filling the warmup buffer; no [step N] lines yet."
+        ),
+    )
+
+    bs = cfg.get("batch_size")
+    derived = ""
+    if latest and bs:
+        derived = f"  ·  pps/batch_size = {latest['pps'] / bs:.2f} steps/s (instantaneous)"
+    st.caption(
+        f"Run: `{info['name']}`  ·  refreshes every 5 s  ·  source: "
+        f"`buffer/buffer.bin.writes` + tail of `training.log`{derived}."
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -202,6 +354,10 @@ if castle_rates:
     )
 else:
     c4.metric("castle rate", "—")
+
+st.divider()
+
+throughput_panel()
 
 st.divider()
 
