@@ -21,6 +21,7 @@ CSVS = [
     ROOT / "artifacts/exp/elo_chain_ext/results.csv",  # 115k→155k extension
     ROOT / "artifacts/exp/elo_chain_ext2/results.csv",  # 155k→190k extension
     ROOT / "artifacts/exp/elo_chain_ext3/results.csv",  # 190k→220k extension
+    ROOT / "artifacts/exp/elo_chain_ext4/results.csv",  # 220k→latest extension
 ]
 OUT = ROOT / "artifacts/exp/elo_chain/elo_chain_fixed.png"
 
