@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
@@ -16,11 +17,27 @@ wheels/
 
 # Data
 *.pgn
-./runs/
 *.parquet
-wandb/
-
+*.bin
 *.lock
 *.so
+
+# Generated state and runs
+artifacts/
+.iteration
+
+# W&B local logs/cache
+wandb/
+wandb_cache/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# C++ build outputs and vendored sources
+cpp/build/
+cpp/chess-library/
 
 *.env

@@ -1,7 +1,7 @@
+import bulletchess
 import numpy as np
 import torch
-import bulletchess
-from typing import List, Tuple, Optional
+
 from .vocab import policy_index
 
 # Precompute policy string to index mapping for O(1) lookups
@@ -9,7 +9,14 @@ policy_to_idx = {u: i for i, u in enumerate(policy_index)}
 
 
 def _board_to_12_piece_planes(board: bulletchess.Board) -> np.ndarray:
-    piece_types = [bulletchess.PAWN, bulletchess.KNIGHT, bulletchess.BISHOP, bulletchess.ROOK, bulletchess.QUEEN, bulletchess.KING]
+    piece_types = [
+        bulletchess.PAWN,
+        bulletchess.KNIGHT,
+        bulletchess.BISHOP,
+        bulletchess.ROOK,
+        bulletchess.QUEEN,
+        bulletchess.KING,
+    ]
     piece_colors = [bulletchess.WHITE, bulletchess.BLACK]
 
     planes = []
@@ -52,7 +59,7 @@ def _mirror_board(board: bulletchess.Board) -> bulletchess.Board:
     """
     # Create empty board
     mirrored = bulletchess.Board.empty()
-    
+
     # Mirror all pieces
     for square in bulletchess.SQUARES:
         piece = board[square]
@@ -64,11 +71,11 @@ def _mirror_board(board: bulletchess.Board) -> bulletchess.Board:
             mirrored_rank = 7 - rank
             mirrored_idx = mirrored_rank * 8 + file
             mirrored_square = bulletchess.SQUARES[mirrored_idx]
-            
+
             # Flip piece color
             mirrored_color = piece.color.opposite
             mirrored[mirrored_square] = bulletchess.Piece(mirrored_color, piece.piece_type)
-    
+
     # Mirror castling rights: swap white<->black
     # Build castling rights by checking each type and creating CastlingRights
     new_castling_types = []
@@ -80,16 +87,16 @@ def _mirror_board(board: bulletchess.Board) -> bulletchess.Board:
         new_castling_types.append(bulletchess.WHITE_KINGSIDE)
     if bulletchess.BLACK_QUEENSIDE in board.castling_rights:
         new_castling_types.append(bulletchess.WHITE_QUEENSIDE)
-    
+
     # Build CastlingRights from list of types
     if new_castling_types:
         mirrored.castling_rights = bulletchess.CastlingRights(new_castling_types)
     else:
         mirrored.castling_rights = bulletchess.NO_CASTLING
-    
+
     # Flip turn
     mirrored.turn = board.turn.opposite
-    
+
     # Mirror en passant square if exists
     if board.en_passant_square is not None:
         ep_idx = board.en_passant_square.index()
@@ -98,18 +105,18 @@ def _mirror_board(board: bulletchess.Board) -> bulletchess.Board:
         mirrored_ep_rank = 7 - ep_rank
         mirrored_ep_idx = mirrored_ep_rank * 8 + ep_file
         mirrored.en_passant_square = bulletchess.SQUARES[mirrored_ep_idx]
-    
+
     # Copy move counters
     mirrored.halfmove_clock = board.halfmove_clock
     mirrored.fullmove_number = board.fullmove_number
-    
+
     return mirrored
 
 
-def _build_snapshots(board: bulletchess.Board) -> List[bulletchess.Board]:
+def _build_snapshots(board: bulletchess.Board) -> list[bulletchess.Board]:
     # snapshots[0] is current, snapshots[1] one ply ago, ... up to 7 plies ago
     temp = board.copy()
-    snaps: List[bulletchess.Board] = [temp.copy()]
+    snaps: list[bulletchess.Board] = [temp.copy()]
     for _ in range(7):
         # Check if there are moves to undo by checking if undo() returns None
         try:
@@ -121,8 +128,14 @@ def _build_snapshots(board: bulletchess.Board) -> List[bulletchess.Board]:
     return snaps
 
 
-def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = None) -> Tuple[torch.Tensor, np.ndarray]:
-    board = bulletchess.Board.from_fen(starting_fen) if starting_fen is not None else bulletchess.Board()
+def encode_moves_to_tensor(
+    uci_moves: list[str], starting_fen: str | None = None
+) -> tuple[torch.Tensor, np.ndarray]:
+    board = (
+        bulletchess.Board.from_fen(starting_fen)
+        if starting_fen is not None
+        else bulletchess.Board()
+    )
     for mv in uci_moves:
         move = bulletchess.Move.from_uci(mv)
         board.apply(move)
@@ -131,13 +144,13 @@ def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = N
     snapshots = _build_snapshots(board)
 
     # Always encode from white's perspective; mirror all snapshots if black to move
-    mirror = (board.turn == bulletchess.BLACK)
+    mirror = board.turn == bulletchess.BLACK
     if mirror:
         snapshots = [_mirror_board(s) if s is not None else None for s in snapshots]
 
     # Assemble 112-channel tensor
     # 8 groups: each 12 piece planes + 1 blank = 13; total 104
-    channels: List[np.ndarray] = []
+    channels: list[np.ndarray] = []
     for i in range(8):
         if snapshots[i] is not None:
             planes12 = _board_to_12_piece_planes(snapshots[i])  # (8,8,12)
@@ -174,23 +187,23 @@ def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = N
     # Legal moves mask built from mirrored board to match policy_index perspective
     board_for_mask = _mirror_board(board) if (board.turn == bulletchess.BLACK) else board.copy()
     lm = np.ones(1858, dtype=np.float32) * (-1000)
-    
+
     # Collect all legal moves as UCI strings
     legal_moves_uci = set()
     for possible in board_for_mask.legal_moves():
         u = possible.uci()
-        if u[-1] != 'n':
+        if u[-1] != "n":
             legal_moves_uci.add(u)
         else:
             legal_moves_uci.add(u[:-1])
-    
+
     # Mark all legal moves
     for u in legal_moves_uci:
         idx = policy_to_idx.get(u)
         if idx is not None:
             lm[idx] = 0
-    
-    # Add castling moves as king-to-rook-square moves ONLY if the corresponding 
+
+    # Add castling moves as king-to-rook-square moves ONLY if the corresponding
     # standard castling move is actually legal (to verify castling is possible)
     # White kingside: e1h1 (king to rook square) if e1g1 is legal
     if "e1g1" in legal_moves_uci:
@@ -198,21 +211,21 @@ def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = N
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # White queenside: e1a1 (king to rook square) if e1c1 is legal
     if "e1c1" in legal_moves_uci:
         castling_move = "e1a1"
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # Black kingside: e8h8 (king to rook square) if e8g8 is legal
     if "e8g8" in legal_moves_uci:
         castling_move = "e8h8"
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # Black queenside: e8a8 (king to rook square) if e8c8 is legal
     if "e8c8" in legal_moves_uci:
         castling_move = "e8a8"
@@ -223,7 +236,7 @@ def encode_moves_to_tensor(uci_moves: List[str], starting_fen: Optional[str] = N
     return final_tensor, lm
 
 
-def encode_fen_to_tensor(fen: str) -> Tuple[torch.Tensor, np.ndarray]:
+def encode_fen_to_tensor(fen: str) -> tuple[torch.Tensor, np.ndarray]:
     board = bulletchess.Board.from_fen(fen)
 
     # History: only current snapshot, others are zeros
@@ -234,7 +247,7 @@ def encode_fen_to_tensor(fen: str) -> Tuple[torch.Tensor, np.ndarray]:
         snapshots = [_mirror_board(s) if s is not None else None for s in snapshots]
 
     # Assemble 112-channel tensor
-    channels: List[np.ndarray] = []
+    channels: list[np.ndarray] = []
     for i in range(8):
         if snapshots[i] is not None:
             planes12 = _board_to_12_piece_planes(snapshots[i])
@@ -267,23 +280,23 @@ def encode_fen_to_tensor(fen: str) -> Tuple[torch.Tensor, np.ndarray]:
     # Legal moves mask from mirrored perspective when black to move
     board_for_mask = _mirror_board(board) if (board.turn == bulletchess.BLACK) else board.copy()
     lm = np.ones(1858, dtype=np.float32) * (-1000)
-    
+
     # Collect all legal moves as UCI strings
     legal_moves_uci = set()
     for possible in board_for_mask.legal_moves():
         u = possible.uci()
-        if u[-1] != 'n':
+        if u[-1] != "n":
             legal_moves_uci.add(u)
         else:
             legal_moves_uci.add(u[:-1])
-    
+
     # Mark all legal moves
     for u in legal_moves_uci:
         idx = policy_to_idx.get(u)
         if idx is not None:
             lm[idx] = 0
-    
-    # Add castling moves as king-to-rook-square moves ONLY if the corresponding 
+
+    # Add castling moves as king-to-rook-square moves ONLY if the corresponding
     # standard castling move is actually legal (to verify castling is possible)
     # White kingside: e1h1 (king to rook square) if e1g1 is legal
     if "e1g1" in legal_moves_uci:
@@ -291,21 +304,21 @@ def encode_fen_to_tensor(fen: str) -> Tuple[torch.Tensor, np.ndarray]:
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # White queenside: e1a1 (king to rook square) if e1c1 is legal
     if "e1c1" in legal_moves_uci:
         castling_move = "e1a1"
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # Black kingside: e8h8 (king to rook square) if e8g8 is legal
     if "e8g8" in legal_moves_uci:
         castling_move = "e8h8"
         idx = policy_to_idx.get(castling_move)
         if idx is not None:
             lm[idx] = 0
-    
+
     # Black queenside: e8a8 (king to rook square) if e8c8 is legal
     if "e8c8" in legal_moves_uci:
         castling_move = "e8a8"
@@ -314,4 +327,3 @@ def encode_fen_to_tensor(fen: str) -> Tuple[torch.Tensor, np.ndarray]:
             lm[idx] = 0
 
     return final_tensor, lm
-

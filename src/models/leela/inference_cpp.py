@@ -1,26 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Sequence, Tuple
 import importlib
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 _BINDING = None
 
-ValueVector = Tuple[float, float, float]
-LeelaPolicyResult = Tuple[List[str], List[ValueVector], List[ValueVector]]
+ValueVector = tuple[float, float, float]
+LeelaPolicyResult = tuple[list[str], list[ValueVector], list[ValueVector]]
 
 
 def _load_binding():
     global _BINDING
     if _BINDING is None:
-        cpp_dir = Path(__file__).resolve().parents[3] / "cpp"
-        if not cpp_dir.exists():
-            raise RuntimeError(f"Expected cpp directory at {cpp_dir}")
-        if str(cpp_dir) not in sys.path:
-            sys.path.insert(0, str(cpp_dir))
-        _BINDING = importlib.import_module("_inference_cpp")
+        try:
+            _BINDING = importlib.import_module("_inference_cpp")
+        except ImportError:
+            cpp_dir = Path(__file__).resolve().parents[3] / "cpp"
+            if not cpp_dir.exists():
+                raise
+            if str(cpp_dir) not in sys.path:
+                sys.path.insert(0, str(cpp_dir))
+            _BINDING = importlib.import_module("_inference_cpp")
     return _BINDING
 
 
@@ -57,7 +60,7 @@ class Leelacpp:
         temperature: float | None = None,
         iterations: int | None = 1,
         return_timings: bool = False,
-    ) -> LeelaPolicyResult | Tuple[LeelaPolicyResult, InferenceStats]:
+    ) -> LeelaPolicyResult | tuple[LeelaPolicyResult, InferenceStats]:
         if not origin_fens or not move_lists:
             empty: LeelaPolicyResult = ([], [], [])
             if return_timings:
@@ -96,4 +99,3 @@ class Leelacpp:
 
 
 __all__ = ["Leelacpp", "InferenceStats"]
-

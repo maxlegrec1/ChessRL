@@ -1,0 +1,133 @@
+{
+  "label": "pk_vocab",
+  "engine": "artifacts/legal_ceiling_v7_history_arch/v7.trt",
+  "gpu": "NVIDIA H200",
+  "host": "fa8312fb6cf1",
+  "ts": 1778843348.844924,
+  "config": {
+    "concurrency": 1024,
+    "threads": 128,
+    "sims": 800,
+    "hash_size": 0,
+    "max_buffer_size": 1000000,
+    "temperature": 1.3,
+    "temperature_at_root": 1.0,
+    "cpuct": 0.65,
+    "use_dirichlet": true,
+    "dirichlet_alpha": 0.12,
+    "dirichlet_epsilon": 0.05,
+    "random_opening_plies": 0
+  },
+  "wall_clock_sec": 90.26121939485893,
+  "warmup_sec": 20.0,
+  "steps": 35,
+  "positions": 35840,
+  "games": 60,
+  "nodes": 28672000,
+  "throughput": {
+    "positions_per_sec": 397.06975199629716,
+    "games_per_sec": 0.6647373080295154,
+    "nodes_per_sec": 317655.8015970377
+  },
+  "inference": {
+    "batches": 230446,
+    "positions_in_batches": 28544435,
+    "total_inference_ms": 73347.72958300007,
+    "mean_batch_size": 123.86604670942434,
+    "mean_infer_ms_per_batch": 0.318285974080696
+  },
+  "encoder": {
+    "calls": 0,
+    "total_encoder_ms_aggregate": 0.0,
+    "mean_us_per_leaf": 0.0,
+    "leaves_per_batch": 0.0,
+    "thread_busy_frac": 0.0
+  },
+  "samples": [
+    {
+      "t": 7.599464574828744,
+      "positions": 3072,
+      "games": 0,
+      "nodes": 2457600
+    },
+    {
+      "t": 13.106183246243745,
+      "positions": 5120,
+      "games": 0,
+      "nodes": 4096000
+    },
+    {
+      "t": 18.16884378483519,
+      "positions": 7168,
+      "games": 2,
+      "nodes": 5734400
+    },
+    {
+      "t": 23.71506623411551,
+      "positions": 9216,
+      "games": 3,
+      "nodes": 7372800
+    },
+    {
+      "t": 28.719126974232495,
+      "positions": 11264,
+      "games": 3,
+      "nodes": 9011200
+    },
+    {
+      "t": 35.806291710119694,
+      "positions": 14336,
+      "games": 7,
+      "nodes": 11468800
+    },
+    {
+      "t": 43.20610963925719,
+      "positions": 17408,
+      "games": 13,
+      "nodes": 13926400
+    },
+    {
+      "t": 48.88020086614415,
+      "positions": 19456,
+      "games": 18,
+      "nodes": 15564800
+    },
+    {
+      "t": 56.317106999922544,
+      "positions": 22528,
+      "games": 25,
+      "nodes": 18022400
+    },
+    {
+      "t": 61.74485349608585,
+      "positions": 24576,
+      "games": 29,
+      "nodes": 19660800
+    },
+    {
+      "t": 69.21747422404587,
+      "positions": 27648,
+      "games": 37,
+      "nodes": 22118400
+    },
+    {
+      "t": 74.78678667824715,
+      "positions": 29696,
+      "games": 43,
+      "nodes": 23756800
+    },
+    {
+      "t": 79.99020719109103,
+      "positions": 31744,
+      "games": 48,
+      "nodes": 25395200
+    },
+    {
+      "t": 87.61495054326952,
+      "positions": 34816,
+      "games": 59,
+      "nodes": 27852800
+    }
+  ],
+  "buffer_path": "artifacts/perf/scratch/bench_1778843235.bin"
+}

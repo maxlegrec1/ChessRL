@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
@@ -11,6 +12,11 @@
 #include "chess-library/include/chess.hpp"
 
 #include "inference.hpp"
+#include "mcts/common.hpp"
+// SmallPackedPosition + plane-layout constants: standalone header (only
+// <cstdint>) shared with the CUDA expansion kernel so nvcc never parses
+// chess-library / TensorRT.
+#include "mcts/packed_position.hpp"
 
 namespace chessrl::mcts::single
 {
@@ -53,6 +59,14 @@ struct SmallEncodedPosition
     std::vector<float> features;
 };
 
+// Pack a (board, history) pair into the compact snapshot.
+SmallPackedPosition pack_small_position(
+    const chess::Board& board, const chessrl::mcts::HistoryStack& history);
+
+// CPU reference expansion — bit-identical to encode_small_position().features
+// for the same logical position. The GPU kernel must reproduce this exactly.
+std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed);
+
 struct BatchStatistics
 {
     size_t batches{0};
@@ -60,21 +74,32 @@ struct BatchStatistics
     double total_inference_ms{0.0};
 };
 
+// Process-wide encoder time accumulators. Updated by encodeSmallFeatures /
+// encodeSmallFeaturesNoHistory; read by the perf bench. Atomic because the
+// encoder runs on N MCTS worker threads concurrently.
+struct EncoderTotals
+{
+    uint64_t calls{0};
+    uint64_t nanos{0};
+};
+EncoderTotals encoder_totals();
+void encoder_totals_reset();
+
+// No-history convenience: equivalent to encode_small_position(board, {}).
 SmallEncodedPosition encode_small_position(const chess::Board& board);
 
-struct LeelaEncodedPosition
-{
-    std::vector<float> features;
-    bool is_black_to_move{false};
-    std::string castling_rights;
-};
-
-LeelaEncodedPosition encode_leela_position(std::string_view origin_fen, const std::vector<std::string>& move_history);
+// History-aware encoder. The 0th slot of `history` is conceptually the
+// current position; the encoder reads piece bitboards from `board` itself
+// (defensive — keeps slot-0 piece planes authoritative even if the
+// caller's ring buffer drifts) but uses `history[0].repetition` for the
+// current-position repetition flag and `history[1..7]` for past slots.
+SmallEncodedPosition encode_small_position(
+    const chess::Board& board, const chessrl::mcts::HistoryStack& history);
 
 struct SmallBatchConfig
 {
-    std::string engine_path{"model_minibatch.trt"};
-    int max_batch_size{32};
+    std::string engine_path{"model.trt"};
+    int max_batch_size{1024};
     bool enable_telemetry{false};
 };
 
@@ -85,31 +110,10 @@ public:
 
     explicit SmallBatchRunner(SmallBatchConfig config = {});
 
-    Ticket enqueue(SmallEncodedPosition position);
-    void process_pending();
-    size_t pending() const;
-    BatchStatistics statistics() const;
-
-private:
-    struct Impl;
-    std::shared_ptr<Impl> impl_;
-};
-
-struct LeelaBatchConfig
-{
-    std::string engine_path{"leela_minibatch.trt"};
-    int max_batch_size{32};
-    bool enable_telemetry{false};
-};
-
-class LeelaBatchRunner
-{
-public:
-    using Ticket = BatchTicket<LeelaPolicyValue>;
-
-    explicit LeelaBatchRunner(LeelaBatchConfig config = {});
-
-    Ticket enqueue(LeelaEncodedPosition position);
+    // Carries a POINTER to the compact packed snapshot (keeps the shared-
+    // queue critical section pointer-sized). Dense planes are produced on
+    // the GPU (launch_expand_planes) just before the TRT enqueue.
+    Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position);
     void process_pending();
     size_t pending() const;
     BatchStatistics statistics() const;

@@ -23,6 +23,10 @@ struct MctsSummary
     std::string action;
     std::vector<std::pair<std::string, float>> policy;
     std::array<float, 3> value{{0.0F, 0.0F, 0.0F}};
+    // Visit-weighted backed-up plies-remaining at the root, in raw plies. Set
+    // to a negative sentinel when no NN visits accumulated (e.g. terminal
+    // root) so callers can write a "no target" sentinel into the buffer.
+    float backed_plies{-1.0F};
     std::vector<RolloutDetail> rollouts;
 };
 

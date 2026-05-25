@@ -13,7 +13,7 @@ dependencies = [
     "torchtune",
     "torchao",
     "rich>=14.2.0",
-    "wandb>=0.22.3",
+    "wandb>=0.23,<1",
     "torch-tensorrt>=2.9.0",
     "pip>=25.3",
     "pybind11>=3.0.1",
@@ -23,6 +23,20 @@ dependencies = [
     "onnx-graphsurgeon>=0.5.8",
     "onnxruntime>=1.23.2",
     "pycuda>=2025.1.2",
+    "pyarrow>=17.0.0",
+    "pyyaml>=6.0.2",
+    "chessrl-inference-cpp",
+    "matplotlib>=3.10.9",
+    "streamlit>=1.30,<2",
+    "plotly>=5.24,<7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.7,<1",
+    "mypy>=1.10,<2",
+    "vulture>=2.11,<3",
 ]
 
 [[tool.uv.index]]
@@ -30,6 +44,47 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[tool.uv.workspace]
+members = ["cpp"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 torch-tensorrt = { index = "pytorch-cu130" }
+chessrl-inference-cpp = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires CUDA",
+    "trt: requires TensorRT engine artifact",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["archive", "cpp/chess-library", "artifacts"]
+
+[tool.ruff.lint]
+# Conservative ruleset: pycodestyle errors, pyflakes, isort, bugbear, pyupgrade.
+# Skip rules that would force broad refactors (D for docstrings, ANN for types).
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",   # line-too-long: many existing prints/strings exceed 100 chars
+    "B008",   # function-call-in-default-arg: torch/numpy idioms
+    "UP007",  # use X | Y instead of Optional[X]: too churny for now
+    "E741",   # ambiguous variable name: `w, d, l` is the project's WDL convention
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]  # scripts often append sys.path before importing src
+"tests/*.py"   = ["E402"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+no_strict_optional = true
+exclude = ["archive/", "cpp/chess-library/", "artifacts/"]
+
+[tool.vulture]
+exclude = ["archive/", "cpp/", "artifacts/"]
+min_confidence = 80

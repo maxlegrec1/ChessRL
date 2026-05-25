@@ -1,5 +1,6 @@
 import random
-from typing import Iterator, Optional, Dict, Any
+from collections.abc import Iterator
+from typing import Any
 
 import bulletchess
 
@@ -7,11 +8,12 @@ import bulletchess
 def _load_hf_openings(split: str = "train"):
 
     from datasets import load_dataset  # type: ignore
+
     _DATASET = load_dataset("Lichess/chess-openings", split=split)
     return _DATASET
 
 
-def _epd_to_fen(epd: str) -> Optional[str]:
+def _epd_to_fen(epd: str) -> str | None:
     # EPD: fields similar to FEN but usually 4 tokens + operations; convert to FEN by taking first 4 and appending clocks
     parts = epd.strip().split()
     if len(parts) < 4:
@@ -26,7 +28,9 @@ def _epd_to_fen(epd: str) -> Optional[str]:
         return None
 
 
-def hf_opening_fen_generator(split: str = "train", seed: Optional[int] = None) -> Iterator[Dict[str, Any]]:
+def hf_opening_fen_generator(
+    split: str = "train", seed: int | None = None
+) -> Iterator[dict[str, Any]]:
     """Yield random openings sampled from Lichess/chess-openings.
 
     Each item is a dict with:
@@ -50,5 +54,3 @@ def hf_opening_fen_generator(split: str = "train", seed: Optional[int] = None) -
         uci_str = rec.get("uci") or ""
         uci_moves = [mv for mv in uci_str.strip().split() if mv]
         yield {"fen": fen, "uci": uci_moves}
-
-

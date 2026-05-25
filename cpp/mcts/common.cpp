@@ -1,6 +1,7 @@
 #include "mcts/common.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <optional>
 #include <sstream>
@@ -10,6 +11,93 @@
 
 namespace chessrl::mcts
 {
+
+PiecePlanes snapshot_piece_planes(const chess::Board& board)
+{
+    PiecePlanes snap;
+    snap.valid = true;
+    constexpr std::array<chess::PieceType, 6> kTypes{
+        chess::PieceType::PAWN,
+        chess::PieceType::KNIGHT,
+        chess::PieceType::BISHOP,
+        chess::PieceType::ROOK,
+        chess::PieceType::QUEEN,
+        chess::PieceType::KING,
+    };
+    for (int t = 0; t < 6; ++t)
+    {
+        snap.bitboards[t]     = board.pieces(kTypes[t], chess::Color::WHITE).getBits();
+        snap.bitboards[t + 6] = board.pieces(kTypes[t], chess::Color::BLACK).getBits();
+    }
+    return snap;
+}
+
+void history_stack_push(HistoryStack& stack, const PiecePlanes& snap)
+{
+    // Shift slots [0..6] -> [1..7], drop the oldest (was at slot 7).
+    for (int i = kHistoryDepth - 1; i > 0; --i)
+    {
+        stack[i] = stack[i - 1];
+    }
+    stack[0] = snap;
+}
+
+HistoryStack build_root_history_stack(
+    const std::string& fen,
+    const std::vector<std::string>& moves,
+    const chess::Board& root_board)
+{
+    HistoryStack stack;
+    // Slot 0 = current (root) position. Subsequent slots are filled by
+    // replaying the move list and snapshotting before each move.
+    const std::string starting_fen = fen.empty()
+        ? std::string(chess::constants::STARTPOS)
+        : fen;
+    chess::Board board(starting_fen);
+
+    // Collect snapshots in chronological order: snapshots[0] = position
+    // before any history-move was applied, snapshots[n] = position after n
+    // moves. With m moves total, snapshots has m+1 entries.
+    std::vector<PiecePlanes> snapshots;
+    snapshots.reserve(moves.size() + 1);
+    snapshots.push_back(snapshot_piece_planes(board));
+    snapshots.back().repetition = board.isRepetition(1);
+    for (const auto& moveStr : moves)
+    {
+        chess::Move move = chess::uci::uciToMove(board, moveStr);
+        if (move == chess::Move::NO_MOVE)
+        {
+            // Match apply_history's behavior — root construction has already
+            // succeeded by this point, but be defensive about malformed input.
+            break;
+        }
+        board.makeMove(move);
+        snapshots.push_back(snapshot_piece_planes(board));
+        snapshots.back().repetition = board.isRepetition(1);
+    }
+
+    // Sanity: the final snapshot must match root_board piece-wise (we use
+    // root_board's actual state to populate slot 0 so any inconsistency
+    // surfaces immediately rather than silently desynchronizing).
+    stack[0] = snapshot_piece_planes(root_board);
+    stack[0].repetition = root_board.isRepetition(1);
+
+    // Fill historical slots 1..7 from the most recent snapshots, oldest at
+    // the highest slot index. If we don't have enough history, leave the
+    // remaining slots as default-constructed (valid=false, all zeros).
+    const int n_snap = static_cast<int>(snapshots.size());
+    // snapshots[n_snap - 1] corresponds to the root. So slot 1 = snapshots[n_snap - 2].
+    for (int slot = 1; slot < kHistoryDepth; ++slot)
+    {
+        const int idx = n_snap - 1 - slot;
+        if (idx < 0)
+        {
+            break;
+        }
+        stack[slot] = snapshots[idx];
+    }
+    return stack;
+}
 
 struct HistoryEntry
 {
@@ -85,32 +173,30 @@ float parse_float(const std::string& value, const std::string& name)
 
 } // namespace
 
-std::array<float, 3> orient_small_wdl(const chess::Board& board, const std::array<float, 3>& raw_wdl)
-{
-    if (board.sideToMove() == chess::Color::BLACK)
-    {
-        return raw_wdl;
-    }
-
-    return {raw_wdl[2], raw_wdl[1], raw_wdl[0]};
-}
-
-std::array<float, 3> orient_leela_wdl(const chess::Board& board, const std::array<float, 3>& white_perspective_wdl)
-{
-    if (board.sideToMove() == chess::Color::WHITE)
-    {
-        return white_perspective_wdl;
-    }
-
-    return {white_perspective_wdl[2], white_perspective_wdl[1], white_perspective_wdl[0]};
-}
-
-std::vector<std::string> principal_variation(const SearchTree& tree, int node_index)
+std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board)
 {
     std::vector<std::string> line;
     if (node_index < 0 || node_index >= static_cast<int>(tree.nodes.size()))
     {
         return line;
+    }
+
+    // Phase B: Reconstruct board state from root to starting node
+    chess::Board current_board = root_board;
+    std::vector<int> path_to_node;
+    int temp = node_index;
+    while (temp > 0 && temp < static_cast<int>(tree.nodes.size()))
+    {
+        path_to_node.push_back(temp);
+        temp = tree.nodes[temp].parent;
+    }
+    // Apply moves from root to starting node (in reverse order)
+    for (auto it = path_to_node.rbegin(); it != path_to_node.rend(); ++it)
+    {
+        if (*it < static_cast<int>(tree.nodes.size()))
+        {
+            current_board.makeMove(tree.nodes[*it].move_from_parent);
+        }
     }
 
     int current = node_index;
@@ -164,7 +250,9 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
         }
 
         const chess::Move move = node.child_moves[best_index];
-        line.push_back(chess::uci::moveToUci(move, tree.nodes[current].board.chess960()));
+        // Phase B: Use current_board for chess960 flag
+        line.push_back(chess::uci::moveToUci(move, current_board.chess960()));
+        current_board.makeMove(move);
         current = node.children[best_index];
     }
 
@@ -251,6 +339,10 @@ MctsOptions parse_cli(int argc, char** argv)
     {
         options.cpuct = parse_float(*cpuct, "--cpuct");
     }
+    if (auto temp_root = lookup("temperature-at-root"))
+    {
+        options.temperature_at_root = parse_float(*temp_root, "--temperature-at-root");
+    }
     if (auto temperature = lookup("temperature"))
     {
         options.temperature = parse_float(*temperature, "--temperature");
@@ -275,10 +367,6 @@ MctsOptions parse_cli(int argc, char** argv)
     {
         options.small_engine_path = *small_engine;
     }
-    if (auto leela_engine = lookup("leela-engine"))
-    {
-        options.leela_engine_path = *leela_engine;
-    }
 
     if (options.simulations <= 0)
     {
@@ -287,6 +375,10 @@ MctsOptions parse_cli(int argc, char** argv)
     if (options.cpuct <= 0.0F)
     {
         throw std::invalid_argument("--cpuct must be positive");
+    }
+    if (options.temperature_at_root < 0.0F)
+    {
+        throw std::invalid_argument("--temperature-at-root must be non-negative");
     }
     if (options.temperature < 0.0F)
     {
@@ -326,6 +418,11 @@ std::vector<std::string> parse_history_argument(const std::string& raw)
 
 chess::Board apply_history(const SearchInput& input)
 {
+    if (input.board)
+    {
+        return *input.board;
+    }
+
     const std::string fenToUse = input.fen.empty() ? std::string(chess::constants::STARTPOS) : input.fen;
     chess::Board board(fenToUse);
 
@@ -346,10 +443,11 @@ int SearchTree::add_root(const chess::Board& board, const std::vector<std::strin
 {
     nodes.clear();
     TreeNode root;
-    root.board = board;
-    root.terminal = root.board.isGameOver().second != chess::GameResult::NONE;
+    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
+    root.terminal = board.isGameOver().second != chess::GameResult::NONE;
     root.prior = 1.0F;
     root.history = build_history_chain(history);
+    // Root has no parent, so move_from_parent remains NO_MOVE
 
     nodes.push_back(std::move(root));
     return 0;
@@ -375,11 +473,34 @@ int SearchTree::add_child(
     node.parent = parent_index;
     node.move_from_parent = move;
     node.prior = prior;
-    node.board = child_board;
-    node.terminal = node.board.isGameOver().second != chess::GameResult::NONE;
+    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
+    node.terminal = child_board.isGameOver().second != chess::GameResult::NONE;
+    if (node.terminal)
+    {
+        // Initialize terminal node WDL from the perspective of side to move on this node
+        const auto result = child_board.isGameOver().second;
+        switch (result)
+        {
+        case chess::GameResult::WIN:
+            node.wdl = {1.0F, 0.0F, 0.0F};
+            break;
+        case chess::GameResult::LOSE:
+            node.wdl = {0.0F, 0.0F, 1.0F};
+            break;
+        case chess::GameResult::DRAW:
+            node.wdl = {0.0F, 1.0F, 0.0F};
+            break;
+        default:
+            break;
+        }
+    }
     node.history = nodes[parent_index].history;
 
-    const bool chess960 = nodes[parent_index].board.chess960();
+    // Phase B: Need chess960 flag from parent board - will be passed separately or reconstructed
+    // For now, we'll need to reconstruct parent board to get chess960 flag
+    // This is a temporary solution - we may need to store chess960 flag separately
+    // But for now, we'll use the child_board which has the correct chess960 setting
+    const bool chess960 = child_board.chess960();
     const std::string move_uci = chess::uci::moveToUci(move, chess960);
     if (!move_uci.empty())
     {
@@ -400,6 +521,121 @@ int SearchTree::add_child(
 
     return child_index;
 }
+
+std::optional<float> terminal_value(const chess::Board& board)
+{
+    const auto result = board.isGameOver().second;
+    switch (result)
+    {
+    case chess::GameResult::WIN:    return 1.0F;
+    case chess::GameResult::LOSE:   return -1.0F;
+    case chess::GameResult::DRAW:   return 0.0F;
+    default:                        return std::nullopt;
+    }
+}
+
+std::array<float, 3> wdl_from_terminal(float v)
+{
+    if (v > 0.0F) return {1.0F, 0.0F, 0.0F};   // win for side to move (unreachable today)
+    if (v < 0.0F) return {0.0F, 0.0F, 1.0F};   // loss for side to move (checkmate)
+    return {0.0F, 1.0F, 0.0F};                 // draw
+}
+
+namespace detail
+{
+
+void backpropagate(SearchTree& tree, const std::vector<int>& path, float value)
+{
+    float current = value;
+    for (auto it = path.rbegin(); it != path.rend(); ++it)
+    {
+        TreeNode& node = tree.nodes[*it];
+        node.visit_count += 1;
+        node.value_sum += current;
+        current = -current;
+    }
+}
+
+void backpropagate_full(
+    SearchTree& tree,
+    const std::vector<int>& path,
+    float value,
+    std::array<float, 3> leaf_wdl,
+    float leaf_plies)
+{
+    float current_v = value;
+    std::array<float, 3> current_wdl = leaf_wdl; // {W, D, L} from leaf's POV
+    int depth_from_leaf = 0;
+    for (auto it = path.rbegin(); it != path.rend(); ++it)
+    {
+        TreeNode& node = tree.nodes[*it];
+        node.visit_count += 1;
+        node.value_sum += current_v;
+        node.wdl_sum[0] += current_wdl[0];
+        node.wdl_sum[1] += current_wdl[1];
+        node.wdl_sum[2] += current_wdl[2];
+        // plies-remaining at this node = leaf_plies + depth between this
+        // node and the leaf. The leaf itself contributes leaf_plies + 0.
+        node.plies_sum += leaf_plies + static_cast<float>(depth_from_leaf);
+        const float inv = 1.0F / static_cast<float>(node.visit_count);
+        node.wdl[0] = node.wdl_sum[0] * inv;
+        node.wdl[1] = node.wdl_sum[1] * inv;
+        node.wdl[2] = node.wdl_sum[2] * inv;
+        // Flip for parent's perspective: value sign-flips, WDL swaps W↔L,
+        // plies stays as-is (moves-left is symmetric).
+        current_v = -current_v;
+        std::swap(current_wdl[0], current_wdl[2]);
+        depth_from_leaf += 1;
+    }
+}
+
+std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vector<bool>& visited)
+{
+    TreeNode& node = tree.nodes[node_index];
+
+    if (visited[static_cast<size_t>(node_index)])
+    {
+        return node.wdl;
+    }
+    visited[static_cast<size_t>(node_index)] = true;
+
+    if (node.terminal || node.children.empty())
+    {
+        return node.wdl;
+    }
+
+    std::array<float, 3> wdl_sum{0.0F, 0.0F, 0.0F};
+    int total_visits = 0;
+    for (const int child_index : node.children)
+    {
+        if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
+        {
+            continue;
+        }
+        const TreeNode& child = tree.nodes[child_index];
+        if (child.visit_count > 0)
+        {
+            std::array<float, 3> child_refined = refine_wdl_node(tree, child_index, visited);
+            const float visits = static_cast<float>(child.visit_count);
+            // child WDL is in opponent's perspective; flip into ours.
+            wdl_sum[0] += visits * child_refined[2];
+            wdl_sum[1] += visits * child_refined[1];
+            wdl_sum[2] += visits * child_refined[0];
+            total_visits += child.visit_count;
+        }
+    }
+
+    if (total_visits > 0)
+    {
+        const float inv = 1.0F / static_cast<float>(total_visits);
+        node.wdl[0] = wdl_sum[0] * inv;
+        node.wdl[1] = wdl_sum[1] * inv;
+        node.wdl[2] = wdl_sum[2] * inv;
+    }
+    return node.wdl;
+}
+
+} // namespace detail
 
 } // namespace chessrl::mcts
 

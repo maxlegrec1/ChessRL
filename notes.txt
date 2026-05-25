@@ -1,24 +1,39 @@
-Setup used to train :
+Quick command reference (run from repo root).
 
-uv run python src/train/train.py   --data-path src/data/shuffled_data.parquet   --batch-size 1024   --learning-rate 5e-5   --kl-weight 0.1   --max-logit-clip 10.0   --max-kl-clip 10.0   --max-steps 20000
+# Install / build
+uv sync                                # installs deps and builds the cpp extension
 
+# Start a fresh run (creates artifacts/runs/<id>/ + random-init engine)
+uv run python -m src.run
+uv run python -m src.run --name my-experiment
 
-To evaluate Model performance : 
+# Resume an existing run (auto-detects the latest step_*.pt)
+uv run python -m src.run --resume artifacts/runs/<id>
 
-uv run python /mnt/2tb_2/ChessRL/brawls.py --num_games 100 --model1 small --model2 small --temp 0.0 --temp2 0.0 --ckpt1 src/models/small/model.pt --ckpt2 checkpoints/checkpoint_final.pt 
+# Run only one side
+uv run python -m src.run --no-train      # self-play only
+uv run python -m src.run --no-selfplay   # trainer only
 
+# Watch per-run logs
+tail -f artifacts/runs/<id>/selfplay.log
+tail -f artifacts/runs/<id>/training.log
 
+# Head-to-head evaluation between two checkpoints
+uv run python -m src.eval.brawls \
+  --num_games 100 \
+  --model1 small --model2 small \
+  --temp 0.0 --temp2 0.0 \
+  --ckpt1 artifacts/runs/<id_a>/checkpoints/step_*.pt \
+  --ckpt2 artifacts/runs/<id_b>/checkpoints/step_*.pt
 
-# Generate data
+# Manually convert a checkpoint to a TensorRT engine
+scripts/build_trt.sh artifacts/runs/<id>/checkpoints/step_00043900.pt 43900 \
+  artifacts/runs/<id>/engines artifacts/runs/<id>/engines/.iteration
 
-# with calibration
-uv run python -m src.generate.play_self   --batch-size 1024   --player-1-kind small --player-2-kind leela   --player-1-device cuda --player-2-device cuda   --player-1-fp16 --player-2-fp16   --player-1-temp 0.1 --player-2-temp 0.1   --player-1-name small --player-2-name leela   --randomize-starting-player   --use-hf-openings   --target-games 100000   --output-dir runs/pgn   --calibrate --calibration-games 4096   --calibration-mode buckets   --calibration-buckets 5   --calibration-samples-per-bucket 256   --calibration-temp-min 0.05   --calibration-temp-max 2.0
+# Tests
+uv run pytest                          # full
+uv run pytest -m "not gpu and not trt" # CPU-only
 
-# without calibration
-uv run python -m src.generate.play_self   --batch-size 1024   --player-1-kind small --player-2-kind leela   --player-1-device cuda --player-2-device cuda   --player-1-fp16 --player-2-fp16   --player-1-temp 0.1 --player-2-temp 0.1   --player-1-name small --player-2-name leela   --randomize-starting-player   --use-hf-openings   --target-games 100000   --output-dir runs/pgn
-
-# Convert to pgn
-uv run python src/data/pgn_to_training_data.py --max-games 100000
-
-# Shuffle parquet
-uv run src/data/shuffle_parquet_two_pass.py --buckets 240
+# Prune old checkpoints/engines (default keeps last 5; dry-run by default)
+uv run python scripts/prune_artifacts.py
+uv run python scripts/prune_artifacts.py --apply

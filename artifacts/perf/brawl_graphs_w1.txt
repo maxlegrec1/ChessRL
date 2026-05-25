@@ -1,0 +1,4 @@
+Model vs Stockfish-1320: 16W / 1D / 3L  ->  16.5/20  (82.5%)
+Estimated model Elo ~ 1320 + (+269)  =  1589
+Total time: 707s
+PGN: artifacts/perf/brawl_graphs_w1.pgn
