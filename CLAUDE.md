@@ -2,23 +2,18 @@
 
 ## GPUs
 
-This box has two GPUs but **only one is usable**:
+This box is a **single-GPU NVIDIA H200** (Hopper, sm_90). There is no
+second usable GPU. Training, self-play, brawls, and benchmarks all share
+this one card.
 
-- `nvidia-smi` index **1**: NVIDIA RTX 4090 (24 GB) — the only working GPU. Shows up as
-  `CUDA_VISIBLE_DEVICES=0` to programs (the device list is filtered to it).
-- `nvidia-smi` index **0**: NVIDIA GTX 1070 (8 GB) — too old for our PyTorch build
-  (sm_61, current PyTorch needs sm_75+). **Do not target it.** It will appear "free"
-  in `nvidia-smi` but it can't run inference.
-
-When the user says "GPU0" they mean the 4090 (the CUDA-visible one), not what
-`nvidia-smi` shows in row 0. Both training, self-play, and any side jobs (brawls,
-benchmarks) run on the same physical 4090. There is no "spare GPU" to offload to.
-
-For Python jobs we always use:
+For Python jobs:
 ```
 CUDA_VISIBLE_DEVICES=0 uv run python ...
 ```
-which maps to the 4090.
+
+The C++ build defaults to `CHESSRL_CUDA_ARCH=sm_90` for this hardware.
+On other GPUs override the env var (sm_89 for 4090, sm_86 for 3090,
+sm_80 for A100) — see README prerequisites.
 
 ## Run-monitoring norms
 
