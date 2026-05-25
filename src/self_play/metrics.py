@@ -71,8 +71,10 @@ class MetricsTracker:
         with self._lock:
             positions = self._positions
             games = self._games
-            positions_per_sec = self._positions_per_sec if self._positions_per_sec > 0 else (
-                positions / max(time.monotonic() - self._start, 1e-6)
+            positions_per_sec = (
+                self._positions_per_sec
+                if self._positions_per_sec > 0
+                else (positions / max(time.monotonic() - self._start, 1e-6))
             )
 
         nodes_per_sec = positions_per_sec * self._simulations_per_position
@@ -91,4 +93,3 @@ class MetricsTracker:
 
 
 __all__ = ["MetricsTracker", "MetricsSnapshot"]
-

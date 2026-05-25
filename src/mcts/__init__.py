@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Mapping, MutableMapping, Sequence
 
 import _inference_cpp as _cpp  # type: ignore[attr-defined]
 
@@ -69,7 +69,9 @@ class _BaseMCTS:
             ),
             use_dirichlet=use_dirichlet if use_dirichlet is not None else cfg.use_dirichlet,
             dirichlet_alpha=dirichlet_alpha if dirichlet_alpha is not None else cfg.dirichlet_alpha,
-            dirichlet_epsilon=dirichlet_epsilon if dirichlet_epsilon is not None else cfg.dirichlet_epsilon,
+            dirichlet_epsilon=dirichlet_epsilon
+            if dirichlet_epsilon is not None
+            else cfg.dirichlet_epsilon,
         )
 
     @staticmethod
@@ -133,7 +135,9 @@ class SmallMCTS(_BaseMCTS):
         dirichlet_epsilon: float | None = None,
     ) -> list[dict[str, object]]:
         if isinstance(fens, str):
-            raise TypeError("SmallMCTS.run requires a sequence of FEN strings, not a single string.")
+            raise TypeError(
+                "SmallMCTS.run requires a sequence of FEN strings, not a single string."
+            )
 
         fen_list = [str(fen) for fen in fens]
         if not fen_list:
@@ -177,7 +181,9 @@ class SmallMCTS(_BaseMCTS):
         dirichlet_epsilon: float | None = None,
     ) -> list[dict[str, object]]:
         if isinstance(histories, (str, bytes)):
-            raise TypeError("SmallMCTS.run_from_histories requires a sequence of move sequences, not a single string.")
+            raise TypeError(
+                "SmallMCTS.run_from_histories requires a sequence of move sequences, not a single string."
+            )
 
         history_list = [_coerce_history(history) for history in histories]
         if not history_list:
@@ -218,4 +224,3 @@ class SmallMCTS(_BaseMCTS):
 __all__ = [
     "SmallMCTS",
 ]
-

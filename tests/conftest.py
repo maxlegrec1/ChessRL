@@ -6,6 +6,7 @@ import pytest
 def pytest_collection_modifyitems(config, items):
     try:
         import torch
+
         has_gpu = torch.cuda.is_available()
     except Exception:
         has_gpu = False

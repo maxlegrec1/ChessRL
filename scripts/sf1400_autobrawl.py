@@ -11,10 +11,10 @@ Per-brawl logs in artifacts/exp/sf1400_autobrawl/logs/step_NNNNNNNN.log.
 Run with nohup. PID file at artifacts/exp/sf1400_autobrawl/daemon.pid.
 Stop with: kill $(cat artifacts/exp/sf1400_autobrawl/daemon.pid)
 """
+
 import json
 import os
 import subprocess
-import sys
 import time
 import traceback
 from pathlib import Path
@@ -31,7 +31,7 @@ LOG_DIR = OUT_DIR / "logs"
 STEP_BIN = 5000
 SF_ELO = 1400
 NUM_GAMES = 50
-POLL_INTERVAL_SECONDS = 2 * 3600   # 2h
+POLL_INTERVAL_SECONDS = 2 * 3600  # 2h
 
 
 def _ts():
@@ -69,21 +69,31 @@ def _find_latest_unbrawled(state):
 def _brawl(step, engine):
     pgn = PGN_DIR / f"sf_{SF_ELO}_vs_step_{step:08d}_auto.pgn"
     log = LOG_DIR / f"step_{step:08d}.log"
-    print(f"[{_ts()}] brawl: step {step:>7d} vs SF-{SF_ELO}, {NUM_GAMES} games"
-          f"  log={log.name}", flush=True)
+    print(
+        f"[{_ts()}] brawl: step {step:>7d} vs SF-{SF_ELO}, {NUM_GAMES} games  log={log.name}",
+        flush=True,
+    )
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = "0"
     env["LD_LIBRARY_PATH"] = "/usr/local/cuda-12.8/targets/x86_64-linux/lib"
     cmd = [
-        "uv", "run", "python", "scripts/stockfish_match.py",
-        "--engine", str(engine),
-        "--num-games", str(NUM_GAMES),
-        "--sf-elo", str(SF_ELO),
-        "--out", str(pgn),
+        "uv",
+        "run",
+        "python",
+        "scripts/stockfish_match.py",
+        "--engine",
+        str(engine),
+        "--num-games",
+        str(NUM_GAMES),
+        "--sf-elo",
+        str(SF_ELO),
+        "--out",
+        str(pgn),
     ]
     with log.open("w") as fh:
-        subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT,
-                       cwd=str(ROOT), check=False)
+        subprocess.run(
+            cmd, env=env, stdout=fh, stderr=subprocess.STDOUT, cwd=str(ROOT), check=False
+        )
     # Parse the "Model vs Stockfish-NNNN: ..." final line
     final_line = ""
     for ln in log.read_text().splitlines():
@@ -118,21 +128,27 @@ def _bootstrap_state_if_empty():
         "bootstrapped_at": _ts(),
         "bootstrap_skip_steps": cands[:-1],
         "comment": "All 5k engines except the latest are marked done so this "
-                   "daemon starts at the most-recent checkpoint and goes forward.",
+        "daemon starts at the most-recent checkpoint and goes forward.",
     }
     _save_state(state)
-    print(f"[{_ts()}] bootstrapped state: skipped {len(cands)-1} pre-existing 5k "
-          f"engines (last skipped: {cands[-2] if len(cands)>=2 else 'none'}); "
-          f"first brawl target = step {cands[-1]}", flush=True)
+    print(
+        f"[{_ts()}] bootstrapped state: skipped {len(cands) - 1} pre-existing 5k "
+        f"engines (last skipped: {cands[-2] if len(cands) >= 2 else 'none'}); "
+        f"first brawl target = step {cands[-1]}",
+        flush=True,
+    )
 
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
-    print(f"[{_ts()}] sf1400_autobrawl daemon started  pid={os.getpid()}  "
-          f"poll={POLL_INTERVAL_SECONDS/3600:.1f}h  sf_elo={SF_ELO}  "
-          f"games/brawl={NUM_GAMES}", flush=True)
+    print(
+        f"[{_ts()}] sf1400_autobrawl daemon started  pid={os.getpid()}  "
+        f"poll={POLL_INTERVAL_SECONDS / 3600:.1f}h  sf_elo={SF_ELO}  "
+        f"games/brawl={NUM_GAMES}",
+        flush=True,
+    )
     _bootstrap_state_if_empty()
 
     try:
@@ -141,8 +157,10 @@ def main():
                 state = _load_state()
                 cand = _find_latest_unbrawled(state)
                 if cand is None:
-                    print(f"[{_ts()}] no new 5k engine; sleeping "
-                          f"{POLL_INTERVAL_SECONDS/3600:.1f}h", flush=True)
+                    print(
+                        f"[{_ts()}] no new 5k engine; sleeping {POLL_INTERVAL_SECONDS / 3600:.1f}h",
+                        flush=True,
+                    )
                 else:
                     step, engine = cand
                     result = _brawl(step, engine)

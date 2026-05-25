@@ -12,7 +12,9 @@ from src.models.small.small_model import SmallModel
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export BT4 checkpoint to ONNX.")
-    parser.add_argument("--ckpt_path", required=True, type=Path, help="Path to training checkpoint.")
+    parser.add_argument(
+        "--ckpt_path", required=True, type=Path, help="Path to training checkpoint."
+    )
     parser.add_argument("--onnx_path", required=True, type=Path, help="Destination ONNX file.")
     parser.add_argument("--device", default="cuda", help="Device for export (default: cuda).")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
@@ -42,6 +44,7 @@ class ExportWrapper(torch.nn.Module):
     def forward(self, x):
         p, _v, vq, mlh, mlh_q = self.model(x, return_all=True)
         return p, torch.softmax(vq, dim=-1), mlh, mlh_q
+
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)

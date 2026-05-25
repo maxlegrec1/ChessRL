@@ -1,9 +1,8 @@
 from .engine_watch import EngineWatcher
-from .metrics import MetricsTracker, MetricsSnapshot
+from .metrics import MetricsSnapshot, MetricsTracker
 
 __all__ = [
     "EngineWatcher",
     "MetricsTracker",
     "MetricsSnapshot",
 ]
-

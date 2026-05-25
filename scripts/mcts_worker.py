@@ -9,6 +9,7 @@ Protocol (line-delimited JSON):
   reply   : {"actions":   ["e7e5", ...]}
 Send empty line to flush; "QUIT" to exit.
 """
+
 import argparse
 import json
 import sys
@@ -22,13 +23,18 @@ args = ap.parse_args()
 
 import _inference_cpp
 
-sys.stderr.write(f"[worker] ready  engine={args.engine}  sims={args.sims}  "
-                 f"vlw={'native' if args.vlw == 0 else args.vlw}\n"); sys.stderr.flush()
+sys.stderr.write(
+    f"[worker] ready  engine={args.engine}  sims={args.sims}  "
+    f"vlw={'native' if args.vlw == 0 else args.vlw}\n"
+)
+sys.stderr.flush()
 
 for line in sys.stdin:
     line = line.strip()
-    if not line: continue
-    if line == "QUIT": break
+    if not line:
+        continue
+    if line == "QUIT":
+        break
     req = json.loads(line)
     histories = req["histories"]
     kw = dict(

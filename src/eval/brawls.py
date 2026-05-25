@@ -1,13 +1,13 @@
 import argparse
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Any
 
-import torch
-import chess  # python-chess, for PGN
 import bulletchess
-from chess import pgn
+import chess  # python-chess, for PGN
+import torch
 from bulletchess import CHECKMATE, DRAW
+from chess import pgn
 
 
 def _is_game_over(board: bulletchess.Board) -> bool:
@@ -17,7 +17,7 @@ def _is_game_over(board: bulletchess.Board) -> bool:
 def _safe_get_move(
     model,
     board: bulletchess.Board,
-    move_history: List[str],
+    move_history: list[str],
     temp: float,
     device: str,
 ):
@@ -44,10 +44,10 @@ def play_game(
     temp_white: float = 0.1,
     temp_black: float = 0.1,
     game_num: int = 1,
-    opening: Optional[Dict[str, Any]] = None,
+    opening: dict[str, Any] | None = None,
 ):
     board = bulletchess.Board()
-    move_history: List[str] = []
+    move_history: list[str] = []
 
     # Apply opening if provided
     if opening is not None:
@@ -98,7 +98,7 @@ def play_game(
         try:
             move = bulletchess.Move.from_uci(move_uci)
             if move not in board.legal_moves():
-                move = bulletchess.Move.from_uci(move_uci+"n")
+                move = bulletchess.Move.from_uci(move_uci + "n")
                 print(f"Converted {move_uci} to {move.uci()} for knight promotion")
         except ValueError as e:
             # Malformed UCI -> forfeit
@@ -136,7 +136,7 @@ def main_model_vs_model(
     temp1: float = 0.1,
     temp2: float = 0.1,
     use_openings: bool = True,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ):
     # Openings generator (HF Lichess/chess-openings)
     openings_gen = None
@@ -150,16 +150,14 @@ def main_model_vs_model(
 
     pgn_dir = "artifacts/pgns"
     os.makedirs(pgn_dir, exist_ok=True)
-    pgn_filename = os.path.join(
-        pgn_dir, datetime.now().strftime("brawls_%Y%m%d_%H%M%S.pgn")
-    )
+    pgn_filename = os.path.join(pgn_dir, datetime.now().strftime("brawls_%Y%m%d_%H%M%S.pgn"))
     # Create/clear the PGN file for progressive writing
     open(pgn_filename, "w", encoding="utf-8").close()
 
     wins1 = 0
     wins2 = 0
     draws = 0
-    all_games: List[pgn.Game] = []
+    all_games: list[pgn.Game] = []
 
     for i in range(num_games):
         white = model1 if i % 2 == 0 else model2
@@ -214,7 +212,7 @@ def main_model_vs_model(
     )
 
 
-def _load_small_model(device: str, ckpt_path: Optional[str] = None):
+def _load_small_model(device: str, ckpt_path: str | None = None):
     from src.models.small.small_model import SmallModel
 
     model = SmallModel().to(device)
@@ -232,19 +230,19 @@ def _load_small_model(device: str, ckpt_path: Optional[str] = None):
     return model
 
 
-def _load_leela_model(device: str, ckpt_path: Optional[str]):
+def _load_leela_model(device: str, ckpt_path: str | None):
     from src.models.leela import BT4
 
     model = BT4().to(device)
     # Mark as history-based model so moves use move_history
-    setattr(model, "is_thinking_model", True)
+    model.is_thinking_model = True
     # Default checkpoint for leela model
     default_ckpt = "src/models/leela/model.pt"
     ckpt_to_load = ckpt_path if ckpt_path else default_ckpt
     if ckpt_to_load and os.path.exists(ckpt_to_load):
         state = torch.load(ckpt_to_load)
         if isinstance(state, dict) and "model_state_dict" in state:
-            model.load_state_dict(state["model_state_dict"]) 
+            model.load_state_dict(state["model_state_dict"])
         else:
             model.load_state_dict(state)
     return model
@@ -282,7 +280,7 @@ if __name__ == "__main__":
     global_temp = 0.1 if args.temp is None else args.temp
     temp1 = args.temp1 if args.temp1 is not None else global_temp
     temp2 = args.temp2 if args.temp2 is not None else global_temp
-    
+
     if args.model1 == "small":
         model1 = _load_small_model(device, args.ckpt1)
     else:
@@ -316,5 +314,3 @@ if __name__ == "__main__":
         use_openings=not args.no_openings,
         seed=args.seed,
     )
-
-

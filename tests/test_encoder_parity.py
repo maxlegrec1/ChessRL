@@ -7,17 +7,15 @@ tensor for every position the model ever sees. This was the load-bearing
 verification when planning the AlphaZero history extension — same risk
 class as the cache rank-flip bug we hit earlier.
 """
+
 from __future__ import annotations
 
+import _inference_cpp
 import bulletchess
 import chess as pchess
 import numpy as np
-import pytest
-
-import _inference_cpp
 
 from src.models.small.fen_encoder import INPUT_PLANES, fen_to_tensor
-
 
 STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 KIWIPETE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
@@ -25,9 +23,7 @@ KIWIPETE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1
 
 def _encode_cpp(fen: str, moves: list[str]) -> np.ndarray:
     """C++ encoder → (8, 8, 111) float32."""
-    flat = np.asarray(
-        _inference_cpp.encode_position_with_history(fen, moves), dtype=np.float32
-    )
+    flat = np.asarray(_inference_cpp.encode_position_with_history(fen, moves), dtype=np.float32)
     assert flat.size == 8 * 8 * INPUT_PLANES, flat.size
     return flat.reshape(8, 8, INPUT_PLANES)
 
@@ -55,7 +51,6 @@ def _encode_python(starting_fen: str, moves: list[str]) -> np.ndarray:
         replay.push_uci(mv)
         rep_flags_chronological.append(replay.is_repetition(2))
 
-    current_board_bc = bulletchess.Board.from_fen(boards_chronological[-1].fen())
     past_fens = [b.fen() for b in boards_chronological[:-1]][::-1]  # newest first
     past_boards_bc = [bulletchess.Board.from_fen(f) for f in past_fens][:7]
     past_reps = [bool(r) for r in rep_flags_chronological[:-1]][::-1][:7]

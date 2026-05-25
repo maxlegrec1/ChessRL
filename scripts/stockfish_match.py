@@ -2,6 +2,7 @@
 
 Saves a single PGN with all games + a summary line.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -11,7 +12,6 @@ import math
 import sys
 import time
 from pathlib import Path
-from typing import List
 
 import chess
 import chess.engine
@@ -23,8 +23,13 @@ sys.path.insert(0, str(ROOT))
 import _inference_cpp
 
 
-def get_model_move(history: List[str], engine_path: str, simulations: int, cpuct: float,
-                   virtual_loss_width: int = 1) -> str:
+def get_model_move(
+    history: list[str],
+    engine_path: str,
+    simulations: int,
+    cpuct: float,
+    virtual_loss_width: int = 1,
+) -> str:
     res = _inference_cpp.small_mcts_search_batch_with_history(
         histories=[history],
         fens=[""],
@@ -39,10 +44,19 @@ def get_model_move(history: List[str], engine_path: str, simulations: int, cpuct
     return res[0]["action"]
 
 
-def play_one(sf, engine_path, model_white, simulations, cpuct,
-             sf_movetime_ms, max_plies, game_idx, virtual_loss_width=1):
+def play_one(
+    sf,
+    engine_path,
+    model_white,
+    simulations,
+    cpuct,
+    sf_movetime_ms,
+    max_plies,
+    game_idx,
+    virtual_loss_width=1,
+):
     board = chess.Board()
-    history: List[str] = []
+    history: list[str] = []
     while not board.is_game_over(claim_draw=True) and len(history) < max_plies:
         is_model_turn = (board.turn == chess.WHITE) == model_white
         if is_model_turn:
@@ -73,8 +87,12 @@ def main():
     ap.add_argument("--sf-elo", type=int, default=1320)
     ap.add_argument("--sf-movetime-ms", type=int, default=100)
     ap.add_argument("--max-plies", type=int, default=400)
-    ap.add_argument("--virtual-loss-width", type=int, default=1,
-                    help="MCTS virtual-loss batched-descent width. Use 1 to disable.")
+    ap.add_argument(
+        "--virtual-loss-width",
+        type=int,
+        default=1,
+        help="MCTS virtual-loss batched-descent width. Use 1 to disable.",
+    )
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -100,11 +118,17 @@ def main():
 
     try:
         for i in range(args.num_games):
-            model_white = (i % 2 == 0)
+            model_white = i % 2 == 0
             t0 = time.time()
             board, history, result = play_one(
-                sf, args.engine, model_white, args.simulations, args.cpuct,
-                args.sf_movetime_ms, args.max_plies, i + 1,
+                sf,
+                args.engine,
+                model_white,
+                args.simulations,
+                args.cpuct,
+                args.sf_movetime_ms,
+                args.max_plies,
+                i + 1,
                 virtual_loss_width=args.virtual_loss_width,
             )
             dt_ = time.time() - t0
@@ -116,17 +140,24 @@ def main():
             else:
                 model_pts = 0.5
             score += model_pts
-            if model_pts == 1.0: wins += 1
-            elif model_pts == 0.5: draws += 1
-            else: losses += 1
+            if model_pts == 1.0:
+                wins += 1
+            elif model_pts == 0.5:
+                draws += 1
+            else:
+                losses += 1
 
             game = chess.pgn.Game()
             game.headers["Event"] = "Model vs Stockfish"
             game.headers["Site"] = "local"
             game.headers["Date"] = dt.date.today().strftime("%Y.%m.%d")
             game.headers["Round"] = str(i + 1)
-            game.headers["White"] = Path(args.engine).stem if model_white else f"Stockfish-{args.sf_elo}"
-            game.headers["Black"] = f"Stockfish-{args.sf_elo}" if model_white else Path(args.engine).stem
+            game.headers["White"] = (
+                Path(args.engine).stem if model_white else f"Stockfish-{args.sf_elo}"
+            )
+            game.headers["Black"] = (
+                f"Stockfish-{args.sf_elo}" if model_white else Path(args.engine).stem
+            )
             game.headers["Result"] = result
             node = game
             tmp = chess.Board()
@@ -137,10 +168,10 @@ def main():
             games_pgn.write(str(game) + "\n\n")
 
             print(
-                f"  [{i+1:>2}/{args.num_games}] {result}  "
+                f"  [{i + 1:>2}/{args.num_games}] {result}  "
                 f"model={'W' if model_white else 'B'}  pts={model_pts}  "
                 f"plies={len(history)}  time={dt_:.1f}s  "
-                f"running: {wins}W/{draws}D/{losses}L  ({100*score/(i+1):.1f}%)",
+                f"running: {wins}W/{draws}D/{losses}L  ({100 * score / (i + 1):.1f}%)",
                 flush=True,
             )
     finally:
@@ -152,11 +183,15 @@ def main():
     args.out.write_text(games_pgn.getvalue())
 
     print()
-    print(f"=== Final ===")
-    print(f"Model vs Stockfish-{args.sf_elo}: {wins}W / {draws}D / {losses}L  ->  {score}/{n}  ({100*win_rate:.1f}%)")
+    print("=== Final ===")
+    print(
+        f"Model vs Stockfish-{args.sf_elo}: {wins}W / {draws}D / {losses}L  ->  {score}/{n}  ({100 * win_rate:.1f}%)"
+    )
     if 0.0 < win_rate < 1.0:
         elo_diff = -400 * math.log10(1 / win_rate - 1)
-        print(f"Estimated model Elo ~ {args.sf_elo} + ({elo_diff:+.0f})  =  {args.sf_elo + elo_diff:.0f}")
+        print(
+            f"Estimated model Elo ~ {args.sf_elo} + ({elo_diff:+.0f})  =  {args.sf_elo + elo_diff:.0f}"
+        )
     print(f"Total time: {elapsed:.0f}s")
     print(f"PGN: {args.out}")
 

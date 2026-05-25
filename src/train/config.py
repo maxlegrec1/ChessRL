@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
@@ -10,13 +10,13 @@ import yaml
 @dataclass
 class WandbConfig:
     project: str = "self_play"
-    entity: Optional[str] = None
-    run_name: Optional[str] = None
+    entity: str | None = None
+    run_name: str | None = None
     enabled: bool = True
-    dir: Optional[Path] = None
+    dir: Path | None = None
     # If set, attach to an existing wandb run (use the W&B run id, e.g. "lcctm9xo"),
     # appending metrics to its history rather than starting a fresh run.
-    resume_id: Optional[str] = None
+    resume_id: str | None = None
 
 
 @dataclass
@@ -79,6 +79,7 @@ class SelfPlayConfig:
 class LossWeightsConfig:
     """Per-head weights in the trainer's total loss. Defaults preserve the
     original hardcoded recipe (0.1 * policy + value + value_q + 0.05 * mlh*)."""
+
     policy: float = 0.1
     value: float = 1.0
     value_q: float = 1.0
@@ -101,16 +102,16 @@ class TrainingConfig:
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
     amp_dtype: str = "float16"
-    resume_path: Optional[Path] = None
-    run_name: Optional[str] = None
+    resume_path: Path | None = None
+    run_name: str | None = None
     teacher_decay: float = 0.8
     teacher_weight: float = 0.2
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _merge_dataclass(instance, updates: Dict[str, Any]):
+def _merge_dataclass(instance, updates: dict[str, Any]):
     for key, value in updates.items():
         if not hasattr(instance, key):
             continue
@@ -142,4 +143,3 @@ def load_config(path: Path | str) -> TrainingConfig:
     if cfg.resume_path:
         cfg.resume_path = Path(cfg.resume_path)
     return cfg
-

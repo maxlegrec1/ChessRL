@@ -16,6 +16,7 @@ Each child's stdout/stderr is appended to <run_dir>/{selfplay,training}.log.
 SIGINT/SIGTERM is forwarded to both children; if either exits the launcher
 terminates the other and exits with a non-zero status.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,10 +28,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = ROOT / "artifacts" / "runs"
@@ -40,23 +39,36 @@ SUBDIRS = ("buffer", "engines", "checkpoints", "pgns", "wandb")
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", type=Path, default=DEFAULT_BASE_CONFIG,
-                   help="Base YAML config (paths inside it are overridden per-run).")
-    p.add_argument("--name", type=str, default=None,
-                   help="Optional human-readable suffix for the run id.")
-    p.add_argument("--resume", type=Path, default=None,
-                   help="Path to an existing run directory to resume.")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_BASE_CONFIG,
+        help="Base YAML config (paths inside it are overridden per-run).",
+    )
+    p.add_argument(
+        "--name", type=str, default=None, help="Optional human-readable suffix for the run id."
+    )
+    p.add_argument(
+        "--resume", type=Path, default=None, help="Path to an existing run directory to resume."
+    )
     p.add_argument("--no-train", action="store_true", help="Run self-play only.")
     p.add_argument("--no-selfplay", action="store_true", help="Run trainer only.")
-    p.add_argument("--no-foreground", action="store_true",
-                   help="Even when only one side runs, redirect its output to a logfile "
-                        "instead of attaching to the terminal.")
-    p.add_argument("--shutdown-grace", type=float, default=15.0,
-                   help="Seconds to wait for children to exit before SIGKILL.")
+    p.add_argument(
+        "--no-foreground",
+        action="store_true",
+        help="Even when only one side runs, redirect its output to a logfile "
+        "instead of attaching to the terminal.",
+    )
+    p.add_argument(
+        "--shutdown-grace",
+        type=float,
+        default=15.0,
+        help="Seconds to wait for children to exit before SIGKILL.",
+    )
     return p.parse_args()
 
 
-def _make_run_dir(name: Optional[str]) -> Path:
+def _make_run_dir(name: str | None) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(2)
     parts = [ts, suffix]
@@ -69,7 +81,7 @@ def _make_run_dir(name: Optional[str]) -> Path:
     return run_dir
 
 
-def _latest_step_checkpoint(run_dir: Path) -> Optional[Path]:
+def _latest_step_checkpoint(run_dir: Path) -> Path | None:
     ckpts = sorted((run_dir / "checkpoints").glob("step_*.pt"))
     return ckpts[-1] if ckpts else None
 
@@ -78,6 +90,7 @@ def _build_initial_engine(run_dir: Path) -> Path:
     """Save a random-init SmallModel checkpoint, build the TRT engine via
     scripts/build_trt.sh, and seed the run's .iteration file with its path."""
     import torch  # local import; pulls torch only when launching a fresh run.
+
     from src.models.small.small_model import SmallModel
 
     init_pt = run_dir / "checkpoints" / "model_dynamic_initial.pt"
@@ -90,9 +103,12 @@ def _build_initial_engine(run_dir: Path) -> Path:
     print(f"[launcher] building initial TRT engine ({init_pt} -> {engine_dir})", flush=True)
     subprocess.run(
         [
-            "bash", str(ROOT / "scripts" / "build_trt.sh"),
-            str(init_pt), "0",
-            str(engine_dir), str(iter_file),
+            "bash",
+            str(ROOT / "scripts" / "build_trt.sh"),
+            str(init_pt),
+            "0",
+            str(engine_dir),
+            str(iter_file),
         ],
         cwd=ROOT,
         check=True,
@@ -103,8 +119,7 @@ def _build_initial_engine(run_dir: Path) -> Path:
     return initial_trt
 
 
-def _write_run_config(base_config: Path, run_dir: Path,
-                       resume_from: Optional[Path]) -> Path:
+def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None) -> Path:
     """Load the base YAML, override every path field to point inside `run_dir`,
     write the result to <run_dir>/config.yaml, and return its path."""
     cfg = yaml.safe_load(base_config.read_text()) or {}
@@ -138,10 +153,13 @@ def _open_log(path: Path):
     return fh
 
 
-def _spawn(cmd: List[str], log_path: Path) -> subprocess.Popen:
+def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
     log_fh = _open_log(log_path)
     return subprocess.Popen(
-        cmd, cwd=ROOT, stdout=log_fh, stderr=subprocess.STDOUT,
+        cmd,
+        cwd=ROOT,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
 
@@ -187,7 +205,7 @@ def main() -> int:
     selfplay_log = run_dir / "selfplay.log"
     trainer_log = run_dir / "training.log"
 
-    plan: List[Tuple[str, List[str], Path]] = []
+    plan: list[tuple[str, list[str], Path]] = []
     if not args.no_selfplay:
         cmd_sp = [sys.executable, "-m", "src.self_play", "--config", str(cfg_path)]
         plan.append(("selfplay", cmd_sp, selfplay_log))
@@ -207,7 +225,7 @@ def main() -> int:
         # unreachable
         return 0
 
-    children: List[Tuple[str, subprocess.Popen, Path]] = []
+    children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
         children.append((name, _spawn(cmd, log), log))
 

@@ -24,7 +24,6 @@ import struct
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import chess
 import numpy as np
@@ -32,8 +31,7 @@ import torch
 
 from src.models.small.fen_encoder import fen_to_tensor
 from src.models.small.small_model import SmallModel
-from src.models.small.vocab import policy_index, policy_to_idx
-
+from src.models.small.vocab import policy_to_idx
 
 # (theme, fen, expected_best_uci_or_None)
 # - mate_*  themes: expected_best_uci is the unique mate move.
@@ -41,7 +39,7 @@ from src.models.small.vocab import policy_index, policy_to_idx
 #                   we only check the value head.
 # Hand-curated mate-in-1 positions. Each is verified by python-chess at load.
 # For broad coverage we also generate winning endgames programmatically below.
-MATE_IN_1: List[Tuple[str, str, str]] = [
+MATE_IN_1: list[tuple[str, str, str]] = [
     # ----- back-rank rook mates (king cornered by f7/g7/h7 pawns) ------
     ("mate_1_back_rank", "6k1/5ppp/8/8/8/8/8/R6K w - - 0 1", "a1a8"),
     ("mate_1_back_rank", "6k1/5ppp/8/8/8/8/8/1R5K w - - 0 1", "b1b8"),
@@ -81,19 +79,21 @@ MATE_IN_1: List[Tuple[str, str, str]] = [
 # Each side always has a king implicitly. We generate `count` valid positions
 # per side (white-to-move and black-to-move), randomized by the seed.
 ENDGAME_TEMPLATES = [
-    ("end_kqk",   [chess.QUEEN], [], 14),
-    ("end_krk",   [chess.ROOK],  [], 14),
-    ("end_kqrk",  [chess.QUEEN, chess.ROOK], [], 14),
-    ("end_kqqk",  [chess.QUEEN, chess.QUEEN], [], 10),
-    ("end_krrk",  [chess.ROOK, chess.ROOK],   [], 10),
+    ("end_kqk", [chess.QUEEN], [], 14),
+    ("end_krk", [chess.ROOK], [], 14),
+    ("end_kqrk", [chess.QUEEN, chess.ROOK], [], 14),
+    ("end_kqqk", [chess.QUEEN, chess.QUEEN], [], 10),
+    ("end_krrk", [chess.ROOK, chess.ROOK], [], 10),
     # K+B+N vs K (winning but trickier — useful failure-mode signal).
-    ("end_kbnk",  [chess.BISHOP, chess.KNIGHT], [], 8),
+    ("end_kbnk", [chess.BISHOP, chess.KNIGHT], [], 8),
 ]
 
 
-def _generate_endgame(theme: str, my_pieces, opp_pieces, count: int, seed: int) -> List[Tuple[str, str, Optional[str]]]:
+def _generate_endgame(
+    theme: str, my_pieces, opp_pieces, count: int, seed: int
+) -> list[tuple[str, str, str | None]]:
     rng = random.Random(seed)
-    out: List[Tuple[str, str, Optional[str]]] = []
+    out: list[tuple[str, str, str | None]] = []
     # Half white-to-move, half black-to-move.
     for stm_white in (True, False):
         n_target = count // 2 + (count % 2 if stm_white else 0)
@@ -103,14 +103,18 @@ def _generate_endgame(theme: str, my_pieces, opp_pieces, count: int, seed: int) 
             board = chess.Board.empty()
             squares = rng.sample(range(64), 2 + len(my_pieces) + len(opp_pieces))
             i = 0
-            board.set_piece_at(squares[i], chess.Piece(chess.KING, chess.WHITE)); i += 1
-            board.set_piece_at(squares[i], chess.Piece(chess.KING, chess.BLACK)); i += 1
+            board.set_piece_at(squares[i], chess.Piece(chess.KING, chess.WHITE))
+            i += 1
+            board.set_piece_at(squares[i], chess.Piece(chess.KING, chess.BLACK))
+            i += 1
             stm_color = chess.WHITE if stm_white else chess.BLACK
             opp_color = not stm_color
             for pt in my_pieces:
-                board.set_piece_at(squares[i], chess.Piece(pt, stm_color)); i += 1
+                board.set_piece_at(squares[i], chess.Piece(pt, stm_color))
+                i += 1
             for pt in opp_pieces:
-                board.set_piece_at(squares[i], chess.Piece(pt, opp_color)); i += 1
+                board.set_piece_at(squares[i], chess.Piece(pt, opp_color))
+                i += 1
             board.turn = stm_color
             if not board.is_valid():
                 continue
@@ -124,7 +128,7 @@ def _generate_endgame(theme: str, my_pieces, opp_pieces, count: int, seed: int) 
     return out[:count]
 
 
-def validate_position(theme: str, fen: str, best_uci: Optional[str]) -> Tuple[bool, str]:
+def validate_position(theme: str, fen: str, best_uci: str | None) -> tuple[bool, str]:
     """Returns (valid, reason). Skips entry on mismatch."""
     try:
         board = chess.Board(fen)
@@ -153,8 +157,7 @@ def validate_position(theme: str, fen: str, best_uci: Optional[str]) -> Tuple[bo
             return False, "side to move is in check (not the theme)"
         # Material sanity: side to move should have far more than the opponent.
         stm = board.turn
-        VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
-                  chess.ROOK: 5, chess.QUEEN: 9}
+        VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
         my_mat = sum(len(board.pieces(pt, stm)) * v for pt, v in VALUES.items())
         opp_mat = sum(len(board.pieces(pt, not stm)) * v for pt, v in VALUES.items())
         if my_mat - opp_mat < 4:
@@ -162,8 +165,8 @@ def validate_position(theme: str, fen: str, best_uci: Optional[str]) -> Tuple[bo
     return True, "ok"
 
 
-def load_dataset(seed: int = 42) -> List[Tuple[str, str, Optional[str]]]:
-    valid: List[Tuple[str, str, Optional[str]]] = []
+def load_dataset(seed: int = 42) -> list[tuple[str, str, str | None]]:
+    valid: list[tuple[str, str, str | None]] = []
     rejected = defaultdict(list)
     # Hand-curated mate-in-1.
     for theme, fen, best in MATE_IN_1:
@@ -191,7 +194,7 @@ def load_dataset(seed: int = 42) -> List[Tuple[str, str, Optional[str]]]:
     return valid
 
 
-def find_latest_checkpoint(run_dir: Optional[Path], use_teacher: bool = False) -> Path:
+def find_latest_checkpoint(run_dir: Path | None, use_teacher: bool = False) -> Path:
     """Locate the latest checkpoint to benchmark.
 
     By default, returns the latest STUDENT checkpoint (`step_*.pt`) — that's
@@ -233,8 +236,8 @@ def load_model(checkpoint_path: Path, device: str) -> SmallModel:
 
 
 def run_inference(
-    model: SmallModel, fens: List[str], device: str
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    model: SmallModel, fens: list[str], device: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns (policy_logits[B,1929], value_softmax[B,3], value_q_softmax[B,3])."""
     planes = np.stack([fen_to_tensor(f) for f in fens]).astype(np.float32)
     x = torch.from_numpy(planes).to(device)
@@ -307,14 +310,16 @@ def analyze_buffer(buffer_path: Path, sample_size: int = 200_000) -> None:
 
     print()
     print(f"=== buffer stats ({buffer_path.name}, n={n:,}, sampled {sample_size:,}) ===")
-    print(f"value_outcome (game ends, side-to-move):")
-    print(f"  W = {100*n_w_o/sample_size:5.1f}%   D = {100*n_d_o/sample_size:5.1f}%   L = {100*n_l_o/sample_size:5.1f}%")
-    print(f"value_mcts (dense MCTS-WDL):")
-    print(f"  mean = ({vm[:,0].mean():.3f}, {vm[:,1].mean():.3f}, {vm[:,2].mean():.3f})")
-    print(f"  frac_W_geq_0.8     = {100*frac_w_conf:5.1f}%")
-    print(f"  frac_L_geq_0.8     = {100*frac_l_conf:5.1f}%")
-    print(f"  frac_D_geq_0.8     = {100*frac_d_conf:5.1f}%")
-    print(f"  frac_near_uniform  = {100*frac_uniform:5.1f}%   (max class < 0.40)")
+    print("value_outcome (game ends, side-to-move):")
+    print(
+        f"  W = {100 * n_w_o / sample_size:5.1f}%   D = {100 * n_d_o / sample_size:5.1f}%   L = {100 * n_l_o / sample_size:5.1f}%"
+    )
+    print("value_mcts (dense MCTS-WDL):")
+    print(f"  mean = ({vm[:, 0].mean():.3f}, {vm[:, 1].mean():.3f}, {vm[:, 2].mean():.3f})")
+    print(f"  frac_W_geq_0.8     = {100 * frac_w_conf:5.1f}%")
+    print(f"  frac_L_geq_0.8     = {100 * frac_l_conf:5.1f}%")
+    print(f"  frac_D_geq_0.8     = {100 * frac_d_conf:5.1f}%")
+    print(f"  frac_near_uniform  = {100 * frac_uniform:5.1f}%   (max class < 0.40)")
 
 
 def main() -> int:
@@ -323,12 +328,16 @@ def main() -> int:
     p.add_argument("--run-dir", type=Path, help="run dir; uses its latest .pt")
     p.add_argument("--buffer", type=Path, help="explicit buffer.bin to analyze")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--no-buffer-stats", action="store_true",
-                   help="skip the buffer-distribution analysis")
-    p.add_argument("--teacher", action="store_true",
-                   help="benchmark the teacher_step_*.pt snapshot instead of "
-                        "the student. Default is the student because that's "
-                        "what self-play exports to TRT.")
+    p.add_argument(
+        "--no-buffer-stats", action="store_true", help="skip the buffer-distribution analysis"
+    )
+    p.add_argument(
+        "--teacher",
+        action="store_true",
+        help="benchmark the teacher_step_*.pt snapshot instead of "
+        "the student. Default is the student because that's "
+        "what self-play exports to TRT.",
+    )
     args = p.parse_args()
 
     ckpt_path = args.checkpoint or find_latest_checkpoint(args.run_dir, use_teacher=args.teacher)
@@ -346,8 +355,17 @@ def main() -> int:
     policy_logits, value_sm, value_q_sm = run_inference(model, fens, args.device)
 
     # Per-theme stats
-    stats = defaultdict(lambda: {"n": 0, "v_w": 0, "vq_w": 0, "policy_correct": 0,
-                                 "policy_n": 0, "v_score": 0.0, "vq_score": 0.0})
+    stats = defaultdict(
+        lambda: {
+            "n": 0,
+            "v_w": 0,
+            "vq_w": 0,
+            "policy_correct": 0,
+            "policy_n": 0,
+            "v_score": 0.0,
+            "vq_score": 0.0,
+        }
+    )
     for i, (theme, fen, best) in enumerate(positions):
         s = stats[theme]
         s["n"] += 1
@@ -366,10 +384,19 @@ def main() -> int:
 
     # Print report
     print()
-    print(f"{'theme':<22} {'N':>4}  {'V→W':>7}  {'Vq→W':>7}  {'V[W]':>6}  {'Vq[W]':>6}  {'mate':>9}")
+    print(
+        f"{'theme':<22} {'N':>4}  {'V→W':>7}  {'Vq→W':>7}  {'V[W]':>6}  {'Vq[W]':>6}  {'mate':>9}"
+    )
     print("-" * 84)
-    totals = {"n": 0, "v_w": 0, "vq_w": 0, "policy_correct": 0, "policy_n": 0,
-              "v_score": 0.0, "vq_score": 0.0}
+    totals = {
+        "n": 0,
+        "v_w": 0,
+        "vq_w": 0,
+        "policy_correct": 0,
+        "policy_n": 0,
+        "v_score": 0.0,
+        "vq_score": 0.0,
+    }
     for theme in sorted(stats):
         s = stats[theme]
         v_pct = 100 * s["v_w"] / s["n"]
@@ -380,18 +407,22 @@ def main() -> int:
             mate_pct = f"{100 * s['policy_correct'] / s['policy_n']:>5.1f}% ({s['policy_correct']}/{s['policy_n']})"
         else:
             mate_pct = "       –"
-        print(f"{theme:<22} {s['n']:>4}  "
-              f"{v_pct:>6.1f}%  {vq_pct:>6.1f}%  "
-              f"{v_score:>6.3f}  {vq_score:>6.3f}  {mate_pct}")
+        print(
+            f"{theme:<22} {s['n']:>4}  "
+            f"{v_pct:>6.1f}%  {vq_pct:>6.1f}%  "
+            f"{v_score:>6.3f}  {vq_score:>6.3f}  {mate_pct}"
+        )
         for k in totals:
             totals[k] += s[k]
     print("-" * 84)
     n = totals["n"] or 1
     pn = totals["policy_n"] or 1
-    print(f"{'overall':<22} {totals['n']:>4}  "
-          f"{100*totals['v_w']/n:>6.1f}%  {100*totals['vq_w']/n:>6.1f}%  "
-          f"{totals['v_score']/n:>6.3f}  {totals['vq_score']/n:>6.3f}  "
-          f"{100*totals['policy_correct']/pn:>5.1f}% ({totals['policy_correct']}/{totals['policy_n']})")
+    print(
+        f"{'overall':<22} {totals['n']:>4}  "
+        f"{100 * totals['v_w'] / n:>6.1f}%  {100 * totals['vq_w'] / n:>6.1f}%  "
+        f"{totals['v_score'] / n:>6.3f}  {totals['vq_score'] / n:>6.3f}  "
+        f"{100 * totals['policy_correct'] / pn:>5.1f}% ({totals['policy_correct']}/{totals['policy_n']})"
+    )
     print()
     print("legend: V→W = % positions where value-head argmax is Win;")
     print("        V[W] = mean P(Win) from the value head.")
@@ -400,7 +431,7 @@ def main() -> int:
 
     # Buffer stats — auto-detect from the checkpoint's run dir, or use --buffer.
     if not args.no_buffer_stats:
-        buffer_path: Optional[Path] = args.buffer
+        buffer_path: Path | None = args.buffer
         if buffer_path is None:
             # ckpt_path is artifacts/runs/<id>/checkpoints/foo.pt → ../buffer/buffer.bin
             run_dir_guess = ckpt_path.parent.parent
@@ -410,7 +441,9 @@ def main() -> int:
         if buffer_path is not None:
             analyze_buffer(buffer_path)
         else:
-            print("\n[buffer-stats] no buffer.bin found near the checkpoint; pass --buffer to override")
+            print(
+                "\n[buffer-stats] no buffer.bin found near the checkpoint; pass --buffer to override"
+            )
     return 0
 
 

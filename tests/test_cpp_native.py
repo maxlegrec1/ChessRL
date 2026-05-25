@@ -3,6 +3,7 @@
 Builds cpp/build/tests/cpp_tests via scripts/build_cpp_tests.sh if missing or
 stale relative to any C++ source under cpp/ (excluding chess-library).
 """
+
 from __future__ import annotations
 
 import shutil

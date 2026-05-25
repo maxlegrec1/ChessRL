@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-ROOT = Path("/mnt/2tb_2/ChessRL")
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.models.small.fen_encoder import fen_to_tensor
@@ -34,7 +34,7 @@ def latest_checkpoint(run_dir: Path) -> Path:
 
 
 def main():
-    run_dir = ROOT / "artifacts/runs/20260504_014403_e717"
+    run_dir = ROOT / "artifacts/runs/20260506_213939_3202"
     buf_path = run_dir / "buffer/buffer.bin"
 
     raw = buf_path.read_bytes()

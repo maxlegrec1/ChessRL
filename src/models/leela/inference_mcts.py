@@ -1,4 +1,4 @@
-from typing import Sequence
+from collections.abc import Sequence
 
 from src.mcts import LeelaMCTS
 
@@ -39,9 +39,7 @@ class LeelaMCTSInference:
 
 
 if __name__ == "__main__":
-    inference = LeelaMCTSInference(
-        engine_path="leela_minibatch.trt", cpuct=1.0, simulations=100
-    )
+    inference = LeelaMCTSInference(engine_path="leela_minibatch.trt", cpuct=1.0, simulations=100)
     fen = ""
     history = ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "g8f6", "e1g1"]
     action = inference.get_move_from_fen_no_thinking(fen, T=1.0, history=history)

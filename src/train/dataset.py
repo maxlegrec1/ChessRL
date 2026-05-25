@@ -1,23 +1,20 @@
 from __future__ import annotations
 
+import random
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
+import chess
 import numpy as np
 import pyarrow.parquet as pq
 
 from src.models.small.fen_encoder import (
     INPUT_PLANES,
-    fen_to_tensor,
     encode_record_planes,
 )
 from src.models.small.vocab import policy_index, policy_to_idx
-
-import random
-import chess
-import struct
 
 # Fallback index when a move is not present in the vocabulary.
 NULL_POLICY_INDEX = len(policy_index) - 1
@@ -56,13 +53,13 @@ def _policy_str_to_idx(move: str) -> int:
 
 @dataclass
 class SelfPlayBatch:
-    planes: np.ndarray            # [B, 8, 8, INPUT_PLANES]
-    policy_indices: np.ndarray    # [B]
-    value_outcomes: np.ndarray    # [B, 3] sparse one-hot (game outcome from side to move)
-    value_mcts: np.ndarray        # [B, 3] dense WDL backed up from MCTS root
-    plies_remaining: np.ndarray   # [B] float32 plies until game end; -1 = no target
-    backed_plies: np.ndarray      # [B] float32 MCTS-backed plies-remaining at root; -1 = no target
-    fens: List[str]
+    planes: np.ndarray  # [B, 8, 8, INPUT_PLANES]
+    policy_indices: np.ndarray  # [B]
+    value_outcomes: np.ndarray  # [B, 3] sparse one-hot (game outcome from side to move)
+    value_mcts: np.ndarray  # [B, 3] dense WDL backed up from MCTS root
+    plies_remaining: np.ndarray  # [B] float32 plies until game end; -1 = no target
+    backed_plies: np.ndarray  # [B] float32 MCTS-backed plies-remaining at root; -1 = no target
+    fens: list[str]
 
 
 class SelfPlayDataset:
@@ -71,12 +68,12 @@ class SelfPlayDataset:
     def __init__(self, path: Path, *, reload_seconds: float = 60.0) -> None:
         self.path = path
         self.reload_seconds = reload_seconds
-        self._fens: List[str] = []
-        self._value_outcomes: List[tuple[float, float, float]] = []
-        self._value_mcts: List[tuple[float, float, float]] = []
-        self._plies_remaining: List[float] = []
-        self._backed_plies: List[float] = []
-        self._policies: List[str] = []
+        self._fens: list[str] = []
+        self._value_outcomes: list[tuple[float, float, float]] = []
+        self._value_mcts: list[tuple[float, float, float]] = []
+        self._plies_remaining: list[float] = []
+        self._backed_plies: list[float] = []
+        self._policies: list[str] = []
         # AlphaZero-style 8-board history fields, populated from binary records.
         # Each entry is (7, 12) uint64 piece bitboards (newest first) and (7,)
         # uint8 repetition flags. _current_reps is a (N,) uint8 array.
@@ -167,12 +164,12 @@ class SelfPlayDataset:
         PLIES_REMAINING_OFFSET = 140
         BACKED_PLIES_OFFSET = 144
 
-        fens: List[str] = []
-        policies: List[str] = []
-        value_outcomes: List[tuple[float, float, float]] = []
-        value_mcts: List[tuple[float, float, float]] = []
-        plies_remaining: List[float] = []
-        backed_plies: List[float] = []
+        fens: list[str] = []
+        policies: list[str] = []
+        value_outcomes: list[tuple[float, float, float]] = []
+        value_mcts: list[tuple[float, float, float]] = []
+        plies_remaining: list[float] = []
+        backed_plies: list[float] = []
         past_bitboards: list[np.ndarray] = []
         past_repetitions: list[np.ndarray] = []
         current_repetitions: list[int] = []
@@ -197,16 +194,21 @@ class SelfPlayDataset:
                 (b_plies,) = struct.unpack_from("f", content, offset + BACKED_PLIES_OFFSET)
 
                 # History payload.
-                rep_bytes = content[offset + PAST_REPETITION_OFFSET :
-                                    offset + PAST_REPETITION_OFFSET + _PAST_SLOTS]
+                rep_bytes = content[
+                    offset + PAST_REPETITION_OFFSET : offset + PAST_REPETITION_OFFSET + _PAST_SLOTS
+                ]
                 rep_arr = np.frombuffer(rep_bytes, dtype=np.uint8).copy()
                 cur_rep = int(content[offset + CURRENT_REPETITION_OFFSET])
-                bb_bytes = content[offset + PAST_BITBOARDS_OFFSET :
-                                   offset + PAST_BITBOARDS_OFFSET
-                                   + _PAST_SLOTS * _BITBOARD_SLOT_BYTES]
-                bb_arr = np.frombuffer(bb_bytes, dtype=np.uint64).reshape(
-                    _PAST_SLOTS, _BITBOARDS_PER_SLOT
-                ).copy()
+                bb_bytes = content[
+                    offset + PAST_BITBOARDS_OFFSET : offset
+                    + PAST_BITBOARDS_OFFSET
+                    + _PAST_SLOTS * _BITBOARD_SLOT_BYTES
+                ]
+                bb_arr = (
+                    np.frombuffer(bb_bytes, dtype=np.uint64)
+                    .reshape(_PAST_SLOTS, _BITBOARDS_PER_SLOT)
+                    .copy()
+                )
 
                 offset += RECORD_SIZE
 
@@ -224,9 +226,17 @@ class SelfPlayDataset:
             print(f"Error reading binary file: {e}")
             return [], [], [], [], [], [], [], [], []
 
-        return (fens, policies, value_outcomes, value_mcts,
-                plies_remaining, backed_plies,
-                past_bitboards, past_repetitions, current_repetitions)
+        return (
+            fens,
+            policies,
+            value_outcomes,
+            value_mcts,
+            plies_remaining,
+            backed_plies,
+            past_bitboards,
+            past_repetitions,
+            current_repetitions,
+        )
 
     # ------------------------------------------------------------------ #
     @property
@@ -244,7 +254,7 @@ class SelfPlayDataset:
         plies_remaining = np.full((batch_size,), -1.0, dtype=np.float32)
         backed_plies = np.full((batch_size,), -1.0, dtype=np.float32)
         policy_indices = np.full((batch_size,), NULL_POLICY_INDEX, dtype=np.int64)
-        fens: List[str] = []
+        fens: list[str] = []
 
         for row, idx in enumerate(indices):
             fen = self._fens[idx]
@@ -253,14 +263,17 @@ class SelfPlayDataset:
             plies = self._plies_remaining[idx] if idx < len(self._plies_remaining) else -1.0
             b_plies = self._backed_plies[idx] if idx < len(self._backed_plies) else -1.0
             policy_str = self._policies[idx]
-            pb = (self._past_bitboards[idx]
-                  if idx < len(self._past_bitboards)
-                  else np.zeros((_PAST_SLOTS, _BITBOARDS_PER_SLOT), dtype=np.uint64))
-            pr = (self._past_repetitions[idx]
-                  if idx < len(self._past_repetitions)
-                  else np.zeros(_PAST_SLOTS, dtype=np.uint8))
-            cur_rep = (self._current_repetitions[idx]
-                       if idx < len(self._current_repetitions) else 0)
+            pb = (
+                self._past_bitboards[idx]
+                if idx < len(self._past_bitboards)
+                else np.zeros((_PAST_SLOTS, _BITBOARDS_PER_SLOT), dtype=np.uint64)
+            )
+            pr = (
+                self._past_repetitions[idx]
+                if idx < len(self._past_repetitions)
+                else np.zeros(_PAST_SLOTS, dtype=np.uint8)
+            )
+            cur_rep = self._current_repetitions[idx] if idx < len(self._current_repetitions) else 0
 
             do_mirror = random.random() < 0.5
             if do_mirror:
@@ -305,10 +318,12 @@ def _ensure_tuple(row) -> tuple[float, float, float]:
         return (0.0, 0.0, 0.0)
     return (scalar, 0.0, 0.0)
 
+
 def mirror_fen(fen: str) -> str:
     board = chess.Board(fen)
     mirrored = board.mirror()  # mirror() returns a NEW board, does not modify in place
     return mirrored.fen()
+
 
 def mirror_policy_str(policy_str: str) -> str:
     # python-chess board.mirror() is a VERTICAL flip only (ranks 1<->8, files
@@ -318,7 +333,7 @@ def mirror_policy_str(policy_str: str) -> str:
     # making ~63% of mirrored labels illegal for their mirrored FEN — and since
     # sample_batch mirrors 50% of samples, ~32% of ALL policy labels were
     # illegal-for-position garbage, capping policy legal-prob at ~0.58.
-    return f"{policy_str[0]}{9-int(policy_str[1])}{policy_str[2]}{9-int(policy_str[3])}{policy_str[4:]}"
+    return f"{policy_str[0]}{9 - int(policy_str[1])}{policy_str[2]}{9 - int(policy_str[3])}{policy_str[4:]}"
 
 
 def _byte_reverse_u64(arr: np.ndarray) -> np.ndarray:

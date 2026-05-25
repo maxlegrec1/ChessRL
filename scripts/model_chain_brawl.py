@@ -2,7 +2,9 @@
 games each (8-random-ply openings, temp_at_root=0, no dirichlet, width=1).
 Cross-pair parallelism via multiprocessing.Pool (spawn, CUDA-safe).
 """
+
 from __future__ import annotations
+
 import argparse
 import csv
 import math
@@ -28,6 +30,7 @@ VLW = 1
 def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
     """50 batched games of engine_a vs engine_b. Returns (w, d, l) from A's POV."""
     import _inference_cpp  # subprocess-local import
+
     rng = random.Random(seed)
     boards = [chess.Board() for _ in range(NUM_GAMES)]
     histories = [[] for _ in range(NUM_GAMES)]
@@ -67,7 +70,7 @@ def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
                 _settle(i)
                 continue
             stm_white = b.turn == chess.WHITE
-            is_a_turn = (stm_white == a_is_white[i])
+            is_a_turn = stm_white == a_is_white[i]
             (active_a if is_a_turn else active_b).append(i)
 
         for engine_path, active in ((engine_a, active_a), (engine_b, active_b)):
@@ -89,12 +92,12 @@ def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
                 try:
                     mv = chess.Move.from_uci(uci)
                 except Exception:
-                    a_lost = (engine_path == engine_a)
+                    a_lost = engine_path == engine_a
                     a_score[i] = 0.0 if a_lost else 1.0
                     finished[i] = True
                     continue
                 if mv not in boards[i].legal_moves:
-                    a_lost = (engine_path == engine_a)
+                    a_lost = engine_path == engine_a
                     a_score[i] = 0.0 if a_lost else 1.0
                     finished[i] = True
                     continue
@@ -133,8 +136,7 @@ def _worker(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--run-dir",
-                   default="artifacts/runs/20260515_133813_99ec_history_fix_v1")
+    p.add_argument("--run-dir", default="artifacts/runs/20260515_133813_99ec_history_fix_v1")
     p.add_argument("--step-bin", type=int, default=5000)
     p.add_argument("--max-step", type=int, default=None)
     p.add_argument("--min-step", type=int, default=None)
@@ -153,28 +155,45 @@ def main():
             s = int(e.stem.split("_")[1])
         except Exception:
             continue
-        if (s % args.step_bin == 0
+        if (
+            s % args.step_bin == 0
             and (args.max_step is None or s <= args.max_step)
-            and (args.min_step is None or s >= args.min_step)):
+            and (args.min_step is None or s >= args.min_step)
+        ):
             chain.append((s, e))
     if len(chain) < 2:
         print("need ≥2 chain checkpoints")
         return 1
 
-    pairs = [(str(chain[i][1]), str(chain[i+1][1]), i, i, len(chain)-1)
-             for i in range(len(chain) - 1)]
+    pairs = [
+        (str(chain[i][1]), str(chain[i + 1][1]), i, i, len(chain) - 1)
+        for i in range(len(chain) - 1)
+    ]
     print(f"chain: {len(chain)} engines from step {chain[0][0]:,} to {chain[-1][0]:,}")
     print(f"pairs: {len(pairs)}   games/pair: {NUM_GAMES}   workers: {args.workers}")
-    print(f"MCTS: sims={SIMULATIONS} cpuct={CPUCT} vlw={VLW} temp_root=0 "
-          f"no-dirichlet  opening_plies={OPENING_PLIES}")
+    print(
+        f"MCTS: sims={SIMULATIONS} cpuct={CPUCT} vlw={VLW} temp_root=0 "
+        f"no-dirichlet  opening_plies={OPENING_PLIES}"
+    )
     print()
 
     csv_path = out_dir / "results.csv"
     with csv_path.open("w", newline="") as fcsv:
         wr = csv.writer(fcsv)
-        wr.writerow(["from_step", "to_step", "from_engine", "to_engine",
-                     "from_w", "draws", "from_l", "from_score",
-                     "delta_elo", "seconds"])
+        wr.writerow(
+            [
+                "from_step",
+                "to_step",
+                "from_engine",
+                "to_engine",
+                "from_w",
+                "draws",
+                "from_l",
+                "from_score",
+                "delta_elo",
+                "seconds",
+            ]
+        )
 
     ctx = mp.get_context("spawn")
     t_chain = time.time()
@@ -189,16 +208,18 @@ def main():
             _, ea, eb, w, d, l, score, elo, dt, pair_idx, total = res
             from_step = int(Path(ea).stem.split("_")[1])
             to_step = int(Path(eb).stem.split("_")[1])
-            print(f"  [{done:>2}/{len(pairs)}] {from_step//1000:>3}k→{to_step//1000:>3}k  "
-                  f"score={score:5.1f}/{w+d+l}  (W{w}/D{d}/L{l})  "
-                  f"ΔElo={elo:+6.0f}  ({dt:.0f}s)", flush=True)
+            print(
+                f"  [{done:>2}/{len(pairs)}] {from_step // 1000:>3}k→{to_step // 1000:>3}k  "
+                f"score={score:5.1f}/{w + d + l}  (W{w}/D{d}/L{l})  "
+                f"ΔElo={elo:+6.0f}  ({dt:.0f}s)",
+                flush=True,
+            )
             with csv_path.open("a", newline="") as fcsv:
                 wr = csv.writer(fcsv)
-                wr.writerow([from_step, to_step, ea, eb, w, d, l, score,
-                             f"{elo:.1f}", f"{dt:.0f}"])
+                wr.writerow([from_step, to_step, ea, eb, w, d, l, score, f"{elo:.1f}", f"{dt:.0f}"])
 
     elapsed_total = time.time() - t_chain
-    print(f"\nchain complete in {elapsed_total/60:.1f} min")
+    print(f"\nchain complete in {elapsed_total / 60:.1f} min")
 
     # Read results, sort, compute cumulative Elo
     with csv_path.open() as fcsv:
@@ -214,25 +235,28 @@ def main():
 
     # Plot per-interval and cumulative
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-    labels = [f"{int(r['from_step'])//1000}k→{int(r['to_step'])//1000}k" for r in rows]
+    labels = [f"{int(r['from_step']) // 1000}k→{int(r['to_step']) // 1000}k" for r in rows]
     deltas = [float(r["delta_elo"]) for r in rows]
-    bars = axes[0].bar(labels, deltas,
-                       color=["seagreen" if d > 0 else "indianred" for d in deltas])
+    axes[0].bar(labels, deltas, color=["seagreen" if d > 0 else "indianred" for d in deltas])
     axes[0].set_ylabel("ΔElo per 5k-step interval")
-    axes[0].set_title(f"Per-interval Elo gain  ({NUM_GAMES} games/pair, MCTS-{SIMULATIONS}, 8 random opening plies)")
+    axes[0].set_title(
+        f"Per-interval Elo gain  ({NUM_GAMES} games/pair, MCTS-{SIMULATIONS}, 8 random opening plies)"
+    )
     axes[0].axhline(0, color="grey", lw=1)
-    axes[0].grid(alpha=.3)
+    axes[0].grid(alpha=0.3)
     plt.setp(axes[0].get_xticklabels(), rotation=45, ha="right", fontsize=8)
 
     axes[1].plot(cum_steps, cum_elos, marker="o", color="darkblue")
-    axes[1].fill_between(cum_steps, cum_elos, 0, alpha=.15, color="darkblue")
+    axes[1].fill_between(cum_steps, cum_elos, 0, alpha=0.15, color="darkblue")
     axes[1].set_xlabel("training step")
-    axes[1].set_ylabel(f"cumulative Elo (relative to {chain[0][0]//1000}k)")
+    axes[1].set_ylabel(f"cumulative Elo (relative to {chain[0][0] // 1000}k)")
     axes[1].set_title("Cumulative Elo trajectory")
-    axes[1].grid(alpha=.3)
+    axes[1].grid(alpha=0.3)
     axes[1].axhline(0, color="grey", lw=1)
     plt.tight_layout()
     png = out_dir / "elo_chain.png"

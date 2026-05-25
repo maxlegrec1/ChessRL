@@ -16,7 +16,7 @@ import chess
 import numpy as np
 import torch
 
-ROOT = Path("/mnt/2tb_2/ChessRL")
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.eval.learning_check import (
@@ -56,7 +56,7 @@ def evaluate_checkpoint(model, dataset, device):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", default="artifacts/runs/20260504_014403_e717")
+    ap.add_argument("--run-dir", default="artifacts/runs/20260506_213939_3202")
     ap.add_argument("--cache", default=None, help="JSON cache to skip recomputed steps")
     ap.add_argument("--out-prefix", default="trajectory")
     ap.add_argument("--every", type=int, default=1, help="evaluate every Nth checkpoint")

@@ -26,12 +26,10 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
-
-import chess
-from chess import pgn
 
 import _inference_cpp
+import chess
+from chess import pgn
 
 
 def _load_openings(seed: int):
@@ -45,7 +43,7 @@ def _load_openings(seed: int):
         return None
 
 
-def _opening_to_state(opening) -> Tuple[str, List[str]]:
+def _opening_to_state(opening) -> tuple[str, list[str]]:
     """Return (fen, history_ucis) for an opening dict from the HF generator.
 
     Histories track every ply played from STARTPOS so the C++ MCTS sees the
@@ -81,13 +79,17 @@ def _opening_to_state(opening) -> Tuple[str, List[str]]:
     return chess.STARTING_FEN, []
 
 
-def _result_for_white(board: chess.Board) -> Optional[str]:
+def _result_for_white(board: chess.Board) -> str | None:
     """Return 'W'/'D'/'L' for white's perspective, or None if game continues."""
     if board.is_checkmate():
         # The side to move was just checkmated → that side LOST.
         return "L" if board.turn == chess.WHITE else "W"
-    if board.is_stalemate() or board.is_insufficient_material() \
-       or board.is_fifty_moves() or board.is_repetition(3):
+    if (
+        board.is_stalemate()
+        or board.is_insufficient_material()
+        or board.is_fifty_moves()
+        or board.is_repetition(3)
+    ):
         return "D"
     if board.fullmove_number > 300:  # 600-ply cap as a safety
         return "D"
@@ -103,16 +105,16 @@ def play_brawl(
     temp: float,
     temp_root: float,
     seed: int,
-    pgn_path: Optional[Path] = None,
+    pgn_path: Path | None = None,
 ) -> dict:
     openings = _load_openings(seed)
 
     # Build games: alternate which engine is white.
     # Game i has engine_a as white when i is even.
-    boards: List[chess.Board] = []
-    histories: List[List[str]] = []
-    engine_for_white: List[str] = []
-    finished_results: List[Optional[str]] = []
+    boards: list[chess.Board] = []
+    histories: list[list[str]] = []
+    engine_for_white: list[str] = []
+    finished_results: list[str | None] = []
     for i in range(num_games):
         opening = next(openings) if openings is not None else None
         if opening is None:
@@ -136,8 +138,11 @@ def play_brawl(
             finished_results[i] = r
 
     print(f"[brawl] engines: A={Path(engine_a).name}  B={Path(engine_b).name}", flush=True)
-    print(f"[brawl] {num_games} games | sims={simulations} cpuct={cpuct} temp={temp} temp_root={temp_root}", flush=True)
-    print(f"[brawl] starting...", flush=True)
+    print(
+        f"[brawl] {num_games} games | sims={simulations} cpuct={cpuct} temp={temp} temp_root={temp_root}",
+        flush=True,
+    )
+    print("[brawl] starting...", flush=True)
 
     start_time = time.time()
     ply = 0
@@ -188,7 +193,7 @@ def play_brawl(
                 for i in indices:
                     finished_results[i] = "D"
                 continue
-            for i, s in zip(indices, summaries):
+            for i, s in zip(indices, summaries, strict=True):
                 action = s.get("action", "") if hasattr(s, "get") else dict(s).get("action", "")
                 if not action:
                     finished_results[i] = "D"
@@ -211,7 +216,9 @@ def play_brawl(
         if ply % 5 == 0:
             n_done = sum(1 for r in finished_results if r is not None)
             elapsed = time.time() - start_time
-            print(f"[brawl] ply {ply}: {n_done}/{num_games} games done ({elapsed:.1f}s)", flush=True)
+            print(
+                f"[brawl] ply {ply}: {n_done}/{num_games} games done ({elapsed:.1f}s)", flush=True
+            )
 
     elapsed = time.time() - start_time
     # Translate per-game results to per-engine score.
@@ -221,19 +228,30 @@ def play_brawl(
         white_is_a = engine_for_white[i] == engine_a
         if r == "W":
             if white_is_a:
-                a_score += 1.0; a_w += 1; b_l += 1
+                a_score += 1.0
+                a_w += 1
+                b_l += 1
             else:
-                b_score += 1.0; b_w += 1; a_l += 1
+                b_score += 1.0
+                b_w += 1
+                a_l += 1
         elif r == "L":
             if white_is_a:
-                b_score += 1.0; b_w += 1; a_l += 1
+                b_score += 1.0
+                b_w += 1
+                a_l += 1
             else:
-                a_score += 1.0; a_w += 1; b_l += 1
+                a_score += 1.0
+                a_w += 1
+                b_l += 1
         else:
-            a_score += 0.5; b_score += 0.5; a_d += 1; b_d += 1
+            a_score += 0.5
+            b_score += 0.5
+            a_d += 1
+            b_d += 1
 
     # Write all games to a single PGN file for inspection.
-    pgn_written: Optional[Path] = None
+    pgn_written: Path | None = None
     if pgn_path is not None:
         pgn_path.parent.mkdir(parents=True, exist_ok=True)
         a_name = Path(engine_a).stem
@@ -250,9 +268,12 @@ def play_brawl(
                 game.headers["White"] = a_name if white_is_a else b_name
                 game.headers["Black"] = b_name if white_is_a else a_name
                 r = finished_results[i]
-                if r == "W":   game.headers["Result"] = "1-0"
-                elif r == "L": game.headers["Result"] = "0-1"
-                else:          game.headers["Result"] = "1/2-1/2"
+                if r == "W":
+                    game.headers["Result"] = "1-0"
+                elif r == "L":
+                    game.headers["Result"] = "0-1"
+                else:
+                    game.headers["Result"] = "1/2-1/2"
                 node = game
                 replay = chess.Board()
                 for u in hist:
@@ -288,7 +309,7 @@ def play_brawl(
     }
 
 
-def _autopick_engines(run_dir: Path, lookback: int) -> Tuple[Path, Path]:
+def _autopick_engines(run_dir: Path, lookback: int) -> tuple[Path, Path]:
     engines_dir = run_dir / "engines"
     if not engines_dir.is_dir():
         raise FileNotFoundError(f"no engines/ dir in {run_dir}")
@@ -296,9 +317,12 @@ def _autopick_engines(run_dir: Path, lookback: int) -> Tuple[Path, Path]:
     if len(candidates) < 2:
         raise RuntimeError(f"need >=2 step_*.trt engines; have {len(candidates)}")
     latest = candidates[-1]
-    latest_n = int(latest.name.split("_")[-1].rstrip(".trt"))
+    latest_n = int(latest.name.split("_")[-1].removesuffix(".trt"))
     target = max(0, latest_n - lookback)
-    older = min(candidates, key=lambda p: abs(int(p.name.split("_")[-1].rstrip(".trt")) - target))
+    older = min(
+        candidates,
+        key=lambda p: abs(int(p.name.split("_")[-1].removesuffix(".trt")) - target),
+    )
     return latest, older
 
 
@@ -307,33 +331,54 @@ def main() -> int:
     p.add_argument("--engine-a", type=Path, help="newer / first engine .trt")
     p.add_argument("--engine-b", type=Path, help="older / second engine .trt")
     p.add_argument("--run-dir", type=Path, help="run dir; auto-pick latest vs latest-lookback")
-    p.add_argument("--lookback", type=int, default=500,
-                   help="if --run-dir given, brawl latest vs latest minus this many steps")
+    p.add_argument(
+        "--lookback",
+        type=int,
+        default=500,
+        help="if --run-dir given, brawl latest vs latest minus this many steps",
+    )
     p.add_argument("--num-games", type=int, default=50)
     p.add_argument("--simulations", type=int, default=600)
     p.add_argument("--cpuct", type=float, default=0.65)
-    p.add_argument("--temperature", type=float, default=1.0,
-                   help="non-root temperature (rarely matters with no-dirichlet)")
-    p.add_argument("--temp-root", type=float, default=0.2,
-                   help="root temperature; lower = more deterministic move pick")
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="non-root temperature (rarely matters with no-dirichlet)",
+    )
+    p.add_argument(
+        "--temp-root",
+        type=float,
+        default=0.2,
+        help="root temperature; lower = more deterministic move pick",
+    )
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--pgn", type=Path, default=None,
-                   help="Write all games as PGN to this path. Default: "
-                        "artifacts/pgns/mcts_brawl_<timestamp>.pgn. "
-                        "Pass empty string to disable.")
+    p.add_argument(
+        "--pgn",
+        type=Path,
+        default=None,
+        help="Write all games as PGN to this path. Default: "
+        "artifacts/pgns/mcts_brawl_<timestamp>.pgn. "
+        "Pass empty string to disable.",
+    )
     args = p.parse_args()
 
     if args.engine_a and args.engine_b:
         engine_a, engine_b = args.engine_a, args.engine_b
     elif args.run_dir:
         engine_a, engine_b = _autopick_engines(args.run_dir, args.lookback)
-        print(f"[brawl] auto: A={engine_a.name} (latest)  B={engine_b.name} (latest - ~{args.lookback})", flush=True)
+        print(
+            f"[brawl] auto: A={engine_a.name} (latest)  B={engine_b.name} (latest - ~{args.lookback})",
+            flush=True,
+        )
     else:
         print("Provide --engine-a + --engine-b OR --run-dir", file=sys.stderr)
         return 2
 
     if not engine_a.is_file() or not engine_b.is_file():
-        print(f"engine missing: {engine_a if not engine_a.is_file() else engine_b}", file=sys.stderr)
+        print(
+            f"engine missing: {engine_a if not engine_a.is_file() else engine_b}", file=sys.stderr
+        )
         return 2
 
     if args.pgn is not None:
@@ -363,8 +408,8 @@ def main() -> int:
     print(f"=== {n} games in {result['elapsed_s']:.1f}s ({result['ply_count']} plies max) ===")
     print(f"A = {Path(result['engine_a']).name}")
     print(f"B = {Path(result['engine_b']).name}")
-    print(f"  A: W={a_w}  D={a_d}  L={a_l}   score={a_score}/{n} ({100*a_score/n:.1f}%)")
-    print(f"  B: W={b_w}  D={b_d}  L={b_l}   score={b_score}/{n} ({100*b_score/n:.1f}%)")
+    print(f"  A: W={a_w}  D={a_d}  L={a_l}   score={a_score}/{n} ({100 * a_score / n:.1f}%)")
+    print(f"  B: W={b_w}  D={b_d}  L={b_l}   score={b_score}/{n} ({100 * b_score / n:.1f}%)")
     print()
     print("split by color:")
     for k in sorted(result["results_per_color"]):

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Sequence, Tuple
 import importlib
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 _BINDING = None
 
-ValueVector = Tuple[float, float, float]
-LeelaPolicyResult = Tuple[List[str], List[ValueVector], List[ValueVector]]
+ValueVector = tuple[float, float, float]
+LeelaPolicyResult = tuple[list[str], list[ValueVector], list[ValueVector]]
 
 
 def _load_binding():
@@ -60,7 +60,7 @@ class Leelacpp:
         temperature: float | None = None,
         iterations: int | None = 1,
         return_timings: bool = False,
-    ) -> LeelaPolicyResult | Tuple[LeelaPolicyResult, InferenceStats]:
+    ) -> LeelaPolicyResult | tuple[LeelaPolicyResult, InferenceStats]:
         if not origin_fens or not move_lists:
             empty: LeelaPolicyResult = ([], [], [])
             if return_timings:
@@ -99,4 +99,3 @@ class Leelacpp:
 
 
 __all__ = ["Leelacpp", "InferenceStats"]
-

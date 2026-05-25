@@ -1,39 +1,34 @@
 from __future__ import annotations
 
-import sys
-import time
 import subprocess
+import time
 from collections import deque
 from pathlib import Path
-from typing import Dict
 
+import bulletchess
+import chess
+import numpy as np
 import torch
 import torch.nn.functional as F
 from rich.console import Console
 from torch import amp, optim
 
 import wandb
-import bulletchess
-import chess
-import numpy as np
-
 from src.models.small.small_model import SmallModel
 from src.models.small.vocab import policy_index, policy_to_idx
 
+from .config import TrainingConfig
+from .dataset import NULL_POLICY_INDEX, RECORD_SIZE, SelfPlayBatch, SelfPlayDataset
 
 # Vocab indices of the four "king→destination" castle UCIs. Used by the
 # per-batch buffer/castle_rate metric: castling is a rare action (~0.007% of
 # the buffer historically, vs ~0.8–1% in real chess) so the metric tracks
 # whether tuning (Dirichlet, cpuct, etc.) lifts it back toward canonical.
-_CASTLE_CAND_INDICES = np.array(sorted({
-    policy_to_idx[u] for u in ("e1g1", "e1c1", "e8g8", "e8c8")
-}), dtype=np.int64)
+_CASTLE_CAND_INDICES = np.array(
+    sorted({policy_to_idx[u] for u in ("e1g1", "e1c1", "e8g8", "e8c8")}), dtype=np.int64
+)
 
-from .config import TrainingConfig
-from .dataset import NULL_POLICY_INDEX, RECORD_SIZE, SelfPlayBatch, SelfPlayDataset
-
-
-AMP_DTYPES: Dict[str, torch.dtype] = {
+AMP_DTYPES: dict[str, torch.dtype] = {
     "float16": torch.float16,
     "fp16": torch.float16,
     "half": torch.float16,
@@ -62,7 +57,7 @@ class Trainer:
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2),
         )
-        self.scaler = amp.GradScaler(device = self.device)
+        self.scaler = amp.GradScaler(device=self.device)
 
         self.amp_dtype = AMP_DTYPES.get(config.amp_dtype.lower(), torch.float16)
         self.checkpoint_dir = config.checkpoint.dir
@@ -85,7 +80,7 @@ class Trainer:
         initial_teacher_path = self.checkpoint_dir / "initial_teacher.pt"
         if initial_teacher_path.exists():
             self.console.log(f"Loading initial teacher from {initial_teacher_path}")
-            ckpt = torch.load(initial_teacher_path, map_location=self.device,weights_only=False)
+            ckpt = torch.load(initial_teacher_path, map_location=self.device, weights_only=False)
             # strict=False so a teacher saved before the MLH head was added
             # still loads — the new params stay at their fresh init.
             self.teacher_model.load_state_dict(ckpt["model"], strict=False)
@@ -108,32 +103,30 @@ class Trainer:
         """Create a binary mask (1 for legal moves, 0 for illegal) for a given FEN."""
         board = bulletchess.Board.from_fen(fen)
         mask = torch.zeros(1929, dtype=torch.float32, device=device)
-        
+
         for move in board.legal_moves():
             uci = move.uci()
             # Handle knight promotions: strip 'n' suffix
-            if uci.endswith('n'):
+            if uci.endswith("n"):
                 uci = uci[:-1]
-            
+
             if uci in policy_to_idx:
                 idx = policy_to_idx[uci]
                 mask[idx] = 1.0
-        
+
         return mask
 
     # ------------------------------------------------------------------ #
-    def _compute_legal_move_probability(
-        self, policy_probs: torch.Tensor, fens: list[str]
-    ) -> float:
+    def _compute_legal_move_probability(self, policy_probs: torch.Tensor, fens: list[str]) -> float:
         """
         Compute the probability that the network plays a legal move.
-        
+
         For each position:
         1. Compute softmax of logits (already done, passed as policy_probs)
         2. Create legal moves mask
         3. Multiply softmax with mask
         4. Sum to get probability mass on legal moves
-        
+
         Returns the average across the batch.
         """
         # only compute on the first 10 positions
@@ -141,7 +134,7 @@ class Trainer:
         policy_probs = policy_probs[:10]
         B = policy_probs.shape[0]
         legal_probs = []
-        
+
         for i in range(B):
             legal_mask = self._compute_legal_move_mask(fens[i], policy_probs.device)
             # Check if there are any legal moves (should always be true, but safety check)
@@ -152,7 +145,7 @@ class Trainer:
             else:
                 # Position with no legal moves (shouldn't happen in training, but handle gracefully)
                 legal_probs.append(0.0)
-        
+
         return sum(legal_probs) / len(legal_probs) if legal_probs else 0.0
 
     # ------------------------------------------------------------------ #
@@ -200,9 +193,7 @@ class Trainer:
         # every poll. We only do a real reload once the threshold is hit.
         while _live_size() < threshold:
             time.sleep(poll)
-            self.console.log(
-                f"[warmup] buffer at {_live_size():,}/{threshold:,}"
-            )
+            self.console.log(f"[warmup] buffer at {_live_size():,}/{threshold:,}")
         self.dataset.reload(force=True)
         self.console.log("[warmup] threshold reached; starting training")
 
@@ -283,7 +274,9 @@ class Trainer:
                     g_for_pacing = min(g, 50.0)
                 else:
                     g_for_pacing = g
-                target_step_interval = self.config.batch_size / max(1e-3, target_k * max(g_for_pacing, 1.0))
+                target_step_interval = self.config.batch_size / max(
+                    1e-3, target_k * max(g_for_pacing, 1.0)
+                )
                 step_dt = t1 - t0
                 sleep_for = max(0.0, target_step_interval - step_dt)
                 time.sleep(sleep_for)
@@ -314,26 +307,28 @@ class Trainer:
                 wandb.finish()
 
     # ------------------------------------------------------------------ #
-    def _train_step(self, batch: SelfPlayBatch) -> Dict[str, float]:
+    def _train_step(self, batch: SelfPlayBatch) -> dict[str, float]:
         self.optimizer.zero_grad(set_to_none=True)
 
         inputs = torch.from_numpy(batch.planes).to(self.device)
         targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
         target_value_outcome = torch.from_numpy(batch.value_outcomes).to(self.device)  # one-hot
-        target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)         # dense
-        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)         # raw plies (true)
-        target_backed_plies = torch.from_numpy(batch.backed_plies).to(self.device)     # raw plies (MCTS-backed)
+        target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)  # dense
+        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)  # raw plies (true)
+        target_backed_plies = torch.from_numpy(batch.backed_plies).to(
+            self.device
+        )  # raw plies (MCTS-backed)
         # Targets are raw `plies / 25`, clamped at 4 (= 100 plies = 50 moves)
         # so long-horizon outliers don't dominate the MSE. The model output is
         # also linear, so this is a clean regression with no saturation
         # mismatch between the two sides of the loss.
-        target_mlh   = (target_plies.clamp_min(0.0)        / 25.0).clamp_max(4.0)
+        target_mlh = (target_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
         target_mlh_q = (target_backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
         # -1 is the "no MLH target" sentinel set by the buffer-migration
         # scripts to mark pre-MLH (resp. pre-mlh_q) rows. Each head has its
         # own mask so the true-target head can keep training on legacy rows
         # even before the mlh_q field is populated.
-        mlh_mask   = (target_plies        > -0.5).float()
+        mlh_mask = (target_plies > -0.5).float()
         mlh_q_mask = (target_backed_plies > -0.5).float()
         value_labels = torch.argmax(target_value_outcome, dim=-1)
         value_q_labels = torch.argmax(target_value_mcts, dim=-1)
@@ -346,7 +341,7 @@ class Trainer:
             policy_logits = policy_logits.view(B, -1)
             value_logits = value_logits.view(B, 3)
             value_q_logits = value_q_logits.view(B, 3)
-            mlh_pred   = mlh_pred.view(B)
+            mlh_pred = mlh_pred.view(B)
             mlh_q_pred = mlh_q_pred.view(B)
 
             policy_loss = F.cross_entropy(
@@ -363,17 +358,13 @@ class Trainer:
             # search root. Both fall back to 0 cleanly when their respective
             # mask is empty (e.g. early in a fresh run before backed_plies is
             # populated).
-            mlh_sq   = (mlh_pred   - target_mlh  ).pow(2) * mlh_mask
+            mlh_sq = (mlh_pred - target_mlh).pow(2) * mlh_mask
             mlh_q_sq = (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
-            mlh_loss   = mlh_sq.sum()   / mlh_mask.sum().clamp_min(1.0)
+            mlh_loss = mlh_sq.sum() / mlh_mask.sum().clamp_min(1.0)
             mlh_q_loss = mlh_q_sq.sum() / mlh_q_mask.sum().clamp_min(1.0)
 
-            value_accuracy = (
-                (value_logits.argmax(dim=-1) == value_labels).float().mean()
-            )
-            value_q_accuracy = (
-                (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
-            )
+            value_accuracy = (value_logits.argmax(dim=-1) == value_labels).float().mean()
+            value_q_accuracy = (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
 
             lw = self.config.loss_weights
             total_loss = (
@@ -390,12 +381,7 @@ class Trainer:
 
         # Keep teacher in sync every step using EMA
         self._update_teacher()
-        policy_accuracy = (
-            (policy_logits.argmax(dim=-1) == targets_policy)
-            .float()
-            .mean()
-            .item()
-        )
+        policy_accuracy = (policy_logits.argmax(dim=-1) == targets_policy).float().mean().item()
 
         # Calculate policy entropy: -sum(p * log(p + eps))
         # Convert to float32 for accurate entropy calculation
@@ -406,9 +392,7 @@ class Trainer:
 
         # Calculate probability mass on legal moves
         # Compute softmax of logits, multiply with legal moves mask, then sum
-        legal_move_probs = self._compute_legal_move_probability(
-            policy_probs, batch.fens
-        )
+        legal_move_probs = self._compute_legal_move_probability(policy_probs, batch.fens)
 
         # Buffer-target sharpness: what fraction of MCTS-WDL targets are
         # confident (>=80% on a single class)? When this stays low the value_q
@@ -459,11 +443,11 @@ class Trainer:
                 return 0.0
             return float((t * mask).sum().detach().item() / denom)
 
-        mask_frac     = float(mlh_mask.mean().detach().item())
-        mask_q_frac   = float(mlh_q_mask.mean().detach().item())
-        mlh_pred_mean   = _masked_mean(mlh_pred,   mlh_mask)   * 25.0  # plies
-        mlh_target_mean = _masked_mean(target_mlh, mlh_mask)   * 25.0
-        mlh_q_pred_mean   = _masked_mean(mlh_q_pred,   mlh_q_mask) * 25.0
+        mask_frac = float(mlh_mask.mean().detach().item())
+        mask_q_frac = float(mlh_q_mask.mean().detach().item())
+        mlh_pred_mean = _masked_mean(mlh_pred, mlh_mask) * 25.0  # plies
+        mlh_target_mean = _masked_mean(target_mlh, mlh_mask) * 25.0
+        mlh_q_pred_mean = _masked_mean(mlh_q_pred, mlh_q_mask) * 25.0
         mlh_q_target_mean = _masked_mean(target_mlh_q, mlh_q_mask) * 25.0
 
         # Agreement between the two MLH targets, computed only on rows where
@@ -480,12 +464,12 @@ class Trainer:
                 (diff_plies * both_mask).sum().detach().item() / denom.item()
             )
             # Masked Pearson correlation.
-            a = (target_mlh   * both_mask)
-            b = (target_mlh_q * both_mask)
+            a = target_mlh * both_mask
+            b = target_mlh_q * both_mask
             n = denom
             mean_a = a.sum() / n
             mean_b = b.sum() / n
-            da = (target_mlh   - mean_a) * both_mask
+            da = (target_mlh - mean_a) * both_mask
             db = (target_mlh_q - mean_b) * both_mask
             cov = (da * db).sum()
             var_a = (da * da).sum().clamp_min(1e-12)
@@ -525,7 +509,7 @@ class Trainer:
         return metrics
 
     # ------------------------------------------------------------------ #
-    def _log(self, metrics: Dict[str, float]) -> None:
+    def _log(self, metrics: dict[str, float]) -> None:
         elapsed = time.time() - self.last_log_time
         if elapsed <= 0:
             elapsed = 1e-6
@@ -570,11 +554,15 @@ class Trainer:
            iterate buffers, which was the original bug.)
         """
         with torch.no_grad():
-            for teacher_param, student_param in zip(self.teacher_model.parameters(), self.model.parameters()):
+            for teacher_param, student_param in zip(
+                self.teacher_model.parameters(), self.model.parameters(), strict=True
+            ):
                 teacher_param.data.mul_(self.config.teacher_decay).add_(
                     student_param.data, alpha=self.config.teacher_weight
                 )
-            for teacher_buf, student_buf in zip(self.teacher_model.buffers(), self.model.buffers()):
+            for teacher_buf, student_buf in zip(
+                self.teacher_model.buffers(), self.model.buffers(), strict=True
+            ):
                 teacher_buf.data.copy_(student_buf.data)
 
     def _save_checkpoint(self) -> None:
@@ -602,10 +590,10 @@ class Trainer:
 
         # Build engine from STUDENT checkpoint
         self._invoke_build_script(path)
-        
+
         # Evaluate STUDENT checkpoint (to see progress)
         # self._evaluate_checkpoint(path)
-        
+
         self._prune_checkpoints()
 
     def _load_checkpoint(self, path: Path) -> None:
@@ -618,7 +606,9 @@ class Trainer:
         # within a few hundred steps once the buffer has plies_remaining rows.
         missing, unexpected = self.model.load_state_dict(ckpt["model"], strict=False)
         if missing:
-            self.console.log(f"[resume] new params not in checkpoint (initialized fresh): {missing}")
+            self.console.log(
+                f"[resume] new params not in checkpoint (initialized fresh): {missing}"
+            )
         if unexpected:
             self.console.log(f"[resume] checkpoint has unused params: {unexpected}")
         # Optimizer state is keyed by param-id, which depends on the param set.
@@ -644,7 +634,7 @@ class Trainer:
                 old.unlink()
             except OSError:
                 pass
-        
+
         # Prune teacher checkpoints
         teacher_files = sorted(self.checkpoint_dir.glob("teacher_step_*.pt"))
         for old in teacher_files[:-keep]:
@@ -680,24 +670,26 @@ class Trainer:
 
     def _evaluate_checkpoint(self, checkpoint_path: Path) -> None:
         """Evaluate raw model against Stockfish and log ELO to wandb."""
-        self.console.log(f"Evaluating checkpoint {checkpoint_path} against Stockfish (ELO {self._current_stockfish_elo})...")
-        
+        self.console.log(
+            f"Evaluating checkpoint {checkpoint_path} against Stockfish (ELO {self._current_stockfish_elo})..."
+        )
+
         try:
             from src.eval.play_move import main_model_vs_stockfish
         except ImportError as exc:
             self.console.log(f"[WARN] Failed to import play_move: {exc}")
             return
-        
+
         # Load a fresh model instance from checkpoint
         eval_model = SmallModel().to(self.device)
         eval_model.eval()
         try:
-            ckpt = torch.load(checkpoint_path, map_location=self.device,weights_only=False)
+            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             eval_model.load_state_dict(ckpt["model"], strict=False)
         except Exception as exc:
             self.console.log(f"[WARN] Failed to load checkpoint for evaluation: {exc}")
             return
-        
+
         # Run evaluation
         try:
             win_rate, estimated_elo = main_model_vs_stockfish(
@@ -708,10 +700,10 @@ class Trainer:
                 temp=0.1,
                 elo=self._current_stockfish_elo,
             )
-            
+
             # Handle case where estimated_elo might be "N/A"
             elo_value = estimated_elo if isinstance(estimated_elo, (int, float)) else None
-            
+
             # Log to wandb
             if self._wandb_run:
                 log_dict = {
@@ -722,18 +714,21 @@ class Trainer:
                 if elo_value is not None:
                     log_dict["eval/estimated_elo"] = elo_value
                 wandb.log(log_dict)
-            
+
             # Handle case where estimated_elo might be "N/A"
             if isinstance(estimated_elo, str):
                 self.console.log(f"Evaluation complete: ELO=N/A, Win rate={win_rate:.3f}")
                 # Don't update Stockfish ELO if we can't estimate
             else:
-                self.console.log(f"Evaluation complete: ELO={estimated_elo:.1f}, Win rate={win_rate:.3f}")
-                
+                self.console.log(
+                    f"Evaluation complete: ELO={estimated_elo:.1f}, Win rate={win_rate:.3f}"
+                )
+
                 # Update Stockfish ELO for next evaluation
                 self._current_stockfish_elo = max(int(estimated_elo), 1400)
-                self.console.log(f"Next evaluation will use Stockfish ELO {self._current_stockfish_elo}")
-            
+                self.console.log(
+                    f"Next evaluation will use Stockfish ELO {self._current_stockfish_elo}"
+                )
+
         except Exception as exc:
             self.console.log(f"[WARN] Evaluation failed: {exc}")
-

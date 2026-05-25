@@ -30,15 +30,15 @@ When no history is provided, slots 1..7 are zero (all piece planes empty +
 repetition flag 0). Live positions always contain pieces, so an all-zero
 slot is itself an unambiguous "no-history" signal.
 """
+
 from __future__ import annotations
 
 import bulletchess
 import numpy as np
 import torch
 
-
 INPUT_PLANES = 111
-HISTORY_DEPTH = 8           # current + 7 past
+HISTORY_DEPTH = 8  # current + 7 past
 _PAST_SLOTS = HISTORY_DEPTH - 1  # 7
 _PIECE_PLANES = 12
 _HIST_BLOCK = _PIECE_PLANES + 1  # 13 planes per slot
@@ -69,7 +69,7 @@ def _slot_base(slot: int) -> int:
     return _PIECE_PLANES + 1 + (slot - 1) * _HIST_BLOCK  # 13, 26, 39, ...
 
 
-def _encode_piece_planes(board: "bulletchess.Board", tensor: np.ndarray, base: int) -> None:
+def _encode_piece_planes(board: bulletchess.Board, tensor: np.ndarray, base: int) -> None:
     """Fill 12 piece planes starting at channel `base` from a bulletchess Board."""
     for color in (bulletchess.WHITE, bulletchess.BLACK):
         color_offset = 0 if color == bulletchess.WHITE else 6
@@ -82,7 +82,7 @@ def _encode_piece_planes(board: "bulletchess.Board", tensor: np.ndarray, base: i
                 tensor[7 - rank, file, base + color_offset + type_offset] = 1.0
 
 
-def _encode_globals(board: "bulletchess.Board", tensor: np.ndarray) -> None:
+def _encode_globals(board: bulletchess.Board, tensor: np.ndarray) -> None:
     """Fill the 7 global planes (104..110) from a bulletchess Board."""
     tensor[:, :, PLANE_STM] = 1.0 if board.turn == bulletchess.WHITE else 0.0
     if board.en_passant_square is not None:
@@ -90,16 +90,24 @@ def _encode_globals(board: "bulletchess.Board", tensor: np.ndarray) -> None:
         rank = ep_idx // 8
         file = ep_idx % 8
         tensor[7 - rank, file, PLANE_EP] = 1.0
-    tensor[:, :, PLANE_CASTLING_WK] = 1.0 if (bulletchess.WHITE_KINGSIDE  in board.castling_rights) else 0.0
-    tensor[:, :, PLANE_CASTLING_WQ] = 1.0 if (bulletchess.WHITE_QUEENSIDE in board.castling_rights) else 0.0
-    tensor[:, :, PLANE_CASTLING_BK] = 1.0 if (bulletchess.BLACK_KINGSIDE  in board.castling_rights) else 0.0
-    tensor[:, :, PLANE_CASTLING_BQ] = 1.0 if (bulletchess.BLACK_QUEENSIDE in board.castling_rights) else 0.0
+    tensor[:, :, PLANE_CASTLING_WK] = (
+        1.0 if (bulletchess.WHITE_KINGSIDE in board.castling_rights) else 0.0
+    )
+    tensor[:, :, PLANE_CASTLING_WQ] = (
+        1.0 if (bulletchess.WHITE_QUEENSIDE in board.castling_rights) else 0.0
+    )
+    tensor[:, :, PLANE_CASTLING_BK] = (
+        1.0 if (bulletchess.BLACK_KINGSIDE in board.castling_rights) else 0.0
+    )
+    tensor[:, :, PLANE_CASTLING_BQ] = (
+        1.0 if (bulletchess.BLACK_QUEENSIDE in board.castling_rights) else 0.0
+    )
     tensor[:, :, PLANE_HMC] = min(board.halfmove_clock / 100.0, 1.0)
 
 
 def fen_to_tensor(
     fen: str,
-    past_boards: list["bulletchess.Board"] | None = None,
+    past_boards: list[bulletchess.Board] | None = None,
     past_repetitions: list[bool] | None = None,
     current_repetition: bool = False,
 ) -> np.ndarray:
@@ -148,7 +156,7 @@ def fen_to_tensor(
 
 def boards_to_tensor(
     boards,
-    past_boards_per_position: list[list["bulletchess.Board"] | None] | None = None,
+    past_boards_per_position: list[list[bulletchess.Board] | None] | None = None,
     past_repetitions_per_position: list[list[bool] | None] | None = None,
     current_repetitions: list[bool] | None = None,
     device: str = "cuda",
@@ -164,7 +172,11 @@ def boards_to_tensor(
         # Slot 0: current pieces + globals.
         _encode_piece_planes(board, out[i], base=0)
         _encode_globals(board, out[i])
-        if current_repetitions is not None and i < len(current_repetitions) and current_repetitions[i]:
+        if (
+            current_repetitions is not None
+            and i < len(current_repetitions)
+            and current_repetitions[i]
+        ):
             out[i, :, :, _PIECE_PLANES] = 1.0
         # Historical slots.
         if past_boards_per_position is None or i >= len(past_boards_per_position):
@@ -188,7 +200,7 @@ def boards_to_tensor(
 
 def batch_fen_to_tensor(
     fens,
-    past_boards_per_position: list[list["bulletchess.Board"] | None] | None = None,
+    past_boards_per_position: list[list[bulletchess.Board] | None] | None = None,
     past_repetitions_per_position: list[list[bool] | None] | None = None,
     current_repetitions: list[bool] | None = None,
     device: str = "cuda",
@@ -211,7 +223,7 @@ def batch_fen_to_tensor(
 def apply_move_to_tensor(
     board_tensor: torch.Tensor,
     move_uci: str,
-    board: "bulletchess.Board",
+    board: bulletchess.Board,
 ) -> torch.Tensor:
     """Return a new tensor after applying `move_uci` to `board`.
 
@@ -239,6 +251,7 @@ def apply_move_to_tensor(
 # piece bitboards (12 per snapshot). Going through bulletchess.Board to
 # decode them per record would be wasteful. These helpers fill a tensor
 # directly from arrays of uint64.
+
 
 def encode_piece_planes_from_bitboards(
     bitboards: np.ndarray,
@@ -317,8 +330,11 @@ def batch_encode_records(
     out = np.zeros((B, 8, 8, INPUT_PLANES), dtype=np.float32)
     pb = np.asarray(past_bitboards_batch, dtype=np.uint64).reshape(B, _PAST_SLOTS, _PIECE_PLANES)
     pr = np.asarray(past_repetitions_batch, dtype=np.uint8).reshape(B, _PAST_SLOTS)
-    cr = (np.asarray(current_repetitions, dtype=np.uint8).reshape(B)
-          if current_repetitions is not None else np.zeros(B, dtype=np.uint8))
+    cr = (
+        np.asarray(current_repetitions, dtype=np.uint8).reshape(B)
+        if current_repetitions is not None
+        else np.zeros(B, dtype=np.uint8)
+    )
     for i, fen in enumerate(current_fens):
         board = bulletchess.Board.from_fen(fen)
         _encode_piece_planes(board, out[i], base=0)

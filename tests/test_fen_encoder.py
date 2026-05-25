@@ -3,12 +3,9 @@ import numpy as np
 
 from src.models.small.fen_encoder import (
     INPUT_PLANES,
-    HISTORY_DEPTH,
     PLANE_STM,
-    PLANE_HMC,
-    fen_to_tensor,
     encode_record_planes,
-    encode_piece_planes_from_bitboards,
+    fen_to_tensor,
 )
 
 START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -45,9 +42,7 @@ def test_history_slot_filled():
     """A non-empty past_boards entry must populate the matching slot."""
     past = [bulletchess.Board.from_fen(START_FEN)]
     past_reps = [True]
-    t = fen_to_tensor(
-        START_FEN, past_boards=past, past_repetitions=past_reps
-    )
+    t = fen_to_tensor(START_FEN, past_boards=past, past_repetitions=past_reps)
     # Slot 1 piece planes: 13..24. Slot-1 repetition: 25.
     # Startpos has white pawns on rank 2 -> tensor row 6 for plane 13 (W:P).
     assert t[6, :, 13].sum() == 8.0  # 8 white pawns
@@ -68,9 +63,16 @@ def test_repetition_after_knight_dance():
         # Use a piece-bitboards-based "hash" (color, type, square set) so we
         # don't depend on bulletchess exposing zobrist.
         h = tuple(
-            int(b[c, p]) for c in (bulletchess.WHITE, bulletchess.BLACK)
-            for p in (bulletchess.PAWN, bulletchess.KNIGHT, bulletchess.BISHOP,
-                      bulletchess.ROOK, bulletchess.QUEEN, bulletchess.KING)
+            int(b[c, p])
+            for c in (bulletchess.WHITE, bulletchess.BLACK)
+            for p in (
+                bulletchess.PAWN,
+                bulletchess.KNIGHT,
+                bulletchess.BISHOP,
+                bulletchess.ROOK,
+                bulletchess.QUEEN,
+                bulletchess.KING,
+            )
         ) + (b.turn == bulletchess.WHITE,)
         return h
 
@@ -104,13 +106,17 @@ def test_encode_record_planes_roundtrip():
     """Building from FEN+bitboards equals building from FEN+bulletchess boards."""
     past = [bulletchess.Board.from_fen(START_FEN)] * 3
     past_reps_list = [False, True, False]
-    t_from_boards = fen_to_tensor(
-        START_FEN, past_boards=past, past_repetitions=past_reps_list
-    )
+    t_from_boards = fen_to_tensor(START_FEN, past_boards=past, past_repetitions=past_reps_list)
 
     # Build the bitboards array.
-    types = [bulletchess.PAWN, bulletchess.KNIGHT, bulletchess.BISHOP,
-             bulletchess.ROOK, bulletchess.QUEEN, bulletchess.KING]
+    types = [
+        bulletchess.PAWN,
+        bulletchess.KNIGHT,
+        bulletchess.BISHOP,
+        bulletchess.ROOK,
+        bulletchess.QUEEN,
+        bulletchess.KING,
+    ]
     bbs_per_slot = []
     for _ in range(3):
         bb = bulletchess.Board.from_fen(START_FEN)
@@ -124,7 +130,5 @@ def test_encode_record_planes_roundtrip():
     for i, bb in enumerate(bbs_per_slot):
         pb[i] = bb
     pr[1] = 1
-    t_from_record = encode_record_planes(
-        START_FEN, past_bitboards=pb, past_repetitions=pr
-    )
+    t_from_record = encode_record_planes(START_FEN, past_bitboards=pb, past_repetitions=pr)
     np.testing.assert_array_equal(t_from_boards, t_from_record)

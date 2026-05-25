@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import time
 from pathlib import Path
-from typing import Optional
 
 
 class EngineWatcher:
@@ -23,7 +22,7 @@ class EngineWatcher:
     def engine_path(self) -> str:
         return self._engine_path
 
-    def maybe_refresh(self) -> Optional[str]:
+    def maybe_refresh(self) -> str | None:
         """Refresh if poll interval elapsed; returns new engine path if changed."""
         now = time.monotonic()
         if (now - self._last_check) < self.poll_interval:
@@ -54,13 +53,15 @@ class EngineWatcher:
             self._engine_path = new_engine
         return False
 
-    def _read_latest_engine(self) -> Optional[str]:
+    def _read_latest_engine(self) -> str | None:
         try:
             with self.iteration_file.open("r", encoding="utf-8") as fh:
                 reader = csv.DictReader(fh, skipinitialspace=True)
                 last_row = None
                 for row in reader:
-                    last_row = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+                    last_row = {
+                        k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()
+                    }
         except FileNotFoundError:
             return None
 
@@ -70,4 +71,3 @@ class EngineWatcher:
 
 
 __all__ = ["EngineWatcher"]
-

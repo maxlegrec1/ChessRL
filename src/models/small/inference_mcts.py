@@ -1,7 +1,18 @@
 from src.mcts import SmallMCTS
 
-class SmallMCTSInference():
-    def __init__(self, engine_path: str = "model.trt", cpuct: float = 1.0, simulations: int = 100, temperature: float = 1.0,temperature_at_root: float = 0.0,use_dirichlet: bool = False,dirichlet_alpha: float = 0.3,dirichlet_epsilon: float = 0.25):
+
+class SmallMCTSInference:
+    def __init__(
+        self,
+        engine_path: str = "model.trt",
+        cpuct: float = 1.0,
+        simulations: int = 100,
+        temperature: float = 1.0,
+        temperature_at_root: float = 0.0,
+        use_dirichlet: bool = False,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
+    ):
         self.simulations = simulations
         self.cpuct = cpuct
         self.temperature = temperature
@@ -12,8 +23,10 @@ class SmallMCTSInference():
         self.mcts = SmallMCTS(engine_path=engine_path, temperature=self.temperature, cpuct=cpuct)
         # Flag for callers (like brawls.py) to prefer move-history inputs over FEN.
         self.prefers_move_history = True
-    
-    def get_move_from_fen_no_thinking(self, fen, T=1, device="cuda", force_legal=True, return_probs=False, use_fp16: bool = False):
+
+    def get_move_from_fen_no_thinking(
+        self, fen, T=1, device="cuda", force_legal=True, return_probs=False, use_fp16: bool = False
+    ):
         # Use T for final action selection (temperature_at_root), but keep internal
         # MCTS search temperature at 1.0 to ensure proper exploration.
         # Low temperature (e.g. 0.1) during tree search destroys exploration and
@@ -26,7 +39,7 @@ class SmallMCTSInference():
             temperature_at_root=self.temperature_at_root,  # Use T for final action selection
             use_dirichlet=self.use_dirichlet,
             dirichlet_alpha=self.dirichlet_alpha,
-            dirichlet_epsilon=self.dirichlet_epsilon
+            dirichlet_epsilon=self.dirichlet_epsilon,
         )
         action = res[0]["action"]
         return action
@@ -60,8 +73,9 @@ class SmallMCTSInference():
             return None
         return res[0].get("action")
 
+
 if __name__ == "__main__":
-    inference = SmallMCTSInference(engine_path="model.trt",cpuct=1.0, simulations=100)
+    inference = SmallMCTSInference(engine_path="model.trt", cpuct=1.0, simulations=100)
     fen = "r1bqkb1r/p4ppp/2p2n2/nB2p1N1/8/5Q2/PPPP1PPP/RNB1K2R b KQkq - 1 8"
     action = inference.get_move_from_fen_no_thinking(fen, T=0.0)
     print(action)

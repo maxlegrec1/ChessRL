@@ -13,13 +13,12 @@ Example:
       --duration-sec 90 \\
       --out artifacts/perf/phase0.json
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
-import shutil
 import socket
 import subprocess
 import sys
@@ -31,11 +30,15 @@ import _inference_cpp as cpp
 
 def gpu_name() -> str:
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip().splitlines()
+        out = (
+            subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            .strip()
+            .splitlines()
+        )
         if out:
             return out[0]
     except Exception:
@@ -47,8 +50,12 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", required=True, help="Path to .trt engine (must be 111-plane).")
     ap.add_argument("--duration-sec", type=float, default=90.0)
-    ap.add_argument("--warmup-sec", type=float, default=10.0,
-                    help="Initial seconds excluded from the throughput average; lets stream/exec contexts warm up.")
+    ap.add_argument(
+        "--warmup-sec",
+        type=float,
+        default=10.0,
+        help="Initial seconds excluded from the throughput average; lets stream/exec contexts warm up.",
+    )
     ap.add_argument("--concurrency", type=int, default=1024)
     ap.add_argument("--threads", type=int, default=256)
     ap.add_argument("--sims", type=int, default=800)
@@ -62,12 +69,22 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dirichlet-alpha", type=float, default=0.12)
     ap.add_argument("--dirichlet-epsilon", type=float, default=0.05)
     ap.add_argument("--random-opening-plies", type=int, default=0)
-    ap.add_argument("--virtual-loss-width", type=int, default=1,
-                    help="MCTS virtual-loss batched-descent width. 1 = legacy single-leaf descent.")
+    ap.add_argument(
+        "--virtual-loss-width",
+        type=int,
+        default=1,
+        help="MCTS virtual-loss batched-descent width. 1 = legacy single-leaf descent.",
+    )
     ap.add_argument("--scratch-dir", default="artifacts/perf/scratch")
-    ap.add_argument("--label", default=None, help="Free-form label saved into the JSON (e.g. phase0, phase1).")
+    ap.add_argument(
+        "--label", default=None, help="Free-form label saved into the JSON (e.g. phase0, phase1)."
+    )
     ap.add_argument("--out", required=True, help="Where to write the JSON snapshot.")
-    ap.add_argument("--keep-scratch", action="store_true", help="Leave the scratch buffer on disk after the bench.")
+    ap.add_argument(
+        "--keep-scratch",
+        action="store_true",
+        help="Leave the scratch buffer on disk after the bench.",
+    )
     return ap.parse_args()
 
 
@@ -86,8 +103,10 @@ def main() -> int:
     label = args.label or pathlib.Path(args.out).stem
     print(f"[bench] engine={args.engine}")
     print(f"[bench] buffer={buffer_path}")
-    print(f"[bench] config: concurrency={args.concurrency} threads={args.threads} "
-          f"sims={args.sims} hash_size={args.hash_size}")
+    print(
+        f"[bench] config: concurrency={args.concurrency} threads={args.threads} "
+        f"sims={args.sims} hash_size={args.hash_size}"
+    )
     print(f"[bench] warmup={args.warmup_sec}s measured={args.duration_sec}s")
 
     worker = cpp.SelfPlayWorker(
@@ -135,12 +154,14 @@ def main() -> int:
 
         now = time.monotonic()
         if now - last_sample >= 5.0:
-            samples.append({
-                "t": now - t_start,
-                "positions": pre_positions,
-                "games": pre_games,
-                "nodes": pre_nodes,
-            })
+            samples.append(
+                {
+                    "t": now - t_start,
+                    "positions": pre_positions,
+                    "games": pre_games,
+                    "nodes": pre_nodes,
+                }
+            )
             last_sample = now
         if now - t_start >= args.duration_sec:
             break
@@ -159,23 +180,31 @@ def main() -> int:
     nodes_per_sec = pre_nodes / elapsed if elapsed > 0 else 0.0
     mean_batch_size = (delta_positions_in_batches / delta_batches) if delta_batches else 0.0
     mean_infer_ms_per_batch = (delta_infer_ms / delta_batches) if delta_batches else 0.0
-    mean_encode_us_per_leaf = (delta_encoder_ms * 1000.0 / delta_encoder_calls) if delta_encoder_calls else 0.0
+    mean_encode_us_per_leaf = (
+        (delta_encoder_ms * 1000.0 / delta_encoder_calls) if delta_encoder_calls else 0.0
+    )
     # Encoder time charged to N MCTS worker threads in parallel; per-leaf wall-clock
     # is the relevant number for hot-path cost, while the *aggregate* time gives the
     # fraction of total wall-clock the threads spent encoding.
-    encode_thread_busy_frac = (
-        delta_encoder_ms / 1000.0 / max(1.0, elapsed * args.threads)
-    )
+    encode_thread_busy_frac = delta_encoder_ms / 1000.0 / max(1.0, elapsed * args.threads)
     leaves_per_batch_target = delta_encoder_calls / delta_batches if delta_batches else 0.0
 
     print()
-    print(f"[bench] {label}: {pos_per_sec:.1f} positions/sec  "
-          f"({games_per_sec:.2f} games/sec, {nodes_per_sec:.0f} nodes/sec)")
-    print(f"[bench]   {step_count} steps in {elapsed:.1f}s, {pre_games} games, {pre_positions} positions")
-    print(f"[bench]   inference: {delta_batches} batches, avg {mean_batch_size:.1f}/batch, "
-          f"{mean_infer_ms_per_batch:.2f} ms/batch")
-    print(f"[bench]   encoder:  {delta_encoder_calls} calls, {mean_encode_us_per_leaf:.2f} us/leaf, "
-          f"thread-busy frac {encode_thread_busy_frac*100:.1f}%")
+    print(
+        f"[bench] {label}: {pos_per_sec:.1f} positions/sec  "
+        f"({games_per_sec:.2f} games/sec, {nodes_per_sec:.0f} nodes/sec)"
+    )
+    print(
+        f"[bench]   {step_count} steps in {elapsed:.1f}s, {pre_games} games, {pre_positions} positions"
+    )
+    print(
+        f"[bench]   inference: {delta_batches} batches, avg {mean_batch_size:.1f}/batch, "
+        f"{mean_infer_ms_per_batch:.2f} ms/batch"
+    )
+    print(
+        f"[bench]   encoder:  {delta_encoder_calls} calls, {mean_encode_us_per_leaf:.2f} us/leaf, "
+        f"thread-busy frac {encode_thread_busy_frac * 100:.1f}%"
+    )
 
     out = {
         "label": label,

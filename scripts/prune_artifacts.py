@@ -5,6 +5,7 @@ Usage:
     uv run python scripts/prune_artifacts.py --apply
     uv run python scripts/prune_artifacts.py --keep-last 5 --apply
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,8 +35,7 @@ def collect_step_numbers(directory: Path) -> list[int]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep-last", type=int, default=5)
-    parser.add_argument("--apply", action="store_true",
-                        help="Actually delete (default: dry-run).")
+    parser.add_argument("--apply", action="store_true", help="Actually delete (default: dry-run).")
     args = parser.parse_args()
 
     steps = collect_step_numbers(CKPT_DIR)
@@ -43,7 +43,7 @@ def main() -> int:
         print(f"No step_*.pt found in {CKPT_DIR}; nothing to do.")
         return 0
 
-    keep = set(steps[-args.keep_last:])
+    keep = set(steps[-args.keep_last :])
     drop = sorted(set(steps) - keep)
 
     print(f"Found {len(steps)} step checkpoints in {CKPT_DIR}")
@@ -73,8 +73,10 @@ def main() -> int:
             deleted += 1
             freed += size
 
-    print(f"{'Deleted' if args.apply else 'Would delete'} {deleted} files, "
-          f"freeing ~{freed / 1e9:.2f} GB.")
+    print(
+        f"{'Deleted' if args.apply else 'Would delete'} {deleted} files, "
+        f"freeing ~{freed / 1e9:.2f} GB."
+    )
     return 0
 
 
