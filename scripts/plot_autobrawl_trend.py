@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parents[1]
 STATE = ROOT / "artifacts/exp/sf1400_autobrawl/state.json"
 OUT = ROOT / "artifacts/exp/sf1400_autobrawl/winrate_trend.png"
+# docs/img/ is committed (README embeds the PNG); artifacts/ is gitignored.
+OUT_DOCS = ROOT / "docs/img/winrate_trend.png"
 
 d = json.loads(STATE.read_text())
 results = d.get("results", {})
@@ -107,7 +109,9 @@ plt.title(
 ax1.legend(loc="upper left")
 plt.tight_layout()
 plt.savefig(OUT, dpi=120, bbox_inches="tight")
-print(f"plot: {OUT}")
+OUT_DOCS.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(OUT_DOCS, dpi=120, bbox_inches="tight")
+print(f"plot: {OUT}  (+ {OUT_DOCS} for README embed)")
 print(
     f"summary: {len(rows)} brawls, "
     f"step {min(steps) // 1000}k→{max(steps) // 1000}k, "

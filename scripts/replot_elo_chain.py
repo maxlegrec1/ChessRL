@@ -24,6 +24,8 @@ CSVS = [
     ROOT / "artifacts/exp/elo_chain_ext4/results.csv",  # 220k→latest extension
 ]
 OUT = ROOT / "artifacts/exp/elo_chain/elo_chain_fixed.png"
+# docs/img/ is committed (README embeds the PNG); artifacts/ is gitignored.
+OUT_DOCS = ROOT / "docs/img/elo_chain.png"
 
 # Policy-change markers placed by training step.
 MARKERS = [
@@ -99,6 +101,8 @@ axes[1].legend(loc="lower right", fontsize=9)
 
 plt.tight_layout()
 plt.savefig(OUT, dpi=120, bbox_inches="tight")
+OUT_DOCS.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(OUT_DOCS, dpi=120, bbox_inches="tight")
 
 # Concise text summary
 print("Per-interval gain (newer - older):")

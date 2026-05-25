@@ -19,12 +19,12 @@ crosses a 5k-step boundary — they're the source of truth, not a snapshot.
 **Elo chain** — head-to-head against the model's own past checkpoints (50
 games per pair, MCTS-800, width=1, 8 random opening plies):
 
-![Elo chain](artifacts/exp/elo_chain/elo_chain_fixed.png)
+![Elo chain](docs/img/elo_chain.png)
 
 **Win rate vs Stockfish-1400** — sequential 100 ms/move matches (autobrawl
 daemon, n=50 per checkpoint):
 
-![SF-1400 win rate](artifacts/exp/sf1400_autobrawl/winrate_trend.png)
+![SF-1400 win rate](docs/img/winrate_trend.png)
 
 Plus the interactive [dashboard](#dashboard) for a live view.
 
