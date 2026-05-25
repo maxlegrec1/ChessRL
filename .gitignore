@@ -36,8 +36,7 @@ wandb_cache/
 .vscode/
 *.swp
 
-# C++ build outputs and vendored sources
+# C++ build outputs
 cpp/build/
-cpp/chess-library/
 
 *.env
