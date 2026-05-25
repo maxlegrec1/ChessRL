@@ -166,6 +166,13 @@ class Trainer:
             init_kwargs["id"] = self.config.wandb.resume_id
             init_kwargs["resume"] = "allow"
         run = wandb.init(**init_kwargs)
+        # Surface the run id so external metric producers (sf1400_autobrawl
+        # daemon, model_chain_brawl) can attach via wandb.init(id=..., resume).
+        try:
+            run_dir = self.config.checkpoint.dir.parent
+            (run_dir / "wandb_run_id.txt").write_text(f"{run.id}\n")
+        except Exception as exc:  # never fail training over this
+            self.console.log(f"[WARN] failed to write wandb_run_id.txt: {exc}")
         return run
 
     # ------------------------------------------------------------------ #

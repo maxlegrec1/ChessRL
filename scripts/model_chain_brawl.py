@@ -26,6 +26,45 @@ SIMULATIONS = 800
 CPUCT = 0.65
 VLW = 1
 
+WANDB_PROJECT = "self_play"  # mirrors src/train/config.py default
+
+
+def _push_chain_to_wandb(run_dir: Path, rows: list[tuple[int, int, float, float]]) -> None:
+    """Attach to the trainer's W&B run and log per-interval ΔElo + cumulative.
+
+    `rows` is a list of (from_step, to_step, delta_elo, cumulative_elo). Each
+    row is logged with W&B step = to_step, so the curve aligns with the
+    trainer's own step axis. Fail-soft: silent skip if wandb_run_id.txt is
+    missing or wandb is unreachable.
+    """
+    rid_file = run_dir / "wandb_run_id.txt"
+    if not rid_file.is_file():
+        return
+    rid = rid_file.read_text().strip()
+    try:
+        import wandb
+
+        wandb.init(
+            project=WANDB_PROJECT,
+            id=rid,
+            resume="must",
+            reinit=True,
+            settings=wandb.Settings(silent=True),
+        )
+        for from_step, to_step, delta_elo, cum_elo in rows:
+            wandb.log(
+                {
+                    "eval/elo_delta_per_5k": delta_elo,
+                    "eval/elo_cumulative": cum_elo,
+                    "eval/elo_chain_from_step": from_step,
+                },
+                step=to_step,
+            )
+        wandb.finish()
+        print(f"[wandb] logged {len(rows)} chain intervals", flush=True)
+    except Exception as exc:
+        print(f"[wandb] log failed (non-fatal): {exc}", flush=True)
+
 
 def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
     """50 batched games of engine_a vs engine_b. Returns (w, d, l) from A's POV."""
@@ -228,10 +267,15 @@ def main():
     cum_steps = [int(rows[0]["from_step"])]
     cum_elos = [0.0]
     cum = 0.0
+    wandb_rows: list[tuple[int, int, float, float]] = []
     for r in rows:
         cum += float(r["delta_elo"])
         cum_steps.append(int(r["to_step"]))
         cum_elos.append(cum)
+        wandb_rows.append((int(r["from_step"]), int(r["to_step"]), float(r["delta_elo"]), cum))
+
+    # Optionally push to the trainer's W&B run.
+    _push_chain_to_wandb(run_dir, wandb_rows)
 
     # Plot per-interval and cumulative
     import matplotlib
