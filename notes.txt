@@ -1,0 +1,39 @@
+Quick command reference (run from repo root).
+
+# Install / build
+uv sync                                # installs deps and builds the cpp extension
+
+# Start a fresh run (creates artifacts/runs/<id>/ + random-init engine)
+uv run python -m src.run
+uv run python -m src.run --name my-experiment
+
+# Resume an existing run (auto-detects the latest step_*.pt)
+uv run python -m src.run --resume artifacts/runs/<id>
+
+# Run only one side
+uv run python -m src.run --no-train      # self-play only
+uv run python -m src.run --no-selfplay   # trainer only
+
+# Watch per-run logs
+tail -f artifacts/runs/<id>/selfplay.log
+tail -f artifacts/runs/<id>/training.log
+
+# Head-to-head evaluation between two checkpoints
+uv run python -m src.eval.brawls \
+  --num_games 100 \
+  --model1 small --model2 small \
+  --temp 0.0 --temp2 0.0 \
+  --ckpt1 artifacts/runs/<id_a>/checkpoints/step_*.pt \
+  --ckpt2 artifacts/runs/<id_b>/checkpoints/step_*.pt
+
+# Manually convert a checkpoint to a TensorRT engine
+scripts/build_trt.sh artifacts/runs/<id>/checkpoints/step_00043900.pt 43900 \
+  artifacts/runs/<id>/engines artifacts/runs/<id>/engines/.iteration
+
+# Tests
+uv run pytest                          # full
+uv run pytest -m "not gpu and not trt" # CPU-only
+
+# Prune old checkpoints/engines (default keeps last 5; dry-run by default)
+uv run python scripts/prune_artifacts.py
+uv run python scripts/prune_artifacts.py --apply

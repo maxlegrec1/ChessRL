@@ -1,0 +1,42 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Weights
+*.pt
+*.trt
+*.onnx
+
+# Data
+*.pgn
+*.parquet
+*.bin
+*.lock
+*.so
+
+# Generated state and runs
+artifacts/
+.iteration
+
+# W&B local logs/cache
+wandb/
+wandb_cache/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# C++ build outputs
+cpp/build/
+
+*.env

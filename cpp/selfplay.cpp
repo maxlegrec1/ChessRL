@@ -1,0 +1,613 @@
+#include "selfplay.hpp"
+#include "mcts/common.hpp"
+#include "mcts/small_runner.hpp"
+#include "mcts/single_inference.hpp"
+#include "mcts/cache.hpp"
+#include "chess-library/include/chess.hpp"
+
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <mutex>
+#include <random>
+#include <thread>
+#include <vector>
+#include <cstring>
+
+namespace chessrl
+{
+
+struct SelfPlayRecord
+{
+    std::string fen;
+    std::string policy;
+    // Both WDLs are stored from the side-to-move's perspective.
+    std::array<float, 3> value_outcome; // sparse one-hot, set at game end from z
+    std::array<float, 3> value_mcts;    // dense WDL from MCTS root after refine
+    int ply_index{0};                   // 0-based ply index within the game
+    float plies_remaining{-1.0f};       // total_plies - ply_index, set at game end
+    float backed_plies{-1.0f};          // MCTS-backed plies-remaining at root
+    // AlphaZero-style history: 7 past piece-plane snapshots (index 0 = t-1
+    // .. index 6 = t-7) plus a per-slot repetition flag and a flag for the
+    // current position. All zeros means "no history available".
+    std::array<std::array<std::uint64_t, 12>, 7> past_bitboards{};
+    std::array<std::uint8_t, 7> past_repetition_flags{};
+    std::uint8_t current_repetition_flag{0};
+};
+
+// On-disk record layout (832 bytes, fixed):
+//   [0..100)   FEN (null-padded)
+//   [100..116) policy UCI (null-padded)
+//   [116..128) value_outcome (3 x float32)
+//   [128..140) value_mcts    (3 x float32)
+//   [140..144) plies_remaining (1 x float32) — true plies to game end (set at game end)
+//   [144..148) backed_plies   (1 x float32) — MCTS-backed plies estimate at root
+//   [148..155) past_repetition_flags (7 x u8) — slot 1..7 repetition flags
+//   [155..156) current_repetition_flag (1 x u8) — slot 0 repetition flag
+//   [156..160) padding (4 bytes, keeps the next field 8-byte aligned)
+//   [160..832) past_bitboards (7 slots * 12 uint64 bitboards = 672 bytes)
+//             newest-first: offsets 160 (t-1), 256 (t-2), ..., 736 (t-7).
+//             Each slot: 12 uint64 in W:PNBRQK then B:PNBRQK order.
+constexpr size_t kRecordSize = 832;
+constexpr size_t kFenOffset = 0;
+constexpr size_t kPolicyOffset = 100;
+constexpr size_t kValueOutcomeOffset = 116;
+constexpr size_t kValueMctsOffset = 128;
+constexpr size_t kPliesRemainingOffset = 140;
+constexpr size_t kBackedPliesOffset = 144;
+constexpr size_t kPastRepetitionOffset = 148;  // 7 bytes, slot 1..7
+constexpr size_t kCurrentRepetitionOffset = 155;
+// (offsets 156..159 padded for alignment of the bitboards section)
+constexpr size_t kPastBitboardsOffset = 160;
+constexpr size_t kBitboardsPerSlot = 12;
+constexpr size_t kHistoricalSlots = 7;
+constexpr size_t kBitboardSlotBytes = kBitboardsPerSlot * sizeof(std::uint64_t); // 96
+static_assert(kPastBitboardsOffset + kHistoricalSlots * kBitboardSlotBytes == kRecordSize,
+              "record layout math is inconsistent");
+
+struct BoardSlot
+{
+    chess::Board board;
+    std::vector<std::string> history;
+    std::vector<SelfPlayRecord> pending_records;
+    int ply_count = 0;
+    // Rolling deque of recent past piece-plane snapshots (newest first).
+    // At record-creation time, the first 7 entries describe positions t-1
+    // .. t-7 relative to the current `board`. Pushed on every makeMove,
+    // trimmed to at most 7 entries.
+    std::deque<chessrl::mcts::PiecePlanes> past_planes;
+};
+
+
+
+struct SelfPlayWorker::Impl
+{
+    SelfPlayConfig config;
+    std::shared_ptr<chessrl::mcts::single::SmallBatchRunner> runner;
+    std::shared_ptr<chessrl::mcts::TranspositionTable> cache;
+    std::vector<BoardSlot> slots;
+    std::fstream outfile;
+    size_t current_records = 0;
+    // Monotonic counter of EVERY write (append + random-replace). Once the
+    // buffer is at max_buffer_size the file size stops growing, so the
+    // trainer can no longer infer insertion rate from the file. We persist
+    // this counter to a sidecar `<output_path>.writes` after each flush so
+    // the trainer can read insertion rate as delta(total_writes) / dt.
+    size_t total_writes = 0;
+    std::mt19937 opening_rng{std::random_device{}()};
+
+    // Reset a slot to a fresh starting position, optionally seeded with N
+    // random legal plies for opening diversity. The random plies are added to
+    // slot.history (so MCTS gets the correct move context) but no
+    // SelfPlayRecord entries are produced for them.
+    void reset_slot(BoardSlot& slot)
+    {
+        slot.board = chess::Board();
+        slot.history.clear();
+        slot.pending_records.clear();
+        slot.ply_count = 0;
+        slot.past_planes.clear();
+
+        const int n = config.random_opening_plies;
+        for (int i = 0; i < n; ++i)
+        {
+            if (slot.board.isGameOver().second != chess::GameResult::NONE) break;
+            chess::Movelist moves;
+            chess::movegen::legalmoves(moves, slot.board);
+            if (moves.size() == 0) break;
+            std::uniform_int_distribution<size_t> dist(0, moves.size() - 1);
+            const auto& m = moves[dist(opening_rng)];
+            // Snapshot the pre-move position into the past_planes deque so
+            // that subsequent records carry the random opening as history.
+            chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
+            pre.repetition = slot.board.isRepetition(1);
+            slot.past_planes.push_front(pre);
+            if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
+
+            slot.history.push_back(chess::uci::moveToUci(m, slot.board.chess960()));
+            slot.board.makeMove(m);
+        }
+    }
+
+    Impl(const SelfPlayConfig& c) : config(c)
+    {
+        chessrl::mcts::single::SmallBatchConfig batch_config;
+        batch_config.engine_path = config.engine_path;
+        batch_config.enable_telemetry = true;
+        // Batch dispatch threshold. Sized to the worker count, not the
+        // per-batch in-flight peak (which would be threads × width with
+        // virtual loss). Measured: capping at ~threads keeps per-batch
+        // latency ~1 ms; larger caps (≥256) push it past 5 ms and net-
+        // regress total pos/sec because MCTS threads spend longer blocked
+        // on ticket.get(). The 4 GPU workers pipeline well at this size.
+        const int realistic_concurrency = (config.threads > 0)
+            ? config.threads
+            : std::min(config.concurrency, 256);
+        batch_config.max_batch_size = std::max(1, realistic_concurrency);
+        runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
+
+        // hash_size <= 0 disables the TT entirely (skips lock+hash+lookup on
+        // every leaf). At <2% hit rate the cache is net-negative, so leaving
+        // this off is a real perf win for self-play with few transpositions.
+        if (config.hash_size > 0)
+        {
+            cache = std::make_shared<chessrl::mcts::TranspositionTable>(config.hash_size);
+        }
+
+        slots.resize(config.concurrency);
+        for (auto& slot : slots)
+        {
+            reset_slot(slot);
+        }
+
+        // Open in read/write mode. Create if not exists.
+        // std::fstream doesn't create file if it doesn't exist when using in | out.
+        // So we might need to create it first.
+        if (!std::filesystem::exists(config.output_path))
+        {
+            std::ofstream tmp(config.output_path);
+        }
+
+        // Truncate to a record boundary if a prior run left a partial trailing
+        // record, so subsequent appends don't produce a misaligned record.
+        {
+            std::error_code ec;
+            auto fsize = std::filesystem::file_size(config.output_path, ec);
+            if (!ec)
+            {
+                size_t aligned = (fsize / kRecordSize) * kRecordSize;
+                if (aligned != fsize)
+                {
+                    std::filesystem::resize_file(config.output_path, aligned, ec);
+                }
+            }
+        }
+
+        outfile.open(config.output_path, std::ios::in | std::ios::out | std::ios::binary);
+        if (!outfile)
+        {
+            std::cerr << "Failed to open output file: " << config.output_path << std::endl;
+        }
+        else
+        {
+            outfile.seekp(0, std::ios::end);
+            size_t size = outfile.tellp();
+            current_records = size / kRecordSize;
+            // Resume from the existing sidecar if present so an interrupted
+            // run reattaches the monotonic counter; otherwise seed from the
+            // current append count (an underestimate the first time the run
+            // is started after random-replace was already happening, but
+            // that's fine — only delta matters).
+            std::ifstream wf(config.output_path + ".writes");
+            if (wf)
+            {
+                size_t prev = 0;
+                wf >> prev;
+                total_writes = std::max(prev, current_records);
+            }
+            else
+            {
+                total_writes = current_records;
+            }
+        }
+    }
+};
+
+SelfPlayWorker::SelfPlayWorker(const SelfPlayConfig& config)
+    : impl_(new Impl(config))
+{
+}
+
+SelfPlayWorker::~SelfPlayWorker()
+{
+    delete impl_;
+}
+
+SelfPlayMetrics SelfPlayWorker::step()
+{
+    SelfPlayMetrics metrics;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Prepare MCTS requests
+    std::vector<chessrl::mcts::MctsOptions> options;
+    options.reserve(impl_->slots.size());
+
+    for (const auto& slot : impl_->slots)
+    {
+        chessrl::mcts::MctsOptions opt;
+        opt.request.fen = slot.board.getFen();
+        opt.request.history = slot.history;
+        opt.request.board = slot.board;
+        // Supply the AlphaZero history stack directly from the rolling
+        // snapshots we already maintain (slot.past_planes), so the runner
+        // skips the O(plies) build_root_history_stack replay it would
+        // otherwise do on EVERY ply ⇒ O(plies^2)/game. Bit-identical to
+        // build_root_history_stack: slot 0 = snapshot(slot.board) + its
+        // isRepetition(1); slots 1..7 = past_planes[0..6] (each captured
+        // pre-move with its repetition flag, newest-first — same ordering).
+        {
+            chessrl::mcts::HistoryStack hs{};
+            hs[0] = chessrl::mcts::snapshot_piece_planes(slot.board);
+            hs[0].repetition = slot.board.isRepetition(1);
+            for (int s = 1; s < chessrl::mcts::kHistoryDepth; ++s)
+            {
+                const size_t k = static_cast<size_t>(s - 1);
+                if (k < slot.past_planes.size())
+                    hs[static_cast<size_t>(s)] = slot.past_planes[k];
+            }
+            opt.request.history_stack = hs;
+        }
+        opt.simulations = impl_->config.simulations;
+        opt.cpuct = impl_->config.cpuct;
+        opt.temperature = impl_->config.temperature;
+        opt.temperature_at_root = impl_->config.temperature_at_root;
+        opt.virtual_loss_width = impl_->config.virtual_loss_width;
+        opt.use_dirichlet = impl_->config.use_dirichlet;
+        opt.dirichlet_alpha = impl_->config.dirichlet_alpha;
+        opt.dirichlet_epsilon = impl_->config.dirichlet_epsilon;
+        opt.small_engine_path = impl_->config.engine_path;
+        
+        options.push_back(std::move(opt));
+    }
+
+    // Run MCTS
+    double start_infer_ms = impl_->runner->statistics().total_inference_ms;
+    auto summaries = chessrl::mcts::run_small_mcts_batch_shared(
+        options, impl_->runner, impl_->cache, impl_->config.threads);
+    double end_infer_ms = impl_->runner->statistics().total_inference_ms;
+
+    auto current_time = std::chrono::high_resolution_clock::now();
+    double mcts_duration_ms = std::chrono::duration<double, std::milli>(current_time - start_time).count();
+    double trt_duration_ms = end_infer_ms - start_infer_ms;
+
+    if (std::getenv("CHESSRL_PROFILE_LOG") != nullptr)
+    {
+        std::cerr << "[Profile] MCTS=" << mcts_duration_ms << "ms"
+                  << " TRT=" << trt_duration_ms << "ms\n";
+        if (impl_->cache) impl_->cache->print_stats();
+        else std::cerr << "[Cache] disabled (hash_size=0)\n";
+    }
+
+    // Process results
+    for (size_t i = 0; i < impl_->slots.size(); ++i)
+    {
+        auto& slot = impl_->slots[i];
+        const auto& summary = summaries[i];
+        
+        // Each position runs config.simulations MCTS simulations
+        metrics.nodes_evaluated += impl_->config.simulations;
+
+        if (summary.action.empty())
+        {
+            impl_->reset_slot(slot);
+            metrics.games_finished++;
+            continue;
+        }
+
+        // Store record
+        SelfPlayRecord record;
+        record.fen = slot.board.getFen();
+        record.policy = summary.action;
+        // value_mcts is the MCTS-backed-up WDL (always populated).
+        // value_outcome is filled in at game end below; default to zero for now.
+        record.value_mcts = summary.value;
+        record.value_outcome = {0.0f, 0.0f, 0.0f};
+        record.ply_index = slot.ply_count;
+        record.plies_remaining = -1.0f; // overwritten with the true value at game end
+        // backed_plies is the search's plies-remaining estimate at this
+        // position; available immediately from the MCTS summary, no game-end
+        // information needed. Negative sentinel if MCTS produced none.
+        record.backed_plies = summary.backed_plies;
+
+        // AlphaZero-style history payload: copy up to 7 past piece-plane
+        // snapshots from the slot's rolling deque (slot 1 = t-1 .. slot 7 =
+        // t-7). Unused slots stay zero, which is the "no-history" signal.
+        for (size_t k = 0; k < slot.past_planes.size() && k < 7; ++k)
+        {
+            const auto& past = slot.past_planes[k];
+            record.past_bitboards[k] = past.bitboards;
+            record.past_repetition_flags[k] = past.repetition ? 1u : 0u;
+        }
+        record.current_repetition_flag = slot.board.isRepetition(1) ? 1u : 0u;
+
+        slot.pending_records.push_back(record);
+        metrics.positions_generated++;
+
+        // Apply move
+        bool move_found = false;
+        chess::Movelist moves;
+        chess::movegen::legalmoves(moves, slot.board);
+        for (const auto& m : moves)
+        {
+            if (chess::uci::moveToUci(m, slot.board.chess960()) == summary.action)
+            {
+                // Snapshot the pre-move position into the past_planes deque
+                // BEFORE applying the move, so the next record sees this
+                // position at slot 1 (t-1).
+                chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
+                pre.repetition = slot.board.isRepetition(1);
+                slot.past_planes.push_front(pre);
+                if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
+
+                slot.board.makeMove(m);
+                slot.history.push_back(summary.action);
+                slot.ply_count++;
+                move_found = true;
+                break;
+            }
+        }
+
+        if (!move_found)
+        {
+            std::cerr << "Move not found: " << summary.action << " in " << slot.board.getFen() << std::endl;
+            impl_->reset_slot(slot);
+            continue;
+        }
+
+        // Check termination
+        auto result = slot.board.isGameOver().second;
+        bool game_over = (result != chess::GameResult::NONE) || (slot.ply_count >= 600);
+
+        if (game_over)
+        {
+            float z = 0.5f;
+            if (result == chess::GameResult::LOSE)
+            {
+                // The side to move lost (e.g. is checkmated).
+                // If it's White's turn and they lost, z=0.0.
+                // If it's Black's turn and they lost, White won, so z=1.0.
+                if (slot.board.sideToMove() == chess::Color::WHITE)
+                    z = 0.0f;
+                else
+                    z = 1.0f;
+            }
+            else if (result == chess::GameResult::WIN)
+            {
+                // Should not happen in standard chess checkmate detection, 
+                // but if it does (side to move wins):
+                if (slot.board.sideToMove() == chess::Color::WHITE)
+                    z = 1.0f;
+                else
+                    z = 0.0f;
+            }
+            
+            // Always derive sparse one-hot game-outcome WDL for every pending record.
+            // Also fill plies_remaining = total_plies - ply_index so the
+            // moves-left head has a per-position regression target.
+            const int total_plies = slot.ply_count;
+            for (auto& rec : slot.pending_records)
+            {
+                bool white_to_move = (rec.fen.find(" w ") != std::string::npos);
+
+                if (white_to_move)
+                {
+                    if (z == 1.0f) rec.value_outcome = {1.0f, 0.0f, 0.0f};
+                    else if (z == 0.0f) rec.value_outcome = {0.0f, 0.0f, 1.0f};
+                    else rec.value_outcome = {0.0f, 1.0f, 0.0f};
+                }
+                else
+                {
+                    if (z == 0.0f) rec.value_outcome = {1.0f, 0.0f, 0.0f};
+                    else if (z == 1.0f) rec.value_outcome = {0.0f, 0.0f, 1.0f};
+                    else rec.value_outcome = {0.0f, 1.0f, 0.0f};
+                }
+
+                rec.plies_remaining = static_cast<float>(std::max(0, total_plies - rec.ply_index));
+            }
+            // Write to buffer
+            for (const auto& rec : slot.pending_records)
+            {
+                char buffer[kRecordSize];
+                std::memset(buffer, 0, kRecordSize);
+
+                std::strncpy(buffer + kFenOffset,    rec.fen.c_str(),    99);
+                std::strncpy(buffer + kPolicyOffset, rec.policy.c_str(), 15);
+                std::memcpy(buffer + kValueOutcomeOffset,  rec.value_outcome.data(), 12);
+                std::memcpy(buffer + kValueMctsOffset,     rec.value_mcts.data(),    12);
+                std::memcpy(buffer + kPliesRemainingOffset, &rec.plies_remaining,    4);
+                std::memcpy(buffer + kBackedPliesOffset,    &rec.backed_plies,       4);
+
+                std::memcpy(buffer + kPastRepetitionOffset,
+                            rec.past_repetition_flags.data(),
+                            rec.past_repetition_flags.size());
+                buffer[kCurrentRepetitionOffset] = static_cast<char>(rec.current_repetition_flag);
+                for (size_t k = 0; k < kHistoricalSlots; ++k)
+                {
+                    std::memcpy(buffer + kPastBitboardsOffset + k * kBitboardSlotBytes,
+                                rec.past_bitboards[k].data(),
+                                kBitboardSlotBytes);
+                }
+
+                if (impl_->current_records < impl_->config.max_buffer_size)
+                {
+                    // Append
+                    impl_->outfile.seekp(0, std::ios::end);
+                    impl_->outfile.write(buffer, kRecordSize);
+                    impl_->current_records++;
+                }
+                else
+                {
+                    // Random replacement
+                    // Use a simple random generator
+                    static std::mt19937 rng(std::random_device{}());
+                    std::uniform_int_distribution<size_t> dist(0, impl_->config.max_buffer_size - 1);
+                    size_t idx = dist(rng);
+
+                    impl_->outfile.seekp(idx * kRecordSize, std::ios::beg);
+                    impl_->outfile.write(buffer, kRecordSize);
+                }
+                // Always count the write, regardless of which branch handled
+                // it. The trainer needs this to compute insertion rate once
+                // the buffer is at capacity — the file size becomes constant
+                // under random-replacement, but writes (and thus inserts)
+                // continue.
+                impl_->total_writes++;
+            }
+
+            if (impl_->outfile) impl_->outfile.flush();
+            // Persist the monotonic write counter to a sidecar file. The
+            // trainer reads this to derive insertion rate even after the
+            // buffer file has stopped growing. Atomic rename so a partial
+            // write is never observed.
+            {
+                const std::string sidecar = impl_->config.output_path + ".writes";
+                const std::string sidecar_tmp = sidecar + ".tmp";
+                std::ofstream wfo(sidecar_tmp, std::ios::trunc);
+                if (wfo)
+                {
+                    wfo << impl_->total_writes << "\n";
+                    wfo.close();
+                    std::error_code ec;
+                    std::filesystem::rename(sidecar_tmp, sidecar, ec);
+                }
+            }
+
+            // Save PGN if requested
+            if (impl_->config.save_pgn)
+            {
+                std::filesystem::create_directories(impl_->config.pgn_dir);
+                
+                // Replay game to generate SAN
+                chess::Board replay_board;
+                std::stringstream ss;
+                ss << "[Event \"Self-Play\"]\n";
+                ss << "[Site \"Local\"]\n";
+                ss << "[Date \"????.??.??\"]\n";
+                ss << "[Round \"-\"]\n";
+                ss << "[White \"SelfPlay\"]\n";
+                ss << "[Black \"SelfPlay\"]\n";
+                
+                std::string result_str = "*";
+                if (result == chess::GameResult::WIN) result_str = (slot.board.sideToMove() == chess::Color::WHITE) ? "1-0" : "0-1"; // Wait, sideToMove wins? No, sideToMove checkmated means they LOST.
+                // If result is WIN, it means the side to move WON? 
+                // chess-library isGameOver() returns {Reason, Result}. 
+                // Result is WIN, LOSE, DRAW, NONE.
+                // If LOSE, side to move lost.
+                // If WIN, side to move won (e.g. opponent timed out? but here we only check board state).
+                // Usually isGameOver checks for checkmate (LOSE) or stalemate (DRAW).
+                // WIN might not be returned by standard rules unless we check for variant rules.
+                // Let's stick to what we derived for z.
+                
+                if (z == 1.0f) result_str = "1-0";
+                else if (z == 0.0f) result_str = "0-1";
+                else result_str = "1/2-1/2";
+                
+                ss << "[Result \"" << result_str << "\"]\n\n";
+                
+                int move_num = 1;
+                for (size_t k = 0; k < slot.history.size(); ++k)
+                {
+                    if (k % 2 == 0) ss << move_num << ". ";
+                    
+                    // slot.history[k] is a UCI string (e.g. "e2e4")
+                    // We need to find the corresponding Move object to generate SAN.
+                    
+                    bool found = false;
+                    chess::Movelist moves;
+                    chess::movegen::legalmoves(moves, replay_board);
+                    for (const auto& leg_m : moves)
+                    {
+                        if (chess::uci::moveToUci(leg_m, replay_board.chess960()) == slot.history[k])
+                        {
+                            ss << chess::uci::moveToSan(replay_board, leg_m) << " ";
+                            replay_board.makeMove(leg_m);
+                            found = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!found)
+                    {
+                        ss << slot.history[k] << "? ";
+                        // Try to apply anyway if possible or break
+                        break;
+                    }
+                    
+                    if (k % 2 == 1) move_num++;
+                }
+                
+                ss << result_str << "\n";
+                
+                // Write to file
+                auto now = std::chrono::system_clock::now();
+                auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                std::string filename = impl_->config.pgn_dir + "/game_" + std::to_string(timestamp) + "_" + std::to_string(i) + ".pgn";
+                
+                std::ofstream pgn_file(filename);
+                if (pgn_file)
+                {
+                    pgn_file << ss.str();
+                }
+            }
+
+            impl_->reset_slot(slot);
+            metrics.games_finished++;
+        }
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    metrics.runtime_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    
+    // Nodes evaluated is roughly simulations * concurrency, but let's be more precise if we can.
+    // SmallMCTS returns summary with 'rollouts' (vector of details).
+    // The number of rollouts is the number of simulations.
+    // So total nodes = sum(summary.rollouts.size()) across batch.
+    // I added that above.
+    
+    return metrics;
+}
+
+size_t SelfPlayWorker::get_buffer_size() const
+{
+    std::filesystem::path p(impl_->config.output_path);
+    if (!std::filesystem::exists(p))
+    {
+        return 0;
+    }
+
+    size_t file_size = std::filesystem::file_size(p);
+    return file_size / kRecordSize;
+}
+
+SelfPlayInferenceStats SelfPlayWorker::inference_stats() const
+{
+    SelfPlayInferenceStats out;
+    if (impl_->runner)
+    {
+        const auto rs = impl_->runner->statistics();
+        out.batches = static_cast<int64_t>(rs.batches);
+        out.positions_in_batches = static_cast<int64_t>(rs.positions);
+        out.total_inference_ms = rs.total_inference_ms;
+    }
+    const auto et = chessrl::mcts::single::encoder_totals();
+    out.encoder_calls = static_cast<int64_t>(et.calls);
+    out.total_encoder_ms = static_cast<double>(et.nanos) / 1.0e6;
+    return out;
+}
+
+} // namespace chessrl
