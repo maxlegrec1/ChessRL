@@ -249,15 +249,10 @@ def puzzle_accuracy(engine_path: str, puzzles: list[dict], sims: int) -> dict:
     }
 
 
-def calibrate(games_per_pair: int = 100, out: Path = ANCHOR_RATINGS) -> dict[str, float]:
-    """Round robin between neighbouring anchors (plus a skip-one pair) -> ratings, random = 0."""
-    names = list(ANCHORS)
-    openings = make_openings(games_per_pair // 2, seed=99)
-    pairs = [(names[i], names[i + 1]) for i in range(len(names) - 1)]
-    pairs += [(names[i], names[i + 2]) for i in range(len(names) - 2)]
-    results: list[tuple[str, str, float]] = []  # (a, b, score of a)
-    for a_name, b_name in pairs:
-        a, b = Anchor(a_name, seed=1), Anchor(b_name, seed=2)
+def _play_pair(a_name: str, b_name: str, openings: list[list[str]]) -> list[tuple[str, str, float]]:
+    a, b = Anchor(a_name, seed=1), Anchor(b_name, seed=2)
+    out = []
+    try:
         for opening in openings:
             for a_white in (True, False):
                 board = chess.Board()
@@ -268,11 +263,26 @@ def calibrate(games_per_pair: int = 100, out: Path = ANCHOR_RATINGS) -> dict[str
                     board.push(mover.move(board))
                 o = board.outcome(claim_draw=True)
                 s = 0.5 if o is None or o.winner is None else (1.0 if o.winner == a_white else 0.0)
-                results.append((a_name, b_name, s))
+                out.append((a_name, b_name, s))
+    finally:
         a.close()
         b.close()
-        print(f"{a_name} vs {b_name}: {sum(s for x, y, s in results if (x, y) == (a_name, b_name)):.1f}"
-              f"/{2 * len(openings)}", flush=True)
+    print(f"{a_name} vs {b_name}: {sum(s for *_, s in out):.1f}/{len(out)}", flush=True)
+    return out
+
+
+def calibrate(games_per_pair: int = 100, out: Path = ANCHOR_RATINGS) -> dict[str, float]:
+    """Round robin between neighbouring anchors (plus a skip-one pair) -> ratings, random = 0."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    names = list(ANCHORS)
+    openings = make_openings(games_per_pair // 2, seed=99)
+    pairs = [(names[i], names[i + 1]) for i in range(len(names) - 1)]
+    pairs += [(names[i], names[i + 2]) for i in range(len(names) - 2)]
+    results: list[tuple[str, str, float]] = []  # (a, b, score of a)
+    with ProcessPoolExecutor(max_workers=len(pairs)) as pool:
+        for chunk in pool.map(_play_pair, *zip(*pairs, strict=True), [openings] * len(pairs)):
+            results += chunk
     # Joint Bradley-Terry fit by coordinate ascent; random pinned at 0.
     ratings = {n: 200.0 * i for i, n in enumerate(names)}
     for _ in range(200):

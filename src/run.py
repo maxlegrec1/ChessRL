@@ -123,7 +123,9 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
 def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None) -> Path:
     """Load the base YAML, override every path field to point inside `run_dir`,
     write the result to <run_dir>/config.yaml, and return its path."""
-    cfg = yaml.safe_load(base_config.read_text()) or {}
+    from src.train.config import load_yaml
+
+    cfg = load_yaml(base_config)  # `extends:` chains resolved; the snapshot is self-contained
     cfg.setdefault("data", {})["dataset_path"] = str((run_dir / "buffer" / "buffer.bin").resolve())
     ckpt = cfg.setdefault("checkpoint", {})
     ckpt["dir"] = str((run_dir / "checkpoints").resolve())

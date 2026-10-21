@@ -197,13 +197,32 @@ def _merge_dataclass(instance, updates: dict[str, Any]):
             setattr(instance, key, value)
 
 
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def load_yaml(path: Path | str) -> dict:
+    """Read a config YAML, resolving `extends: <relative path>` chains (child wins)."""
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    parent = data.pop("extends", None)
+    if parent:
+        data = _deep_merge(load_yaml(path.parent / parent), data)
+    return data
+
+
 def load_config(path: Path | str) -> TrainingConfig:
     path = Path(path)
     cfg = TrainingConfig()
     if path.is_file():
-        with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
-        _merge_dataclass(cfg, data)
+        _merge_dataclass(cfg, load_yaml(path))
     cfg.checkpoint.dir = Path(cfg.checkpoint.dir)
     if cfg.checkpoint.build_script is not None:
         cfg.checkpoint.build_script = Path(cfg.checkpoint.build_script)
