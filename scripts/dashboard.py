@@ -134,7 +134,10 @@ def kpi_table(runs: dict) -> None:
             "run": name,
             "hours": round(float(last_sp.get("hours", last_tr.get("hours", 0)) or 0), 2),
             "step": int(last_tr.get("step", 0) or 0),
-            "model": f"{int(last_tr.get('model_blocks', 0) or 0)}x{int(last_tr.get('model_channels', 0) or 0)}",
+            "model": (f"enc {int(last_tr.get('model_d_model') or 0)}x{int(last_tr.get('model_layers') or 0)}"
+                      if last_tr.get("model_d_model") == last_tr.get("model_d_model") and "model_d_model" in last_tr
+                      and last_tr.get("model_d_model")
+                      else f"{int(last_tr.get('model_blocks', 0) or 0)}x{int(last_tr.get('model_channels', 0) or 0)}"),
             "params": f"{(last_tr.get('params', 0) or 0) / 1e6:.2f}M",
             "pos/s": round(float(last_sp.get("positions_per_sec", 0) or 0), 1),
             "games/s": round(float(last_sp.get("games_per_sec", 0) or 0), 2),
