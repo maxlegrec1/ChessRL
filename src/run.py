@@ -86,16 +86,17 @@ def _latest_step_checkpoint(run_dir: Path) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def _build_initial_engine(run_dir: Path) -> Path:
-    """Save a random-init SmallModel checkpoint, build the TRT engine via
-    scripts/build_trt.sh, and seed the run's .iteration file with its path."""
+def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
+    """Save a random-init checkpoint of the configured model, build the TRT
+    engine via scripts/build_trt.sh, and seed the run's .iteration file."""
     import torch  # local import; pulls torch only when launching a fresh run.
 
-    from src.models.small.small_model import SmallModel
+    from src.models.factory import build_model
+    from src.train.config import load_config
 
     init_pt = run_dir / "checkpoints" / "model_dynamic_initial.pt"
-    model = SmallModel().eval()
-    torch.save({"model": model.state_dict()}, init_pt)
+    model = build_model(load_config(base_config).model).eval()
+    torch.save({"model": model.state_dict(), "model_spec": model.spec()}, init_pt)
 
     engine_dir = run_dir / "engines"
     iter_file = engine_dir / ".iteration"
@@ -194,7 +195,7 @@ def main() -> int:
         run_dir = _make_run_dir(args.name)
         print(f"[launcher] new run -> {run_dir}", flush=True)
         if not args.no_selfplay:
-            _build_initial_engine(run_dir)
+            _build_initial_engine(run_dir, args.config)
         else:
             # Trainer-only fresh run: still need an iteration file so the
             # trainer's later build_trt invocations append cleanly.

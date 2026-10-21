@@ -6,8 +6,8 @@ from pathlib import Path
 import onnx
 import torch
 
+from src.models.factory import model_from_checkpoint
 from src.models.small.fen_encoder import INPUT_PLANES
-from src.models.small.small_model import SmallModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,9 +48,11 @@ class ExportWrapper(torch.nn.Module):
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
-    base_model = SmallModel().to(device)
-    state_dict = load_state_dict(args.ckpt_path, args.device)
-    base_model.load_state_dict(state_dict, strict=False)
+    checkpoint = torch.load(args.ckpt_path, map_location=args.device, weights_only=False)
+    if not (isinstance(checkpoint, dict) and "model" in checkpoint):
+        checkpoint = {"model": checkpoint}
+    # The architecture travels in the checkpoint (grown / encoder nets).
+    base_model = model_from_checkpoint(checkpoint, device)
     base_model.eval()
 
     model = ExportWrapper(base_model).to(device)
