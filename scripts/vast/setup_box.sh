@@ -19,9 +19,13 @@ apt-get install -y -qq --no-install-recommends git rsync tmux curl ca-certificat
 
 CUDA_MAJOR="$(nvcc --version | grep -oE 'release [0-9]+' | awk '{print $2}')"
 if ! command -v trtexec >/dev/null 2>&1 && [ ! -x /usr/src/tensorrt/bin/trtexec ]; then
-  log "TensorRT for CUDA ${CUDA_MAJOR}.x"
-  TRT_VER="$(apt-cache madison libnvinfer-dev | awk '{print $3}' | grep "+cuda${CUDA_MAJOR}\." | sort -V | tail -1)"
-  [ -n "$TRT_VER" ] || { echo "no TensorRT build for CUDA ${CUDA_MAJOR} in apt"; exit 1; }
+  # Pin the TensorRT 10 series ChessRL was built against (the repo's default is
+  # now TensorRT 11, with soname-11 packages). Override with TRT_SERIES=10.16.
+  TRT_SERIES="${TRT_SERIES:-10.14}"
+  log "TensorRT ${TRT_SERIES} for CUDA ${CUDA_MAJOR}.x"
+  TRT_VER="$(apt-cache madison libnvinfer-dev | awk '{print $3}' | grep "^${TRT_SERIES}\." \
+             | grep "+cuda${CUDA_MAJOR}\." | sort -V | tail -1)"
+  [ -n "$TRT_VER" ] || { echo "no TensorRT ${TRT_SERIES} build for CUDA ${CUDA_MAJOR} in apt"; exit 1; }
   PKGS=""
   for p in libnvinfer10 libnvinfer-dev libnvinfer-headers-dev libnvinfer-plugin10 libnvinfer-plugin-dev \
            libnvinfer-headers-plugin-dev libnvonnxparsers10 libnvonnxparsers-dev libnvinfer-bin \

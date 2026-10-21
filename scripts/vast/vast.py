@@ -96,13 +96,17 @@ def ssh_base(target: tuple[str, int]) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-def cmd_offers(a) -> None:
+def search_offers(gpus: list[str], min_cores: int, disk: int) -> list[dict]:
     rows = []
-    for gpu in a.gpu:
-        q = (f"gpu_name={gpu} num_gpus=1 cpu_cores_effective>={a.min_cores} cuda_max_good>=12.8 "
-             f"reliability>0.98 verified=true rentable=true inet_down>=200 disk_space>={a.disk}")
+    for gpu in gpus:
+        q = (f"gpu_name={gpu} num_gpus=1 cpu_cores_effective>={min_cores} cuda_max_good>=12.8 "
+             f"reliability>0.98 verified=true rentable=true inet_down>=200 disk_space>={disk}")
         rows += vast("search", "offers", q, "-o", "dph") or []
-    rows.sort(key=lambda o: o["dph_total"])
+    return sorted(rows, key=lambda o: o["dph_total"])
+
+
+def cmd_offers(a) -> None:
+    rows = search_offers(a.gpu, a.min_cores, a.disk)
     print(f"{'offer':>9} {'gpu':<10} {'$/h':>6} {'cores':>5} {'ram':>4} {'cuda':>5} {'dl':>5}  cpu / location")
     for o in rows[: a.n]:
         print(f"{o['id']:>9} {o['gpu_name']:<10} {o['dph_total']:6.3f} {o.get('cpu_cores_effective', 0):5.0f} "
@@ -112,9 +116,10 @@ def cmd_offers(a) -> None:
 
 def cmd_launch(a) -> None:
     ledger = load_ledger()
-    rows = vast("search", "offers", f"id={a.offer}") or []
+    # `search offers id=N` matches nothing, so find the offer in the usual search.
+    rows = [o for o in search_offers(["RTX_4090", "RTX_5090"], 1, a.disk) if str(o["id"]) == str(a.offer)]
     if not rows:
-        sys.exit(f"offer {a.offer} not available")
+        sys.exit(f"offer {a.offer} not available (run `offers` again)")
     offer = rows[0]
     projected = spend(ledger) + burn_rate(ledger) + offer["dph_total"]  # one more hour of everything
     if projected > LAUNCH_CAP_USD:
