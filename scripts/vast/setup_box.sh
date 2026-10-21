@@ -60,7 +60,7 @@ log "uv sync (CHESSRL_CUDA_ARCH=$CHESSRL_CUDA_ARCH)"
 uv sync -q --group dev --group viz --reinstall-package chessrl-inference-cpp
 
 cat > "$WORK/env.sh" <<EOF
-export PATH="/usr/src/tensorrt/bin:\$HOME/.local/bin:\$PATH"
+export PATH="/usr/src/tensorrt/bin:\$HOME/.local/bin:/usr/games:\$PATH"
 export CHESSRL_CUDA_ARCH=$CHESSRL_CUDA_ARCH
 export CUDA_ROOT=/usr/local/cuda
 cd $REPO

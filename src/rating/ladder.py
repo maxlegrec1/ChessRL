@@ -38,6 +38,13 @@ ANCHORS: dict[str, tuple[str, dict]] = {
 }
 
 
+def stockfish_path() -> str:
+    import shutil
+
+    # Debian/Ubuntu's package installs to /usr/games, often not on PATH.
+    return shutil.which("stockfish") or "/usr/games/stockfish"
+
+
 class Anchor:
     """A fixed opponent. Stockfish anchors keep one engine process each."""
 
@@ -47,7 +54,7 @@ class Anchor:
         self.rng = random.Random(seed)
         self.engine = None
         if self.kind == "stockfish":
-            self.engine = chess.engine.SimpleEngine.popen_uci("stockfish")
+            self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path())
             self.engine.configure({"Skill Level": self.params["skill"], "Threads": 1, "Hash": 16})
 
     def move(self, board: chess.Board) -> chess.Move:
