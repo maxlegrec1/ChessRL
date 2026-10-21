@@ -82,7 +82,22 @@ case "$cmd" in
     done
     ;;
   stop)
-    tmux kill-session -t "$1"
+    # Ctrl-C lets src.run forward SIGINT to its children (they live in their own
+    # process groups, so killing the tmux session alone orphans them).
+    session="$1"
+    tmux send-keys -t "$session" C-c 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      tmux has-session -t "$session" 2>/dev/null || break
+      sleep 1
+    done
+    tmux kill-session -t "$session" 2>/dev/null || true
+    case "$session" in
+      run-*)
+        dir="$(run_dir "${session#run-}")"
+        [ -n "$dir" ] && pkill -f "$dir/config.yaml" || true
+        ;;
+    esac
+    echo "stopped $session"
     ;;
   *)
     echo "unknown command $cmd"; exit 2
