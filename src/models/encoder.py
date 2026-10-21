@@ -103,6 +103,9 @@ class EncoderModel(nn.Module):
         self.register_buffer("v_to", to, persistent=False)
         self.register_buffer("v_promo", promo.clamp_min(0), persistent=False)
         self.register_buffer("v_special", promo < 0, persistent=False)
+        # Flat indices into the [64 x 64] from/to scores and [4 x 64] promotion scores.
+        self.register_buffer("v_ft", frm * 64 + to, persistent=False)
+        self.register_buffer("v_pt", promo.clamp_min(0) * 64 + to, persistent=False)
 
         def mlp(out: int) -> nn.Sequential:
             return nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, out))
@@ -124,12 +127,16 @@ class EncoderModel(nn.Module):
             h = block(h, x0, self.pair_bias)
         h = self.norm(h)
 
+        # logit(from, to, promo) = (q_from + promo_vec) . k_to / sqrt(d): two small
+        # matmuls, then pick the vocab entries by flat index. (Gathering a d-wide
+        # vector per vocab entry first cost ~0.75 GB per TensorRT context.)
         q = self.pol_q(h)  # [B, 64, d]
         k = self.pol_k(h)
-        scale = 1.0 / math.sqrt(q.shape[-1])
-        q_from = q[:, self.v_from]  # [B, V, d]
-        k_to = k[:, self.v_to]
-        logits = ((q_from + self.promo[self.v_promo]) * k_to).sum(-1) * scale
+        scale = 1.0 / math.sqrt(self.cfg["d_model"])
+        kt = k.transpose(1, 2)  # [B, d, 64]
+        ft = (q @ kt).reshape(b, 64 * 64)
+        pt = (self.promo @ kt).reshape(b, 4 * 64)
+        logits = (ft[:, self.v_ft] + pt[:, self.v_pt]) * scale
         logits = torch.where(self.v_special, self.special_logit.to(logits.dtype), logits)
         if not return_all:
             return logits
