@@ -121,6 +121,12 @@ instance at $200.
   puzzle first-move accuracy 17% -> 26%, A and B fell to 8-9%. Right after
   its first engine swap, A's self-play write rate dropped to ~4 records/s
   (all games restarted — bug 1 in action).
-- 2026-10-22 00:20 (Paris): growth (armD, Thailand 64-core, pinned 0-31) and
-  encoder (armE, Texas EPYC 9354) arms launched; D's first 8k steps double as
-  a seed replicate of C.
+- 2026-10-22 00:20 (Paris): growth arm (armD, Thailand 64-core, pinned 0-31)
+  started 22:23 UTC; D's first 8k steps double as a seed replicate of C.
+  Two boxes (Spain, Texas) never finished pulling the CUDA image (stuck
+  "loading" 18+ min; Vast bills only disk while loading) — destroyed.
+- Encoder bench (armE: 4090, EPYC 7742, pinned to 32 CPUs): ResNet 4x64
+  605 pos/s; enc128x4 (0.81M) 409 (-32%); enc192x4 (1.78M) 259 (-57%);
+  enc192x6 OOMs creating TensorRT contexts (649 MB each at batch 1024).
+  Attention over 64 tokens is costlier per parameter than the ResNet's convs
+  at this size, so the encoder arm uses 128x4. Started 23:09 UTC.
