@@ -1,6 +1,6 @@
 """Replay buffer reader for v2 self-play records (see cpp/selfplay.cpp).
 
-The buffer is a flat file of fixed 1024-byte records written by the C++
+The buffer is a flat file of fixed 1280-byte records written by the C++
 self-play worker. The trainer memory-maps it, samples rows (optionally from a
 window of the newest records when the buffer is a FIFO ring), and decodes
 input planes from the stored bitboards with tensor ops — no FEN parsing, no
@@ -21,9 +21,9 @@ import torch
 from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index, policy_to_idx
 
-RECORD_SIZE = 1024
+RECORD_SIZE = 1280
 RECORD_VERSION = 2
-MAX_POLICY_ENTRIES = 20
+MAX_POLICY_ENTRIES = 84
 VOCAB_SIZE = len(policy_index)
 NO_MOVE = 0xFFFF  # played_idx sentinel in the record
 IGNORE_INDEX = -100  # cross_entropy ignore_index for rows without a policy target

@@ -108,8 +108,8 @@ def reference_planes(rec: np.void, mirror: bool) -> np.ndarray:
     )
 
 
-def test_record_dtype_is_1024_bytes():
-    assert RECORD_DTYPE.itemsize == RECORD_SIZE == 1024
+def test_record_dtype_is_1280_bytes():
+    assert RECORD_DTYPE.itemsize == RECORD_SIZE == 1280
 
 
 @pytest.mark.parametrize("mirror_prob", [0.0, 1.0, 0.5])

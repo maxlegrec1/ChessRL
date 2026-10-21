@@ -214,21 +214,29 @@ class Trainer:
         cfg = self.config
         target_k = max(0.1, float(cfg.data.target_k))
         prefetch = Prefetcher(self.buffer, cfg.batch_size, cfg.mirror_prob)
-        last_refresh = time.monotonic()
 
-        # Sliding-window measurement of the self-play insertion rate g from the
-        # monotonic write counter. Records arrive in game-end bursts, so a 30 s
-        # window absorbs them; total_writes keeps moving once the buffer is full.
+        # Token-bucket pacing: the trainer may consume target_k samples per
+        # record self-play has written since training started, re-checked every
+        # 0.2 s. (main estimated the insertion rate over a 30 s window and slept
+        # batch / (k * rate); right after start the window is empty, the rate
+        # reads ~0, and the first sleep was ~2048 / 5 = 410 s.)
+        writes0 = self.buffer.total_writes
+        trained0 = self.samples_processed
+        # Insertion rate over a sliding window, for the logs only.
         g_window_seconds = 30.0
         g_history: deque = deque()
-        g_history.append((time.time(), self.buffer.total_writes))
+        g_history.append((time.time(), writes0))
         step_times: deque = deque(maxlen=50)
+        waited = 0.0
 
         try:
             while True:
-                if time.monotonic() - last_refresh >= cfg.data.reload_seconds:
-                    prefetch.refresh()
-                    last_refresh = time.monotonic()
+                prefetch.refresh()  # stat + two tiny files; keeps total_writes current
+                produced = self.buffer.total_writes - writes0
+                if self.samples_processed - trained0 >= target_k * produced:
+                    time.sleep(0.2)
+                    waited += 0.2
+                    continue
                 self._maybe_grow()
 
                 t0 = time.time()
@@ -236,31 +244,20 @@ class Trainer:
                 expensive = self.step % max(1, cfg.expensive_metrics_every) == 0
                 metrics = self._train_step(batch, expensive)
                 t1 = time.time()
-                step_times.append(t1 - t0)
+                step_dt = t1 - t0
+                step_times.append(step_dt)
 
                 cur_writes = self.buffer.total_writes
                 g_history.append((t1, cur_writes))
-                while len(g_history) > 2 and (t1 - g_history[0][0]) > max(g_window_seconds * 4, 300.0):
+                while len(g_history) > 2 and (t1 - g_history[0][0]) > g_window_seconds:
                     g_history.popleft()
-                anchor_t, anchor_w = g_history[0]
-                for ts, w in g_history:
-                    if t1 - ts < g_window_seconds:
-                        break
-                    anchor_t, anchor_w = ts, w
-                window_dt = max(1e-3, t1 - anchor_t)
-                g = max(0.0, (cur_writes - anchor_w) / window_dt)
-                # Until the window fills, cap g so one burst doesn't make the trainer sprint.
-                g_for_pacing = min(g, 50.0) if window_dt < g_window_seconds * 0.5 else g
-                target_step_interval = cfg.batch_size / max(1e-3, target_k * max(g_for_pacing, 1.0))
-                step_dt = t1 - t0
-                sleep_for = max(0.0, target_step_interval - step_dt)
-                time.sleep(sleep_for)
+                window_dt = max(1e-3, t1 - g_history[0][0])
+                g = max(0.0, (cur_writes - g_history[0][1]) / window_dt)
 
                 self.step += 1
                 self.samples_processed += cfg.batch_size
 
                 if self.step % cfg.log_every == 0:
-                    eff = max(step_dt, target_step_interval)
                     row = {k: float(v) for k, v in metrics.items()}
                     row.update(
                         step=self.step,
@@ -271,9 +268,8 @@ class Trainer:
                         **{f"model_{k}": v for k, v in self.model.spec().items() if k != "arch"},
                         **{
                             "pacing/g_records_per_sec": g,
-                            "pacing/s_records_per_sec": cfg.batch_size / max(1e-6, eff),
-                            "pacing/k_actual": (cfg.batch_size / max(1e-6, eff)) / max(1e-6, g),
-                            "pacing/sleep_s": sleep_for,
+                            "pacing/k_actual": (self.samples_processed - trained0) / max(1, produced),
+                            "pacing/waited_s": waited,
                             "pacing/step_time_s": float(np.mean(step_times)),
                             "buffer/window": self.buffer.current_window(),
                             "buffer/records": self.buffer.size,

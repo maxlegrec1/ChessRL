@@ -31,7 +31,7 @@ namespace chessrl
 namespace
 {
 
-// On-disk record layout v2 (1024 bytes, fixed). Bytes [0..832) keep the v1
+// On-disk record layout v2 (1280 bytes, fixed). Bytes [0..832) keep the v1
 // layout; v2 appends the current position's bitboards and scalar state (so the
 // trainer builds input planes without parsing FEN) and the MCTS visit
 // distribution (the soft policy target).
@@ -56,9 +56,11 @@ namespace
 //   [938..940)  simulations used for this search (u16)
 //   [940..942)  number of policy entries K (u16)
 //   [942..944)  played move vocab index (u16), 0xFFFF = not in vocab
-//   [944..1024) K <= 20 policy entries (u16 vocab index, u16 visit fraction * 65535),
-//               sorted by visits, descending
-constexpr size_t kRecordSize = 1024;
+//   [944..1280) K <= 84 policy entries (u16 vocab index, u16 visit fraction * 65535),
+//               sorted by visits, descending. 84 covers virtually every chess
+//               position; a top-20 cap kept only ~74% of the visit mass early on,
+//               when an untrained net spreads visits over every legal move.
+constexpr size_t kRecordSize = 1280;
 constexpr size_t kFenOffset = 0;
 constexpr size_t kPolicyOffset = 100;
 constexpr size_t kValueOutcomeOffset = 116;
@@ -83,7 +85,7 @@ constexpr size_t kSimsOffset = 938;
 constexpr size_t kPolicyCountOffset = 940;
 constexpr size_t kPlayedIndexOffset = 942;
 constexpr size_t kPolicyEntriesOffset = 944;
-constexpr size_t kMaxPolicyEntries = 20;
+constexpr size_t kMaxPolicyEntries = 84;
 static_assert(kPastBitboardsOffset + kHistoricalSlots * kBitboardSlotBytes == kCurrentBitboardsOffset,
               "record layout math is inconsistent");
 static_assert(kCurrentBitboardsOffset + kBitboardSlotBytes == kVersionOffset,

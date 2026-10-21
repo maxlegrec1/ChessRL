@@ -10,3 +10,15 @@ requires-python = ">=3.13"
 
 [tool.setuptools]
 py-modules = []
+
+# Rebuild the extension whenever a C++/CUDA source changes (uv's default
+# cache keys only watch the packaging files).
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "*.cpp" },
+    { file = "*.hpp" },
+    { file = "include/*.hpp" },
+    { file = "mcts/*" },
+]
