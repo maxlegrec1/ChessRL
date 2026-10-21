@@ -41,6 +41,13 @@ class DataConfig:
     # measured self-play insertion rate. AZ-conservative ≈ 3, LC0-typical ≈ 5,
     # aggressive ≈ 10+.
     target_k: float = 5.0
+    # Recent-data sampling window (KataGo-style growth). Requires a FIFO buffer
+    # (selfplay.fifo_buffer). Window over the newest records:
+    #   W(N) = c * (1 + beta * ((N / c) ** alpha - 1) / alpha), capped by the buffer,
+    # where N = total records ever written. window_c <= 0 samples the whole buffer.
+    window_c: int = 0
+    window_alpha: float = 0.75
+    window_beta: float = 0.4
 
 
 @dataclass
@@ -73,6 +80,20 @@ class SelfPlayConfig:
     # this many uniform-random legal plies before MCTS takes over. 0 = always
     # start from the standard startpos (current behavior).
     random_opening_plies: int = 0
+    # ---- Next-round signal fixes (mirror cpp/selfplay.hpp; defaults = main behaviour) ----
+    temperature_plies: int = -1  # -1: temperature_at_root for the whole game
+    temperature_late: float = 0.0  # root temperature after temperature_plies (0 = argmax)
+    resign_threshold: float = 0.0  # expected score below which the side to move resigns; 0 = off
+    resign_consecutive: int = 2
+    resign_playthrough: float = 0.1  # fraction of games that never resign (false-positive audit)
+    max_plies: int = 600
+    pcr_full_prob: float = 1.0  # playout-cap randomization; 1.0 = every move is a full search
+    pcr_fast_simulations: int = 100
+    fifo_buffer: bool = False  # ring buffer instead of random replacement when full
+    curriculum_prob: float = 0.0  # P(game starts from a random sparse legal position)
+    curriculum_max_pieces: int = 4
+    # Linear anneal of curriculum_prob to 0 over this many trainer steps (0 = constant).
+    curriculum_anneal_steps: int = 0
 
 
 @dataclass
@@ -85,6 +106,44 @@ class LossWeightsConfig:
     value_q: float = 1.0
     mlh: float = 0.05
     mlh_q: float = 0.05
+
+
+@dataclass
+class ModelConfig:
+    """Network architecture. Stored in every checkpoint so export can rebuild it."""
+
+    arch: str = "resnet"  # "resnet" | "encoder"
+    # ResNet trunk (main: 4 blocks x 64 channels).
+    blocks: int = 4
+    channels: int = 64
+    # Encoder trunk.
+    d_model: int = 128
+    layers: int = 4
+    heads: int = 8
+    d_ff: int = 256
+
+
+@dataclass
+class GrowthConfig:
+    """Function-preserving trunk growth during training (ResNet only).
+
+    `schedule` lists [trainer_step, blocks, channels] stages; at each step the
+    trunk grows to that size (zero-init residual blocks for depth, Net2Wider
+    for width), so the network's output is unchanged at the moment of growth."""
+
+    schedule: list = field(default_factory=list)
+    lr_rewarmup_steps: int = 200
+
+
+@dataclass
+class ScheduleConfig:
+    """Learning-rate schedule on top of `learning_rate`."""
+
+    kind: str = "constant"  # "constant" | "cosine" | "steps"
+    warmup_steps: int = 0
+    total_steps: int = 0  # cosine horizon
+    final_ratio: float = 0.1  # cosine floor as a fraction of learning_rate
+    drops: list = field(default_factory=list)  # [[step, factor], ...] for "steps"
 
 
 @dataclass
@@ -104,8 +163,22 @@ class TrainingConfig:
     amp_dtype: str = "float16"
     resume_path: Path | None = None
     run_name: str | None = None
-    teacher_decay: float = 0.8
+    teacher_decay: float = 0.8  # unused (the EMA teacher was removed); kept so old configs load
     teacher_weight: float = 0.2
+    # ---- Next-round trainer options (defaults = main behaviour) ----
+    model: ModelConfig = field(default_factory=ModelConfig)
+    growth: GrowthConfig = field(default_factory=GrowthConfig)
+    lr_schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    optimizer: str = "adam"  # "adam" | "adamw"
+    grad_clip: float = 0.0  # 0 = off
+    # "played": one-hot on the move actually played (main). "visits": MCTS
+    # visit distribution stored in the v2 record.
+    policy_target: str = "played"
+    mirror_prob: float = 0.5  # colour-flip augmentation probability
+    compile: bool = False  # torch.compile the training step's forward
+    async_engine_build: bool = False  # build TRT engines in the background
+    metrics_path: Path | None = None  # JSONL metrics for the dashboard
+    expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +213,8 @@ def load_config(path: Path | str) -> TrainingConfig:
     if cfg.wandb.dir is not None:
         cfg.wandb.dir = Path(cfg.wandb.dir)
     cfg.data.dataset_path = Path(cfg.data.dataset_path)
+    if cfg.metrics_path is not None:
+        cfg.metrics_path = Path(cfg.metrics_path)
     if cfg.resume_path:
         cfg.resume_path = Path(cfg.resume_path)
     return cfg

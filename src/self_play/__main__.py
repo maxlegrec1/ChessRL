@@ -1,20 +1,62 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
 
 import _inference_cpp
-from rich import box
 from rich.console import Console
-from rich.live import Live
-from rich.table import Table
 
 from src.train.config import SelfPlayConfig, TrainingConfig, load_config
 
 from .engine_watch import EngineWatcher
-from .metrics import MetricsTracker
+
+# Fields copied from the Python SelfPlayConfig onto the C++ one (same names).
+_CPP_FIELDS = (
+    "threads",
+    "hash_size",
+    "simulations",
+    "cpuct",
+    "temperature",
+    "temperature_at_root",
+    "virtual_loss_width",
+    "use_dirichlet",
+    "dirichlet_alpha",
+    "dirichlet_epsilon",
+    "max_buffer_size",
+    "save_pgn",
+    "random_opening_plies",
+    "temperature_plies",
+    "temperature_late",
+    "resign_threshold",
+    "resign_consecutive",
+    "resign_playthrough",
+    "max_plies",
+    "pcr_full_prob",
+    "pcr_fast_simulations",
+    "fifo_buffer",
+    "curriculum_prob",
+    "curriculum_max_pieces",
+)
+
+_STAT_FIELDS = (
+    "games",
+    "white_wins",
+    "black_wins",
+    "draws",
+    "game_plies",
+    "end_checkmate",
+    "end_resign",
+    "end_max_plies",
+    "full_searches",
+    "fast_searches",
+    "records_written",
+    "curriculum_games",
+)
+
+METRICS_EVERY_S = 30.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,51 +70,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def render_dashboard_cpp(metrics: MetricsTracker, worker_metrics: dict, board_count: int) -> Table:
-    snapshot = metrics.snapshot()
-    table = Table(title="Self-Play Generator (C++)", box=box.SIMPLE_HEAVY, expand=True)
-    table.add_column("Metric", justify="right")
-    table.add_column("Value", justify="left")
-
-    table.add_row("Positions/hour", f"{snapshot.positions_per_hour:,.0f}")
-    table.add_row("Positions/sec", f"{snapshot.positions_per_sec:,.2f}")
-    table.add_row("Nodes/sec", f"{worker_metrics.get('nodes_per_sec', 0):,.0f}")
-    table.add_row("Total positions", f"{snapshot.total_positions:,}")
-    table.add_row("Total games", f"{snapshot.total_games:,}")
-    table.add_row("Boards", f"{board_count}")
-    table.add_row("Buffer size", f"{worker_metrics.get('buffer_size', 0):,}")
-    table.add_row("Engine", str(snapshot.engine_path) if snapshot.engine_path else "unknown")
-
-    if snapshot.last_engine_swap:
-        age_minutes = max(0.0, (time.time() - snapshot.last_engine_swap) / 60.0)
-        table.add_row("Last engine swap", f"{age_minutes:.1f} min ago")
-    else:
-        table.add_row("Last engine swap", "n/a")
-
-    return table
+def curriculum_prob_at(sp: SelfPlayConfig, trainer_step: int) -> float:
+    """curriculum_prob linearly annealed to 0 over curriculum_anneal_steps."""
+    if sp.curriculum_anneal_steps <= 0:
+        return sp.curriculum_prob
+    return sp.curriculum_prob * max(0.0, 1.0 - trainer_step / sp.curriculum_anneal_steps)
 
 
-def _build_worker(engine_path: str, buffer_path: Path, sp: SelfPlayConfig):
-    return _inference_cpp.SelfPlayWorker(
-        engine_path=engine_path,
-        output_path=str(buffer_path),
-        batch_size=sp.boards,
-        threads=sp.threads,
-        hash_size=sp.hash_size,
-        max_games=-1,
-        max_buffer_size=sp.max_buffer_size,
-        save_pgn=sp.save_pgn,
-        pgn_dir=str(sp.pgn_dir),
-        simulations=sp.simulations,
-        cpuct=sp.cpuct,
-        temperature=sp.temperature,
-        temperature_at_root=sp.temperature_at_root,
-        use_dirichlet=sp.use_dirichlet,
-        dirichlet_alpha=sp.dirichlet_alpha,
-        dirichlet_epsilon=sp.dirichlet_epsilon,
-        random_opening_plies=sp.random_opening_plies,
-        virtual_loss_width=sp.virtual_loss_width,
-    )
+def build_cpp_config(
+    sp: SelfPlayConfig, engine_path: str, buffer_path: Path, trainer_step: int
+) -> _inference_cpp.SelfPlayConfig:
+    cfg = _inference_cpp.SelfPlayConfig()
+    for name in _CPP_FIELDS:
+        setattr(cfg, name, getattr(sp, name))
+    cfg.engine_path = engine_path
+    cfg.output_path = str(buffer_path)
+    cfg.concurrency = sp.boards
+    cfg.max_games = -1
+    cfg.pgn_dir = str(sp.pgn_dir)
+    cfg.curriculum_prob = curriculum_prob_at(sp, trainer_step)
+    return cfg
 
 
 def main() -> int:
@@ -85,58 +102,91 @@ def main() -> int:
     buffer_path = config.data.dataset_path.resolve()
     iteration_path = config.checkpoint.iteration_file.resolve()
     buffer_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_dir = config.checkpoint.dir.parent / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_file = metrics_dir / "selfplay.jsonl"
 
     engine_watcher = EngineWatcher(iteration_path, poll_interval=float(sp.poll_seconds))
-    metrics = MetricsTracker(simulations_per_position=sp.simulations)
 
     console.log("Starting C++ self-play loop...")
     console.log(f"Buffer: {buffer_path}")
     console.log(
         f"MCTS: simulations={sp.simulations} cpuct={sp.cpuct} "
         f"temperature={sp.temperature} root_temp={sp.temperature_at_root} "
+        f"temp_plies={sp.temperature_plies} late_temp={sp.temperature_late} "
         f"dirichlet={sp.use_dirichlet}(alpha={sp.dirichlet_alpha}, eps={sp.dirichlet_epsilon}) "
-        f"random_opening_plies={sp.random_opening_plies}"
+        f"random_opening_plies={sp.random_opening_plies} resign={sp.resign_threshold} "
+        f"pcr={sp.pcr_full_prob}/{sp.pcr_fast_simulations} fifo={sp.fifo_buffer} "
+        f"curriculum={sp.curriculum_prob}(anneal {sp.curriculum_anneal_steps})"
     )
-    if sp.save_pgn:
-        console.log(f"Saving PGNs to: {sp.pgn_dir}")
 
     worker = None
-    current_engine_path: str | None = None
+    current_curriculum = None
+    window_t = time.time()
+    window_positions = 0
+    window_nodes = 0
+    window_games = 0
+    window_steps = 0
+    window_runtime = 0.0
 
     try:
-        with Live(console=console, refresh_per_second=4) as live:
-            while True:
-                new_engine = engine_watcher.maybe_refresh()
-                if new_engine:
-                    metrics.update_engine_path(new_engine)
-                    current_engine_path = str(new_engine)
-                    worker = _build_worker(current_engine_path, buffer_path, sp)
-                    console.log(f"Initialized worker with engine: {current_engine_path}")
+        while True:
+            new_engine = engine_watcher.maybe_refresh()
+            if worker is None:
+                engine_path = engine_watcher.engine_path
+                if not engine_path:
+                    console.log("Waiting for an engine in .iteration ...")
+                    time.sleep(5)
+                    engine_watcher._refresh(force=True)
+                    continue
+                step = engine_watcher.engine_step
+                worker = _inference_cpp.SelfPlayWorker(
+                    build_cpp_config(sp, engine_path, buffer_path, step)
+                )
+                current_curriculum = curriculum_prob_at(sp, step)
+                console.log(f"Initialized worker with engine: {engine_path} (step {step})")
+            elif new_engine:
+                # Swap in place: games in progress keep going on the new net.
+                worker.set_engine(new_engine)
+                step = engine_watcher.engine_step
+                curriculum = curriculum_prob_at(sp, step)
+                if curriculum != current_curriculum:
+                    worker.set_config(build_cpp_config(sp, new_engine, buffer_path, step))
+                    current_curriculum = curriculum
+                console.log(f"Swapped engine: {new_engine} (step {step}, curriculum {curriculum:.3f})")
 
-                if not worker:
-                    if not current_engine_path:
-                        current_engine_path = engine_watcher.engine_path
-                    if current_engine_path:
-                        metrics.update_engine_path(Path(current_engine_path))
-                        worker = _build_worker(str(current_engine_path), buffer_path, sp)
-                        console.log(f"Initialized worker with engine: {current_engine_path}")
-                    else:
-                        live.update(Table(title="Waiting for engine...", box=box.SIMPLE_HEAVY))
-                        time.sleep(5)
-                        continue
+            step_metrics = worker.step()
+            window_positions += step_metrics.positions_generated
+            window_nodes += step_metrics.nodes_evaluated
+            window_games += step_metrics.games_finished
+            window_runtime += step_metrics.runtime_seconds
+            window_steps += 1
 
-                step_metrics = worker.step()
-                metrics.record_positions(step_metrics.positions_generated)
-                metrics.record_game_finished(step_metrics.games_finished)
-
-                nps = 0
-                if step_metrics.runtime_seconds > 0:
-                    nps = step_metrics.nodes_evaluated / step_metrics.runtime_seconds
-
-                buffer_size = worker.get_buffer_size()
-                worker_stats = {"nodes_per_sec": nps, "buffer_size": buffer_size}
-
-                live.update(render_dashboard_cpp(metrics, worker_stats, sp.boards))
+            now = time.time()
+            if now - window_t >= METRICS_EVERY_S:
+                dt = now - window_t
+                stats = worker.stats()
+                row = {
+                    "t": now,
+                    "engine_step": engine_watcher.engine_step,
+                    "positions_per_sec": window_positions / dt,
+                    "nodes_per_sec": window_nodes / dt,
+                    "games_per_sec": window_games / dt,
+                    "step_seconds": window_runtime / max(1, window_steps),
+                    "buffer_records": worker.get_buffer_size(),
+                    "curriculum_prob": current_curriculum,
+                    **{f"total_{k}": getattr(stats, k) for k in _STAT_FIELDS},
+                }
+                with metrics_file.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row) + "\n")
+                console.log(
+                    f"pos/s={row['positions_per_sec']:.1f} nodes/s={row['nodes_per_sec']:,.0f} "
+                    f"games/s={row['games_per_sec']:.2f} games={stats.games:,} "
+                    f"records={stats.records_written:,} engine_step={row['engine_step']}"
+                )
+                window_t = now
+                window_positions = window_nodes = window_games = window_steps = 0
+                window_runtime = 0.0
 
     except KeyboardInterrupt:
         console.log("Stopping self-play loop...")
