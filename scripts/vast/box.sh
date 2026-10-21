@@ -23,8 +23,9 @@ case "$cmd" in
     git reset -q --hard "origin/$branch"
     git submodule update -q --init
     uv sync -q --group dev --group viz
-    cp scripts/vast/box.sh /workspace/box.sh
     git log -1 --format='%h %s'
+    # Atomic rename: bash is still reading this very file.
+    cp scripts/vast/box.sh /workspace/box.sh.new && mv /workspace/box.sh.new /workspace/box.sh
     ;;
   run)
     cfg="$1"; name="$2"; gpu="${3:-0}"
