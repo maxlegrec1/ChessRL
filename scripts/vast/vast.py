@@ -59,9 +59,11 @@ def active(ledger: dict) -> dict:
 
 
 def by_label(ledger: dict, label: str) -> tuple[str, dict]:
-    for iid, inst in ledger["instances"].items():
-        if inst["label"] == label or iid == label:
-            return iid, inst
+    # Prefer a live instance: a label can be reused after its box was destroyed.
+    matches = [(iid, inst) for iid, inst in ledger["instances"].items() if inst["label"] == label or iid == label]
+    live = [m for m in matches if m[1].get("ended") is None]
+    if live or matches:
+        return (live or matches)[-1]
     sys.exit(f"no instance labelled {label!r}")
 
 
@@ -117,7 +119,8 @@ def cmd_offers(a) -> None:
 def cmd_launch(a) -> None:
     ledger = load_ledger()
     # `search offers id=N` matches nothing, so find the offer in the usual search.
-    rows = [o for o in search_offers(["RTX_4090", "RTX_5090"], 1, a.disk) if str(o["id"]) == str(a.offer)]
+    # Same filters as `offers` (a looser query hits the result cap before cheap 32-core boxes).
+    rows = [o for o in search_offers(["RTX_4090", "RTX_5090"], 32, a.disk) if str(o["id"]) == str(a.offer)]
     if not rows:
         sys.exit(f"offer {a.offer} not available (run `offers` again)")
     offer = rows[0]
