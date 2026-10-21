@@ -96,4 +96,18 @@ instance at $200.
   first ladder rating 55 ± 42 Elo, puzzles 6.3% (68 s per rating).
 - Anchor calibration: Stockfish skill 0 at 1/10/50 nodes all land within
   ~50 Elo (skill caps depth), so random-move mixtures fill the greedy ->
-  Stockfish gap.
+  Stockfish gap. Final ladder: random 0, sf_s0_r50 504, greedy 561,
+  sf_s0_r25 778, sf_s0_n50 1224, sf_s5_n300 1428, sf_s10_n1000 1712,
+  sf_s20_n1000 2068, sf_s20_n5000 2420, sf_s20_n20000 2663.
+- Size bench (4090, 800 sims, 32 cores): 4x64 633 pos/s, 6x96 564,
+  8x128 471, 10x128 456, 12x160 232, 16x192 181 — growth stops at 10x128.
+- Phase 1 arms started: A (main as-is, armA, CPUs 32-63 — shares a host with
+  dev1) 20:44; B (infra) 21:02; C (signal) restarted 21:06 after the fix below.
+- **Bug 3 (main): the search value never sees game results.** main exports
+  value_q / mlh_q to the engine, heads trained only on the search's own
+  backed-up values. First 45 min of arm C: 98.7% of search-WDL targets had
+  max prob < 0.4 (mean entropy 1.092 vs ln 3 = 1.0986), value_q loss pinned at
+  1.0977, while game outcomes were informative (W 25% / D 51% / L 24%). A
+  fixed point grounded only by mates inside the tree. `search_heads: outcome`
+  feeds MCTS the result-trained value / true-plies mlh instead (AlphaZero).
+  The 45-minute pre-fix run is kept as `signal-v0`.
