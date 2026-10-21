@@ -66,6 +66,7 @@ export CUDA_ROOT=/usr/local/cuda
 cd $REPO
 EOF
 grep -q 'workspace/env.sh' "$HOME/.bashrc" 2>/dev/null || echo 'source /workspace/env.sh' >> "$HOME/.bashrc"
+cp scripts/vast/box.sh "$WORK/box.sh"
 
 log "import check"
 uv run python -c "import _inference_cpp, torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
