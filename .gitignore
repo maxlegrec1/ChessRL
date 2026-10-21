@@ -20,6 +20,7 @@ wheels/
 *.parquet
 *.bin
 *.lock
+!uv.lock
 *.so
 
 # Generated state and runs

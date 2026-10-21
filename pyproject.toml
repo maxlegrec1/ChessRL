@@ -1,7 +1,7 @@
 [project]
 name = "chessrl"
 version = "0.1.0"
-description = "Add your description here"
+description = "A small AlphaZero from scratch"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -10,28 +10,19 @@ dependencies = [
     "python-chess>=1.999",
     "torch>=2.9.0",
     "tqdm>=4.67.1",
-    "torchtune",
-    "torchao",
     "rich>=14.2.0",
     "wandb>=0.23,<1",
-    "torch-tensorrt>=2.9.0",
-    "pip>=25.3",
-    "pybind11>=3.0.1",
     "onnx>=1.19.1",
-    "onnxscript>=0.5.6",
-    "nvidia-modelopt>=0.37.0",
-    "onnx-graphsurgeon>=0.5.8",
-    "onnxruntime>=1.23.2",
-    "pycuda>=2025.1.2",
-    "pyarrow>=17.0.0",
     "pyyaml>=6.0.2",
     "chessrl-inference-cpp",
+]
+
+[dependency-groups]
+viz = [
     "matplotlib>=3.10.9",
     "streamlit>=1.30,<2",
     "plotly>=5.24,<7",
 ]
-
-[dependency-groups]
 dev = [
     "pytest>=8.0",
     "ruff>=0.7,<1",
@@ -40,16 +31,15 @@ dev = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.workspace]
 members = ["cpp"]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torch-tensorrt = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu128" }
 chessrl-inference-cpp = { workspace = true }
 
 [tool.pytest.ini_options]
