@@ -158,6 +158,33 @@ def cmd_ssh(a) -> None:
     os.execvp("ssh", ssh_base(target) + a.cmd)
 
 
+def cmd_bootstrap(a) -> None:
+    """Wait for ssh, then run scripts/vast/setup_box.sh (fetched by commit SHA) in the background."""
+    ledger = load_ledger()
+    iid, inst = by_label(ledger, a.label)
+    out = subprocess.run(["git", "ls-remote", "https://github.com/maxlegrec1/ChessRL.git",
+                          f"refs/heads/{a.branch}"], capture_output=True, text=True, check=True).stdout
+    sha = out.split()[0]
+    url = f"https://raw.githubusercontent.com/maxlegrec1/ChessRL/{sha}/scripts/vast/setup_box.sh"
+    deadline = time.time() + a.timeout
+    while time.time() < deadline:
+        target = None
+        try:
+            target = ssh_target(iid)
+        except Exception:
+            pass
+        if target:
+            r = subprocess.run(ssh_base(target) + [
+                f"mkdir -p /workspace && cd /workspace && curl -fsSL {url} -o setup_box.sh && "
+                f"(nohup bash setup_box.sh {a.branch} > setup.log 2>&1 &) && echo started"],
+                capture_output=True, text=True)
+            if "started" in r.stdout:
+                print(f"{inst['label']}: setup started from {sha[:8]} (tail /workspace/setup.log)")
+                return
+        time.sleep(20)
+    sys.exit(f"{inst['label']}: ssh not ready after {a.timeout}s")
+
+
 def destroy(ledger: dict, iid: str) -> None:
     subprocess.run(["vastai", "destroy", "instance", iid], capture_output=True, text=True)
     ledger["instances"][iid]["ended"] = time.time()
@@ -275,6 +302,11 @@ def main() -> None:
     s.add_argument("label")
     s.add_argument("cmd", nargs=argparse.REMAINDER)
     s.set_defaults(fn=cmd_ssh)
+    b = sub.add_parser("bootstrap")
+    b.add_argument("label")
+    b.add_argument("--branch", default="worktree-next-round")
+    b.add_argument("--timeout", type=int, default=1200)
+    b.set_defaults(fn=cmd_bootstrap)
     d = sub.add_parser("destroy")
     d.add_argument("label")
     d.set_defaults(fn=cmd_destroy)

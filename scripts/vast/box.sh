@@ -11,6 +11,10 @@
 set -euo pipefail
 source /workspace/env.sh
 RUNS=/workspace/ChessRL/artifacts/runs
+# CPUS=0-31 box.sh run ... pins the run (and its ladder) to those CPUs so every
+# arm gets the same core count whatever box it lands on.
+PIN=""
+[ -n "${CPUS:-}" ] && PIN="taskset -c $CPUS"
 cmd="${1:-status}"
 shift || true
 
@@ -29,17 +33,17 @@ case "$cmd" in
     ;;
   run)
     cfg="$1"; name="$2"; gpu="${3:-0}"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu uv run python -m src.run --config $cfg --name $name 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --config $cfg --name $name 2>&1 | tee -a /workspace/run-$name.log"
     echo "started run-$name on GPU $gpu"
     ;;
   resume)
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu uv run python -m src.run --resume $dir 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --resume $dir 2>&1 | tee -a /workspace/run-$name.log"
     echo "resumed $dir"
     ;;
   ladder)
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
+    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
     echo "ladder for $dir"
     ;;
   dash)
@@ -60,11 +64,11 @@ case "$cmd" in
     # main-run <name> [gpu]: main's own launcher + config, W&B offline; the
     # metrics adapter and the ladder daemon come from the next-round checkout.
     name="$1"; gpu="${2:-0}"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && cd /workspace/ChessRL-main && CUDA_VISIBLE_DEVICES=$gpu WANDB_MODE=offline uv run python -m src.run --name $name 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && cd /workspace/ChessRL-main && CUDA_VISIBLE_DEVICES=$gpu WANDB_MODE=offline $PIN uv run python -m src.run --name $name 2>&1 | tee -a /workspace/run-$name.log"
     sleep 90
     dir="$(ls -d /workspace/ChessRL-main/artifacts/runs/*_"$name" | sort | tail -1)"
     tmux new -d -s "legacy-$name" "source /workspace/env.sh && uv run python scripts/legacy_metrics.py --run-dir $dir"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
+    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
     echo "main run in $dir"
     ;;
   calibrate)
