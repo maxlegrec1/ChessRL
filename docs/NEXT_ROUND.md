@@ -53,6 +53,47 @@ Rented boxes: RTX 4090 / 5090 with ≥32 effective CPU cores (MCTS is CPU-bound)
 The guard refuses new launches above $180 committed and destroys every
 instance at $200.
 
+## Measurement protocol (for the write-up)
+
+- **Arms.** A = `main@128893c` untouched (`box.sh main-setup` / `main-run`);
+  B = `configs/main.yaml` (main's recipe on the new infrastructure);
+  C = `configs/signal.yaml` (B + learning-signal fixes); later D = growth,
+  E = encoder, then the tuned recipe.
+- **Hardware.** One single-GPU box per arm (RTX 4090/5090, >=32 cores). The
+  speedup is reported as two factors measured separately: learning efficiency
+  (Elo vs self-play positions, hardware independent) and throughput
+  (positions per hour; `scripts/bench_sizes.py` on one box + per-arm logs).
+- **Strength.** Anchor ladder: random mover, greedy capture, node-limited
+  Stockfish at several skills plus skill-0 Stockfish mixed with random moves —
+  node limits keep it CPU-speed independent. Anchors are calibrated once by a
+  round robin (random = 0, `src/rating/anchors.json`). Every 30 min (same
+  cadence in every arm) the newest engine plays 48 paired-opening games
+  (MCTS-100) against the two anchors nearest its last estimate; Elo is the MLE
+  against fixed anchor ratings, with a standard error. Plus strict-line
+  accuracy on 1,000 Lichess puzzles (200 per rating band).
+- **Headline.** Time (and positions) to first reach fixed ladder thresholds,
+  per arm, with uncertainty from the ladder standard errors. Raw JSONL for
+  every chart is synced home to `~/chessrl-runs/<box>/`.
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.
+- 2026-10-21 — dev box `dev1` (RTX 4090, 32 cores, $0.61/h). C++ built first
+  try on TensorRT 10.14 (apt now defaults to TRT 11, pinned back); 69/69
+  tests pass on GPU; 3,000 C++-written v2 records validated against
+  python-chess (`scripts/check_buffer.py`).
+- Bugs found in main while wiring this up:
+  1. Every engine swap rebuilt the self-play worker, discarding all 1,024
+     games in progress (records are only flushed at game end) — long games
+     could never finish. Now `SelfPlayWorker.set_engine()` swaps in place.
+  2. Trainer pacing slept ~410 s on its first step (rate estimated from an
+     empty window). Now a token bucket: target_k samples per new record.
+- Top-20 visit entries kept only 74% of the visit mass (p10 58%) under an
+  untrained net — records widened to 84 entries (1,280 bytes).
+- Smoke run (signal config, untrained net, 4090): ~450-500 recorded
+  positions/s (25% full searches), ~500k nodes/s, 13-16 games/s; policy loss
+  6.41 -> 4.29 in 200 steps; in-place engine swap at step 200 confirmed;
+  first ladder rating 55 ± 42 Elo, puzzles 6.3% (68 s per rating).
+- Anchor calibration: Stockfish skill 0 at 1/10/50 nodes all land within
+  ~50 Elo (skill caps depth), so random-move mixtures fill the greedy ->
+  Stockfish gap.
