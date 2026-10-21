@@ -29,6 +29,8 @@ _PIECE_VALUE = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, 
 ANCHORS: dict[str, tuple[str, dict]] = {
     "random": ("random", {}),
     "greedy": ("greedy", {}),
+    "sf_s0_n1": ("stockfish", {"skill": 0, "nodes": 1}),
+    "sf_s0_n10": ("stockfish", {"skill": 0, "nodes": 10}),
     "sf_s0_n50": ("stockfish", {"skill": 0, "nodes": 50}),
     "sf_s5_n300": ("stockfish", {"skill": 5, "nodes": 300}),
     "sf_s10_n1000": ("stockfish", {"skill": 10, "nodes": 1000}),
