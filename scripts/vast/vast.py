@@ -32,7 +32,7 @@ RUNS_HOME = Path.home() / "chessrl-runs"
 CAP_USD = 200.0
 LAUNCH_CAP_USD = 180.0
 IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
-BOX_RUNS = "/workspace/ChessRL/artifacts/runs/"
+BOX_RUNS = ("/workspace/ChessRL/artifacts/runs/", "/workspace/ChessRL-main/artifacts/runs/")
 DASHBOARD_PORT = 8501
 
 
@@ -248,9 +248,11 @@ def cmd_sync(a) -> None:
         ssh = f"ssh -p {port} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
         filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
                    "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", "--exclude=*"]
-        r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
-                            f"root@{host}:{BOX_RUNS}", f"{dest}/"], capture_output=True, text=True)
-        print(f"sync {inst['label']}: rc={r.returncode} {r.stderr.strip()[:200]}")
+        for src in BOX_RUNS:
+            r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
+                                f"root@{host}:{src}", f"{dest}/"], capture_output=True, text=True)
+            if r.returncode not in (0, 23):  # 23: source dir absent on this box
+                print(f"sync {inst['label']} {src}: rc={r.returncode} {r.stderr.strip()[:200]}")
 
 
 def main() -> None:

@@ -23,7 +23,8 @@ import streamlit as st
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS_ROOT = Path(os.environ.get("CHESSRL_RUNS_ROOT", ROOT / "artifacts" / "runs"))
+# One or more run roots, colon-separated (e.g. the next-round and main checkouts).
+RUNS_ROOTS = [Path(p) for p in os.environ.get("CHESSRL_RUNS_ROOT", str(ROOT / "artifacts" / "runs")).split(":")]
 BUDGET = Path(os.environ.get("CHESSRL_BUDGET", "/workspace/budget.json"))
 PALETTE = ["#3b82f6", "#f97316", "#10b981", "#e11d48", "#8b5cf6", "#eab308", "#06b6d4", "#64748b"]
 
@@ -74,9 +75,7 @@ def load_run(run_dir: str) -> dict:
 
 
 def list_runs() -> list[Path]:
-    if not RUNS_ROOT.exists():
-        return []
-    runs = [p for p in RUNS_ROOT.rglob("metrics") if p.is_dir()]
+    runs = [p for root in RUNS_ROOTS if root.exists() for p in root.rglob("metrics") if p.is_dir()]
     return sorted({p.parent for p in runs}, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
@@ -187,7 +186,7 @@ def body() -> None:
     all_runs = list_runs()
     st.sidebar.header("Runs")
     if not all_runs:
-        st.info(f"No runs with metrics under {RUNS_ROOT}")
+        st.info(f"No runs with metrics under {', '.join(map(str, RUNS_ROOTS))}")
         return
     labels = {run_label(p): p for p in all_runs}
     chosen = st.sidebar.multiselect("compare", list(labels), default=list(labels)[:4])
