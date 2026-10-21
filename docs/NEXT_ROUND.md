@@ -111,3 +111,16 @@ instance at $200.
   fixed point grounded only by mates inside the tree. `search_heads: outcome`
   feeds MCTS the result-trained value / true-plies mlh instead (AlphaZero).
   The 45-minute pre-fix run is kept as `signal-v0`.
+- First ~1.2 h of phase 1 (ladder Elo, ±44 each, 48 games vs 2 anchors):
+  | arm | t≈0 | t≈0.5 h | t≈1.0-1.5 h |
+  |---|---|---|---|
+  | A main as-is | 91 | 89 (step 500) | 43 (step 1000) |
+  | B infra | 23 | 18 (step 1500) | 86 (step 4000) |
+  | C signal | 97 | 190 (step 500) | 409 (step 2000) |
+  C's search-value loss left ln 3 (0.797) while B's stayed at 1.096; C's
+  puzzle first-move accuracy 17% -> 26%, A and B fell to 8-9%. Right after
+  its first engine swap, A's self-play write rate dropped to ~4 records/s
+  (all games restarted — bug 1 in action).
+- 2026-10-22 00:20 (Paris): growth (armD, Thailand 64-core, pinned 0-31) and
+  encoder (armE, Texas EPYC 9354) arms launched; D's first 8k steps double as
+  a seed replicate of C.
