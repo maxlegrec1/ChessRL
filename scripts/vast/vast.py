@@ -246,7 +246,7 @@ def cmd_sync(a) -> None:
         dest = RUNS_HOME / inst["label"]
         dest.mkdir(parents=True, exist_ok=True)
         ssh = f"ssh -p {port} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-        filters = ["--include=*/", "--include=metrics/***", "--include=eval/***", "--include=config.yaml",
+        filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
                    "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", "--exclude=*"]
         r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
                             f"root@{host}:{BOX_RUNS}", f"{dest}/"], capture_output=True, text=True)
