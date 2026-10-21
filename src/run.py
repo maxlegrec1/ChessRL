@@ -95,8 +95,12 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
     from src.train.config import load_config
 
     init_pt = run_dir / "checkpoints" / "model_dynamic_initial.pt"
-    model = build_model(load_config(base_config).model).eval()
-    torch.save({"model": model.state_dict(), "model_spec": model.spec()}, init_pt)
+    cfg = load_config(base_config)
+    model = build_model(cfg.model).eval()
+    torch.save(
+        {"model": model.state_dict(), "model_spec": model.spec(), "config": {"search_heads": cfg.search_heads}},
+        init_pt,
+    )
 
     engine_dir = run_dir / "engines"
     iter_file = engine_dir / ".iteration"

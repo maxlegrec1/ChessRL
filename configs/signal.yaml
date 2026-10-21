@@ -10,6 +10,12 @@ loss_weights:
   mlh: 0.05
   mlh_q: 0.05
 
+# MCTS uses the heads trained on game results / true plies left. main searched
+# with value_q / mlh_q, trained only on the search's own backups: ~uniform
+# targets under an untrained net (98.7% with max prob < 0.4), a fixed point
+# grounded only by mates found inside the tree.
+search_heads: outcome
+
 selfplay:
   # Sample moves only in the first 30 plies (AlphaZero), then play the best move.
   temperature_plies: 30

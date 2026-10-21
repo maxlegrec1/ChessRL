@@ -174,6 +174,12 @@ class TrainingConfig:
     # "played": one-hot on the move actually played (main). "visits": MCTS
     # visit distribution stored in the v2 record.
     policy_target: str = "played"
+    # Which heads the exported engine feeds MCTS. "search" (main): value_q and
+    # mlh_q, trained on the search's own backed-up values; with an untrained net
+    # those targets are ~uniform (measured: 98.7% with max prob < 0.4), so the
+    # search value only learns from mates found inside the tree. "outcome":
+    # value and mlh, trained on game results / true plies left (AlphaZero).
+    search_heads: str = "search"
     mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward
     async_engine_build: bool = False  # build TRT engines in the background
