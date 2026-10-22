@@ -243,6 +243,11 @@ from step 45.5k as calibration + LR decay (`encoder_caldecay.yaml`) once one
 more rating confirms the decline, so armG / armE / dev1 = calibration alone /
 + decay / + growth.
 
+20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
+stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
+(`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
+threshold 0.04.
+
 The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
 taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
 FIFO turns over every ~2 h anyway, so the difference is confined to the
