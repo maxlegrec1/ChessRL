@@ -224,6 +224,25 @@ loop (`box.sh ladder`). First ratings after branching (±42): E-decay 1,694
 (step 48.1k, LR ~0.77x), growth 1,713 (47.5k), resign-cal 1,744 (46.8k): all
 within ~2 SE of the branch point's 1,750-1,790.
 
+**20:30 UTC: the plateau is value-target noise from wrong resignations, and
+LR decay alone makes it worse.**
+
+| since branch | resign threshold | wrong resigns | draws | plies/game | value loss | ladder |
+|---|---|---|---|---|---|---|
+| LR decay (armE) | fixed 0.05 | 11.3% | 7.9% | 57 | 0.68 -> 0.76, rising | 1,694 -> 1,590 |
+| growth (dev1) | calibrated -> 0.028 | 5.6% | 15.9% | 77 | 0.75 -> 0.72 | 1,713 |
+| resign cal (armG) | calibrated -> 0.020 | 5.5% | 15.1% | 75 | 0.74 -> 0.73 | 1,744 -> 1,762 |
+
+At the fixed threshold about 1 resignation in 9 is wrong, and each labels a
+drawable position as lost; a more pessimistic value head then resigns more
+(7.3% wrong at 14 h, 11.3% now): the noise compounds. Lowering the LR fits that
+noise more precisely, hence the faster decline. With calibration the threshold
+has to fall to ~0.02-0.03, games get 20 plies longer and twice as drawn (many
+"lost" games were not), and the value metrics recover. Next: armE restarts
+from step 45.5k as calibration + LR decay (`encoder_caldecay.yaml`) once one
+more rating confirms the decline, so armG / armE / dev1 = calibration alone /
++ decay / + growth.
+
 The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
 taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
 FIFO turns over every ~2 h anyway, so the difference is confined to the
