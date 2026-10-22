@@ -1,0 +1,8 @@
+# Branch of the encoder arm at step 45.5k: only resignation calibration changes.
+# At the branch point the fixed 0.05 threshold resigns wrongly 10-12% of the time
+# (7.3% at 14 h): each wrong resignation labels a drawn/won position as lost, and
+# the value head trains on it. Constant LR, no growth; compare with
+# encoder_decay (LR only) and encoder_final (growth + LR + calibration).
+extends: encoder.yaml
+selfplay:
+  resign_target_fp: 0.05
