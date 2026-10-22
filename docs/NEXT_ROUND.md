@@ -312,6 +312,12 @@ Seed 2 tracks E closely in hours (first noise read). Sims-400 leads by ~200 at
 equal hours (twice the games), about level per record. 8 layers and grow are
 behind in hours but level per record, on the slower host.
 
+21:52-22:45 UTC: armB (8 layers) self-play died swapping to its first FP16-safe
+engine: TensorRT asked 723 MB for an execution context (sized for the batch-1024
+max profile) while the old engine's contexts were still alive. Engines now build
+with max batch 512 (self-play batches stay <= 256, the ladder runs at 64); armB
+resumed on a rebuilt step-2.5k engine, deadline extended 1 h to 04:10 UTC.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
