@@ -318,26 +318,43 @@ def cmd_guard(a) -> None:
 
 
 def cmd_tunnels(a) -> None:
-    procs: dict[str, tuple[subprocess.Popen, tuple[str, int]]] = {}
+    # iid -> (ssh process, local port, ssh target). A forward is rebuilt when its
+    # process dies or when the ledger port / ssh endpoint changes (a box first
+    # reachable only through the Vast proxy later gets a direct port; a tunnel
+    # left on a stale port blocks the box that now owns it, forever).
+    procs: dict[str, tuple[subprocess.Popen, int, tuple[str, int]]] = {}
+    last_check: dict[str, float] = {}
     while True:
         ledger = load_ledger()
         live = active(ledger)
         for iid in list(procs):
             if iid not in live:
                 procs.pop(iid)[0].terminate()
+        # Free ports held for another box first, so the owner can bind them.
+        for iid, (proc, port, _) in list(procs.items()):
+            if port != live[iid]["local_port"]:
+                proc.terminate()
+                procs.pop(iid)
         for iid, inst in live.items():
             proc = procs.get(iid)
-            if proc and proc[0].poll() is None:
+            alive = proc is not None and proc[0].poll() is None
+            if alive and time.time() - last_check.get(iid, 0) < 300:
                 continue
             try:
                 target = ssh_target(iid)
             except Exception:
                 target = None
+            last_check[iid] = time.time()
+            if alive and (not target or target == proc[2]):
+                continue
             if not target:
                 continue
+            if alive:
+                proc[0].terminate()
             cmd = ssh_base(target)
             cmd[1:1] = ["-N", "-L", f"{inst['local_port']}:localhost:{DASHBOARD_PORT}", "-o", "ExitOnForwardFailure=yes"]
-            procs[iid] = (subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL), target)
+            procs[iid] = (subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+                          inst["local_port"], target)
             print(f"tunnel {inst['label']}: localhost:{inst['local_port']} -> {target[0]}:{target[1]}", flush=True)
         time.sleep(15)
 
