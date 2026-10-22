@@ -106,6 +106,26 @@ may matter more than clean outcomes at this stage). Also: the encoder arm's
 ladder daemon died at ~9 h (TensorRT OOM next to a 14.7 GB trainer); restarted
 with a batch-256 runner.
 
+### Ablations at 6 h (2026-10-22 14:51 UTC, positions axis)
+
+| positions | 1M | 2M | 3M | 4M | 6M | 8M | 10M |
+|---|---|---|---|---|---|---|---|
+| C signal | 409 | 525 | 863 | 1023 | 1198 | 1222 | 1334 |
+| D (C replicate until 8k steps) | 282 | 455 | 675 | 1026 | 1270 | 1398 | 1426 |
+| E encoder | 415 | 462 | 901 | 1470 | 1651 | 1800 | 1809 |
+| C − value fix | 126 | 277 | 504 | 932 | 1137 | 1292 | 1362 |
+| C − opening-only temperature | 436 | 699 | 944 | 1143 | 1130 | 1274 | 1306 |
+| C − visit-distribution policy target | 206 | 285 | 355 | 380 | 466 | 724 | — |
+
+- **Policy target (visit distribution at equal weight) is the dominant fix:**
+  ~600 Elo behind without it at 6-8M positions, and the gap is not closing.
+- **Value fix: an early accelerator.** −250 at 2M, caught up by ~10M.
+- **Opening-only temperature: neutral.** Whole-game sampling led early
+  (more diverse data) but the edge was gone by 6M. The final run keeps the
+  opening-only setting (no change).
+- The −temp box's container exited on its own at ~5.8 h (data synced to
+  14:30 UTC); destroyed.
+
 ### Collapse / scaling health check (2026-10-22 ~11:30 UTC, ~14 h in)
 
 | signal | C signal | E encoder | read |
