@@ -130,7 +130,8 @@ class Trainer:
         factor = 1.0
         rel = max(0, step - max(0, sched.start_step))
         if sched.kind == "cosine" and sched.total_steps > 0:
-            progress = min(1.0, rel / sched.total_steps)
+            hold = max(0, sched.hold_steps)
+            progress = min(1.0, max(0, rel - hold) / max(1, sched.total_steps - hold))
             factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
         elif sched.kind == "steps":
             for drop_step, drop_factor in sorted(sched.drops):
@@ -202,25 +203,49 @@ class Trainer:
         self.buffer.refresh()
         self.console.log(f"[warmup] buffer at {self.buffer.size:,}; starting training")
 
+    def plateaued(self) -> bool:
+        """Has the ladder Elo flattened since the last growth? (growth.trigger = plateau)"""
+        g = self.config.growth
+        path = self.run_dir / "ladder" / "ladder.jsonl"
+        try:
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        except (FileNotFoundError, ValueError):
+            return False
+        rows = [r for r in rows if r.get("step", 0) >= max(0, self.last_growth_step)]
+        if len(rows) < g.plateau_min_ratings or (rows[-1]["t"] - rows[0]["t"]) < g.plateau_hours * 3600:
+            return False
+        window = [r for r in rows if r["t"] >= rows[-1]["t"] - g.plateau_hours * 3600]
+        k = max(1, len(window) // 3)
+        early = sum(r["elo"] for r in window[:k]) / k
+        late = sum(r["elo"] for r in window[-k:]) / k
+        return late - early < g.plateau_min_gain
+
     def _maybe_grow(self) -> None:
         # Stages: [step, blocks, channels] for the ResNet, [step, layers] for the encoder.
+        plateau_mode = self.config.growth.trigger == "plateau"
+        if plateau_mode and self.step % 100:
+            return  # the ladder file only changes every ~30 min
         for stage in sorted(self.config.growth.schedule):
             cur = self.model.spec()
             at_step = int(stage[0])
             if self.step < at_step:
                 continue
-            before = self.param_count()
             if cur["arch"] == "encoder":
                 layers = int(stage[1])
                 if layers <= cur["layers"]:
                     continue
-                self.model = grow_encoder(self.model, layers)
             else:
                 blocks, channels = int(stage[1]), int(stage[2])
                 if blocks <= cur["blocks"] and channels <= cur["channels"]:
                     continue
-                blocks, channels = max(blocks, cur["blocks"]), max(channels, cur["channels"])
-                self.model = grow_resnet(self.model, blocks, channels)
+            # This stage would grow the model; in plateau mode only once Elo has flattened.
+            if plateau_mode and not self.plateaued():
+                return
+            before = self.param_count()
+            if cur["arch"] == "encoder":
+                self.model = grow_encoder(self.model, layers)
+            else:
+                self.model = grow_resnet(self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"]))
             self.model.train()
             self.optimizer = self._make_optimizer()
             self._forward = torch.compile(self.model) if self.config.compile else self.model

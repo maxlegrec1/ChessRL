@@ -11,6 +11,7 @@ from rich.console import Console
 
 from src.train.config import SelfPlayConfig, TrainingConfig, load_config
 
+from .calibration import calibrate_resign
 from .engine_watch import EngineWatcher
 
 # Fields copied from the Python SelfPlayConfig onto the C++ one (same names).
@@ -54,6 +55,9 @@ _STAT_FIELDS = (
     "fast_searches",
     "records_written",
     "curriculum_games",
+    "playthrough_games",
+    "playthrough_would_resign",
+    "playthrough_false_resign",
 )
 
 METRICS_EVERY_S = 30.0
@@ -122,6 +126,7 @@ def main() -> int:
 
     worker = None
     current_curriculum = None
+    resign_mark = None  # (would, false) counters at the last calibration
     window_t = time.time()
     window_positions = 0
     window_nodes = 0
@@ -166,6 +171,20 @@ def main() -> int:
             if now - window_t >= METRICS_EVERY_S:
                 dt = now - window_t
                 stats = worker.stats()
+                if sp.resign_target_fp > 0 and sp.resign_threshold > 0:
+                    if resign_mark is None:
+                        resign_mark = (stats.playthrough_would_resign, stats.playthrough_false_resign)
+                    would = stats.playthrough_would_resign - resign_mark[0]
+                    false = stats.playthrough_false_resign - resign_mark[1]
+                    if would >= sp.resign_calibration_window:
+                        new = calibrate_resign(sp.resign_threshold, would, false, sp.resign_target_fp)
+                        console.log(f"[resign] window fp={false / would:.3f} threshold "
+                                    f"{sp.resign_threshold:.4f} -> {new:.4f}")
+                        if new != sp.resign_threshold:
+                            sp.resign_threshold = new
+                            worker.set_config(build_cpp_config(sp, engine_watcher.engine_path, buffer_path,
+                                                               engine_watcher.engine_step))
+                        resign_mark = (stats.playthrough_would_resign, stats.playthrough_false_resign)
                 row = {
                     "t": now,
                     "engine_step": engine_watcher.engine_step,
@@ -175,6 +194,7 @@ def main() -> int:
                     "step_seconds": window_runtime / max(1, window_steps),
                     "buffer_records": worker.get_buffer_size(),
                     "curriculum_prob": current_curriculum,
+                    "resign_threshold": sp.resign_threshold,
                     **{f"total_{k}": getattr(stats, k) for k in _STAT_FIELDS},
                 }
                 with metrics_file.open("a", encoding="utf-8") as fh:

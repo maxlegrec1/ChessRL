@@ -86,6 +86,11 @@ class SelfPlayConfig:
     resign_threshold: float = 0.0  # expected score below which the side to move resigns; 0 = off
     resign_consecutive: int = 2
     resign_playthrough: float = 0.1  # fraction of games that never resign (false-positive audit)
+    # Auto-calibrate resign_threshold so that, in playthrough games, at most this
+    # fraction of would-be resignations were wrong (AlphaZero targeted 5%).
+    # 0 = fixed threshold. Measured with a fixed 5% threshold: 7.1-7.4% wrong.
+    resign_target_fp: float = 0.0
+    resign_calibration_window: int = 400  # would-be resignations per adjustment
     max_plies: int = 600
     pcr_full_prob: float = 1.0  # playout-cap randomization; 1.0 = every move is a full search
     pcr_fast_simulations: int = 100
@@ -133,6 +138,13 @@ class GrowthConfig:
 
     schedule: list = field(default_factory=list)
     lr_rewarmup_steps: int = 200
+    # "steps": grow when a stage's step is reached. "plateau": additionally wait
+    # until the run's ladder Elo gained < plateau_min_gain over the last
+    # plateau_hours (only ratings since the previous growth count).
+    trigger: str = "steps"
+    plateau_hours: float = 2.0
+    plateau_min_gain: float = 50.0
+    plateau_min_ratings: int = 4
 
 
 @dataclass
@@ -144,7 +156,8 @@ class ScheduleConfig:
     # (resolved once, then saved in checkpoints so later resumes keep it).
     start_step: int = 0
     warmup_steps: int = 0
-    total_steps: int = 0  # cosine horizon
+    total_steps: int = 0  # cosine horizon (including hold_steps)
+    hold_steps: int = 0  # cosine: constant LR for this many steps, then decay
     final_ratio: float = 0.1  # cosine floor as a fraction of learning_rate
     drops: list = field(default_factory=list)  # [[step, factor], ...] for "steps"
 
