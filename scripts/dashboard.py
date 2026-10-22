@@ -55,8 +55,19 @@ def load_run(run_dir: str) -> dict:
         train = train[train["event"].isna()]
     selfplay = read_jsonl(d / "metrics" / "selfplay.jsonl")
     lad = read_jsonl(d / "ladder" / "ladder.jsonl")
+    # A branch (another run's checkpoint + ladder history, continued here) carries
+    # metrics/branch.json {"parent_t0", "parent_positions"}: its curves continue the
+    # parent's hours / positions axes. The copied ladder rows are the parent's own
+    # curve: drop them here (they plotted at negative hours).
+    try:
+        branch = json.loads((d / "metrics" / "branch.json").read_text())
+    except (FileNotFoundError, ValueError):
+        branch = {}
     starts = [df["t"].min() for df in (train, selfplay, events) if not df.empty and "t" in df]
-    t0 = min(starts) if starts else d.stat().st_mtime
+    own_t0 = min(starts) if starts else d.stat().st_mtime
+    if not lad.empty and "t" in lad:
+        lad = lad[lad["t"] >= own_t0 - 1800].copy()  # a run's first rating may precede its metrics a little
+    t0 = float(branch.get("parent_t0", own_t0))
     for df in (train, selfplay, events, lad):
         if not df.empty and "t" in df:
             df["hours"] = (df["t"] - t0) / 3600.0
@@ -64,6 +75,9 @@ def load_run(run_dir: str) -> dict:
     if not selfplay.empty and "total_records_written" in selfplay:
         xs = selfplay["t"].to_numpy(dtype=float)
         ys = selfplay["total_records_written"].to_numpy(dtype=float)
+        # The counter restarts at 0 with each self-play process: keep it cumulative.
+        resets = np.where(ys[1:] < ys[:-1], ys[:-1], 0.0)
+        ys = ys + np.concatenate([[0.0], np.cumsum(resets)]) + float(branch.get("parent_positions", 0))
         for df in (train, events, lad):
             if not df.empty and "t" in df:
                 df["positions"] = np.interp(df["t"].to_numpy(dtype=float), xs, ys)
