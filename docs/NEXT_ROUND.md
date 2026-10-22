@@ -87,6 +87,25 @@ instance at $200.
 Projected campaign total ≈ $110 of $200. Boxes on a shared host get disjoint
 32-CPU blocks (`chessrl-vast cpus`); deadlines are enforced by the guard.
 
+### Early ablation read (2026-10-22 10:55 UTC, ±~100 Elo noise; C vs D-before-growth as the seed replicate)
+
+Elo at N self-play training records (positions axis — the ablation boxes have
+faster CPUs than C's, so hours would flatter them):
+
+| positions | 1M | 2M | 4M |
+|---|---|---|---|
+| C signal | 409 | 525 | 1023 |
+| D (replicate of C until 8k steps) | 282 | 455 | 1026 |
+| C − value fix | 126 | 277 | — |
+| C − visit-distribution policy target | 206 | 285 | — |
+| C − opening-only temperature | 436 | 699 | 1072 |
+
+Value fix and policy target clearly carry weight early; the temperature cutoff
+does not (whole-game sampling is as good or better early — more diverse data
+may matter more than clean outcomes at this stage). Also: the encoder arm's
+ladder daemon died at ~9 h (TensorRT OOM next to a 14.7 GB trainer); restarted
+with a batch-256 runner.
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.
