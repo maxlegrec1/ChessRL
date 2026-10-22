@@ -51,11 +51,13 @@ case "$cmd" in
     echo "resumed $dir with $cfg"
     ;;
   ladder)
-    # Batch 64: next to a 6-8 layer encoder's self-play + trainer (~20 GB), a
-    # batch-256 context (400 MB) no longer fits. The loop restarts the daemon
-    # after a crash (it resumes from ladder.jsonl).
+    # Next to a 6-8 layer encoder's self-play + trainer (~20 GB) the default
+    # runner (one TensorRT context per worker per CUDA-graph bucket, batch 256:
+    # 400 MB each) no longer fits. The ladder needs no throughput: batch 64,
+    # 2 workers, no graphs. The loop restarts the daemon after a crash (it
+    # resumes from ladder.jsonl).
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && while true; do CUDA_VISIBLE_DEVICES=$gpu CHESSRL_MCTS_BATCH_SIZE=${LADDER_BATCH:-64} $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log; echo '[box] ladder exited; restarting in 60 s' | tee -a $dir/ladder.log; sleep 60; done"
+    tmux new -d -s "ladder-$name" "source /workspace/env.sh && while true; do CUDA_VISIBLE_DEVICES=$gpu CHESSRL_MCTS_BATCH_SIZE=${LADDER_BATCH:-64} CHESSRL_CUDA_GRAPHS=0 CHESSRL_INFER_WORKERS=2 $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log; echo '[box] ladder exited; restarting in 60 s' | tee -a $dir/ladder.log; sleep 60; done"
     echo "ladder for $dir"
     ;;
   dash)
