@@ -126,6 +126,7 @@ def run_label(path: Path) -> str:
 
 
 PRESETS = {
+    "phase 3 encoder": lambda n: n.split(" ")[0] in ("encoder", "encfinal") or n.startswith(("enc-", "encoder-")),
     "all runs": lambda n: not n.split(" ")[0].endswith("-v0"),
     "phase 1 arms": lambda n: n.split(" ")[0] in ("baseline", "infra", "signal", "growth", "encoder"),
     "ablations vs signal": lambda n: n.split(" ")[0].startswith("ablate") or n.split(" ")[0] == "signal",

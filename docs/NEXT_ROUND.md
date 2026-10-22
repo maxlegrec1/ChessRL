@@ -186,7 +186,14 @@ and C's LR-decay continuation were cancelled; A, B, C, D stopped at 21 h.
 | armE | E @ 45k + cosine LR decay only (`encoder_decay.yaml`) | is the plateau the LR noise floor? |
 | dev1 | E @ 45k copy + plateau growth + LR hold/decay + resign calibration (`encoder_final.yaml`) | is it capacity? (final run) |
 | armA | from scratch, 400/50 sims (`enc_sims400.yaml`) | more games vs deeper search |
+| armB | from scratch, 8 layers (`enc_deep.yaml`, 1.47M) | capacity from step 0, at −39% self-play |
+| armD | from scratch, 2 -> 4 -> 6 -> 8 layers at 3k/9k/16k steps (`enc_grow.yaml`) | progressive growth vs starting big |
 | armF (new) | from scratch, `encoder.yaml` again | seed noise: the yardstick for every comparison |
+
+From-scratch runs get 8.5 h each and are compared with E at equal hours and
+positions (E: 901 at 2.9 h, 1,470 at 3.9 h, 1,652 at 4.4 h, 1,800 at 8 h).
+Deep-encoder bench (armB, 32 CPUs, 800 sims): enc128x4 281 pos/s, x6 215,
+x8 171; all fit in TensorRT memory next to the trainer.
 
 ## Log
 
