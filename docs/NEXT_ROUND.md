@@ -243,6 +243,42 @@ from step 45.5k as calibration + LR decay (`encoder_caldecay.yaml`) once one
 more rating confirms the decline, so armG / armE / dev1 = calibration alone /
 + decay / + growth.
 
+**21:30 UTC correction: the real cause is FP16 overflow in the deployed
+engine, not resignations.** All three branches kept declining (cal + growth
+1,713 -> 1,578, cal only 1,762 -> 1,704, puzzles 61% -> 55-57%), so the cause
+had to be shared. Measured on E's checkpoints (fp32, CPU, 512 puzzle
+positions; `artifacts/scratch/act_scale.py`):
+
+| step | weight norm | max \|x\| into final norm | max token RMS |
+|---|---|---|---|
+| 10k | 105 | 46 | 10.6 |
+| 20k | 133 | 101 | 22.0 |
+| 30k | 158 | 194 | 39.9 |
+| 40k | 180 | 280 | 58.3 |
+| 45.5k | 192 | 349 | 63.8 |
+
+No weight decay, so the residual stream grows. The encoder's hand-written
+RMSNorm (`x.pow(2).mean()`) runs in FP16 inside TensorRT, and x^2 overflows
+past |x| = 256: the token's norm becomes inf, its output 0, silently.
+`scripts/trt_parity.py` (FP16 engine vs PyTorch FP32):
+
+| step | top-1 agreement | policy KL mean / p95 | max value error |
+|---|---|---|---|
+| 10k-30k | 99.2-100% | 0.0000 / 0.0001 | <= 0.012 |
+| 40k | 98.8% | 0.071 / 0.0001 | 0.053 |
+| 45.5k | 96.5% | 0.216 / 1.31 | 0.102 |
+| 45.5k, fixed norm | 99.6% | 0.0000 / 0.0001 | 0.007 |
+
+Self-play, the ladder and the puzzles all ran the drifting engine from ~40k
+(E's decline started at 17 h = step ~40k); the trainer never saw it. The
+rising wrong-resignation rate was most likely a symptom (the engine's values
+drifted from the trained net's), not the cause. Fix (54ac876): divide by the
+row max before squaring, the same function up to eps; deployed to every box
+21:20 UTC, so each run's next engine export (every 500 steps) is clean. ResNet
+arms are unaffected (no RMSNorm). Weight decay would also bound the growth;
+candidate for the final recipe. Re-rating E's 30k / 40k / 45.5k with fixed
+engines to measure how much of the "decline" was the engine alone.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
