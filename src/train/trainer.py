@@ -15,7 +15,7 @@ from rich.console import Console
 from torch import amp, optim
 
 from src.models.factory import build_model, normalize_spec
-from src.models.growth import grow_resnet
+from src.models.growth import grow_encoder, grow_resnet
 from src.models.small.vocab import policy_index, policy_to_idx
 
 from .config import TrainingConfig
@@ -99,6 +99,10 @@ class Trainer:
         self._wandb_run = self._init_wandb()
         if ckpt is not None:
             self._load_checkpoint(ckpt, config.resume_path)
+        if config.lr_schedule.start_step < 0:
+            saved = ((ckpt or {}).get("config") or {}).get("lr_schedule", {}).get("start_step", -1)
+            config.lr_schedule.start_step = saved if saved >= 0 else self.step
+            self.console.log(f"[lr] schedule counts from step {config.lr_schedule.start_step}")
         self._log_event("start", spec=self.model_spec(), params=self.param_count())
 
     # ------------------------------------------------------------------ #
@@ -119,8 +123,9 @@ class Trainer:
         cfg = self.config
         sched = cfg.lr_schedule
         factor = 1.0
+        rel = max(0, step - max(0, sched.start_step))
         if sched.kind == "cosine" and sched.total_steps > 0:
-            progress = min(1.0, step / sched.total_steps)
+            progress = min(1.0, rel / sched.total_steps)
             factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
         elif sched.kind == "steps":
             for drop_step, drop_factor in sorted(sched.drops):
@@ -128,7 +133,7 @@ class Trainer:
                     factor = float(drop_factor)
         warm = 1.0
         if sched.warmup_steps > 0:
-            warm = min(1.0, (step + 1) / sched.warmup_steps)
+            warm = min(1.0, (rel + 1) / sched.warmup_steps)
         rewarm = cfg.growth.lr_rewarmup_steps
         if rewarm > 0 and step - self.last_growth_step < rewarm:
             warm = min(warm, (step - self.last_growth_step + 1) / rewarm)
@@ -193,16 +198,24 @@ class Trainer:
         self.console.log(f"[warmup] buffer at {self.buffer.size:,}; starting training")
 
     def _maybe_grow(self) -> None:
-        if self.model.spec()["arch"] != "resnet":
-            return
+        # Stages: [step, blocks, channels] for the ResNet, [step, layers] for the encoder.
         for stage in sorted(self.config.growth.schedule):
-            at_step, blocks, channels = (int(v) for v in stage)
             cur = self.model.spec()
-            if self.step < at_step or (blocks <= cur["blocks"] and channels <= cur["channels"]):
+            at_step = int(stage[0])
+            if self.step < at_step:
                 continue
-            blocks, channels = max(blocks, cur["blocks"]), max(channels, cur["channels"])
             before = self.param_count()
-            self.model = grow_resnet(self.model, blocks, channels)
+            if cur["arch"] == "encoder":
+                layers = int(stage[1])
+                if layers <= cur["layers"]:
+                    continue
+                self.model = grow_encoder(self.model, layers)
+            else:
+                blocks, channels = int(stage[1]), int(stage[2])
+                if blocks <= cur["blocks"] and channels <= cur["channels"]:
+                    continue
+                blocks, channels = max(blocks, cur["blocks"]), max(channels, cur["channels"])
+                self.model = grow_resnet(self.model, blocks, channels)
             self.model.train()
             self.optimizer = self._make_optimizer()
             self._forward = torch.compile(self.model) if self.config.compile else self.model

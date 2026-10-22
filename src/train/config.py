@@ -140,6 +140,9 @@ class ScheduleConfig:
     """Learning-rate schedule on top of `learning_rate`."""
 
     kind: str = "constant"  # "constant" | "cosine" | "steps"
+    # Step the warmup / cosine count from; -1 = the step the run resumes at
+    # (resolved once, then saved in checkpoints so later resumes keep it).
+    start_step: int = 0
     warmup_steps: int = 0
     total_steps: int = 0  # cosine horizon
     final_ratio: float = 0.1  # cosine floor as a fraction of learning_rate

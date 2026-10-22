@@ -1,0 +1,15 @@
+# Final run: continue the encoder arm from its 24 h checkpoint.
+#   box.sh resume-with encoder configs/encoder_final.yaml
+# Grows 4 -> 6 layers on resume (function-preserving, src/models/growth.py),
+# then decays the LR on a cosine over the next 30k steps (~16 h) to 5%.
+extends: encoder.yaml
+growth:
+  schedule:
+    - [0, 6]
+  lr_rewarmup_steps: 500
+lr_schedule:
+  kind: cosine
+  start_step: -1  # = the step this config is resumed at
+  warmup_steps: 0
+  total_steps: 30000
+  final_ratio: 0.05

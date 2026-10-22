@@ -60,6 +60,19 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     assert (cfg.checkpoint.dir.parent / "metrics" / "train.jsonl").exists()
 
 
+def test_lr_schedule_counts_from_resume_step(tmp_path):
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    cfg.lr_schedule.warmup_steps = 0
+    cfg.lr_schedule.start_step = -1
+    trainer = Trainer(cfg)  # fresh run: resolves to step 0
+    assert cfg.lr_schedule.start_step == 0
+    cfg.lr_schedule.start_step = 100
+    assert trainer.lr_at(100) == pytest.approx(cfg.learning_rate)
+    assert trainer.lr_at(110) == pytest.approx(cfg.learning_rate * cfg.lr_schedule.final_ratio)
+    assert trainer.lr_at(50) == pytest.approx(cfg.learning_rate)  # before the start: no decay yet
+
+
 def test_lr_schedule_cosine_and_growth_rewarmup(tmp_path):
     cfg = _config(tmp_path, "visits")
     trainer = Trainer(cfg)

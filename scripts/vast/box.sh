@@ -41,6 +41,12 @@ case "$cmd" in
     tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --resume $dir 2>&1 | tee -a /workspace/run-$name.log"
     echo "resumed $dir"
     ;;
+  resume-with)
+    # resume-with <name> <config> [gpu]: continue a run under a different config.
+    name="$1"; cfg="$2"; gpu="${3:-0}"; dir="$(run_dir "$name")"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --resume $dir --config $cfg 2>&1 | tee -a /workspace/run-$name.log"
+    echo "resumed $dir with $cfg"
+    ;;
   ladder)
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
     tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
