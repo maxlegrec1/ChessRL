@@ -189,6 +189,14 @@ and C's LR-decay continuation were cancelled; A, B, C, D stopped at 21 h.
 | armB | from scratch, 8 layers (`enc_deep.yaml`, 1.47M) | capacity from step 0, at −39% self-play |
 | armD | from scratch, 2 -> 4 -> 6 -> 8 layers at 3k/9k/16k steps (`enc_grow.yaml`) | progressive growth vs starting big |
 | armF (new) | from scratch, `encoder.yaml` again | seed noise: the yardstick for every comparison |
+| armG (new, 19:15) | E @ 45.5k + resignation calibration only (`encoder_resigncal.yaml`), fresh buffer | is it value-target noise from wrong resignations? |
+
+Third candidate cause, found at 19:08: right after the branch, E's net resigned
+wrongly 10.2% (armE) and 12% (dev1) of the time at the fixed 0.05 threshold,
+vs 7.3% at 14 h. A wrong resignation labels a drawn or won position as lost,
+and rising draws make "looks lost, isn't" positions more common: a plausible
+feedback loop behind the late decline. armE stays LR-only so each branch
+changes one thing.
 
 The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
 taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
