@@ -205,6 +205,25 @@ value accuracy rose 0.49 -> 0.77: the early "shuffle and repeat" phase, deeper
 than E's (0.55 at the same stage) as 400/50 sims find fewer mates. Collapse
 alarms now apply from step 4k; compared step-for-step with seed 2 at 20:15.
 
+20:15 check (decisive share / draw-labelled share of training records):
+
+| steps | 1k | 2k | 3k | 4k | 5k | 6k |
+|---|---|---|---|---|---|---|
+| E (orig) | .52/.03 | .49/.11 | .65/.12 | .78/.07 | .83/.02 | .83/.01 |
+| enc-sims400 | .43/.02 | .27/.19 | .45/.24 | .58/.11 | .67/.06 | .76/.04 |
+| encoder-s2 | .53/.03 | .65/.11 | .64/.10 | | | |
+
+sims-400 recovered: same shape as E, deeper dip, no collapse; ladder
+131 -> 248 -> 349 -> 476 by step 5.5k (E at 5k: 576), slightly ahead per hour.
+
+Ladder outage 19:00-20:10 UTC: the daemons of the 6-layer branch (dev1) and the
+8-layer run (armB) died with TensorRT OOM (runner: one context per worker per
+CUDA-graph bucket, 400 MB each at batch 256, next to ~20 GB of self-play +
+trainer). All ladders now run at batch 64, 2 workers, no graphs, in a restart
+loop (`box.sh ladder`). First ratings after branching (±42): E-decay 1,694
+(step 48.1k, LR ~0.77x), growth 1,713 (47.5k), resign-cal 1,744 (46.8k): all
+within ~2 SE of the branch point's 1,750-1,790.
+
 The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
 taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
 FIFO turns over every ~2 h anyway, so the difference is confined to the
