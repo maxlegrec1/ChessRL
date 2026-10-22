@@ -75,6 +75,18 @@ instance at $200.
   per arm, with uncertainty from the ladder standard errors. Raw JSONL for
   every chart is synced home to `~/chessrl-runs/<box>/`.
 
+## Phase 2 (approved 2026-10-22 ~08:30 UTC)
+
+| What | Where / when (UTC 10-22) | Ends | Est. |
+|---|---|---|---|
+| Ablations: −value, −policy, −temp (`configs/ablate_*.yaml`, 6 h) | 3 new 4090 boxes, ~09:00 | +7 h deadline | $17 |
+| Ablations: −resign, −pcr, −buffer | armA 20:50, armB 21:08, armD 22:29 (after their 24 h) | +6.5 h | $10 |
+| C + cosine LR decay (`signal_decay.yaml`) | dev1 21:10 | +10.5 h | $6 |
+| Final: E continued, 4 -> 6 layers + cosine (`encoder_final.yaml`) | armE 23:12 | +17 h | $10 |
+
+Projected campaign total ≈ $110 of $200. Boxes on a shared host get disjoint
+32-CPU blocks (`chessrl-vast cpus`); deadlines are enforced by the guard.
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.
