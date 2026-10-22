@@ -128,9 +128,15 @@ def cmd_launch(a) -> None:
     projected = spend(ledger) + burn_rate(ledger) + offer["dph_total"]  # one more hour of everything
     if projected > LAUNCH_CAP_USD:
         sys.exit(f"refusing: projected spend ${projected:.2f} > launch cap ${LAUNCH_CAP_USD:.0f}")
+    # Vast's account-key injection failed on two hosts in a row ("Permission
+    # denied (publickey)" even after attach + reboot), so also install our
+    # public key from the container's onstart.
+    pub = (Path.home() / ".ssh" / "id_ed25519.pub").read_text().strip()
+    onstart = (f"mkdir -p /root/.ssh && echo '{pub}' >> /root/.ssh/authorized_keys && "
+               "chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys")
     try:
         res = vast("create", "instance", str(a.offer), "--image", a.image, "--disk", str(a.disk),
-                   "--ssh", "--direct", "--label", a.label)
+                   "--ssh", "--direct", "--label", a.label, "--onstart-cmd", onstart)
     except subprocess.CalledProcessError as exc:
         sys.exit(f"offer {a.offer} not available: {exc.stdout or exc.stderr}")
     iid = str(res["new_contract"])
