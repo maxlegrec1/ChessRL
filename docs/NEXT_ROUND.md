@@ -276,8 +276,21 @@ drifted from the trained net's), not the cause. Fix (54ac876): divide by the
 row max before squaring, the same function up to eps; deployed to every box
 21:20 UTC, so each run's next engine export (every 500 steps) is clean. ResNet
 arms are unaffected (no RMSNorm). Weight decay would also bound the growth;
-candidate for the final recipe. Re-rating E's 30k / 40k / 45.5k with fixed
-engines to measure how much of the "decline" was the engine alone.
+candidate for the final recipe. Re-rated with fixed engines (armG, same ladder, 96 games, 21:20 UTC):
+
+| step | corrupted engine: Elo / puzzles | fixed engine: Elo / puzzles |
+|---|---|---|
+| 30k (13 h) | 1,839-1,898 / 71% | 1,947 +-40 / 71.9% |
+| 40k (17 h) | 1,904 / 71% | 1,892 +-40 / 72.7% |
+| 45.5k (19.5 h) | 1,750-1,790 / 64-66% | 1,989 +-40 / 72.6% |
+
+**The trained net never declined**; the whole "decline" was the engine. The
+branch point (45.5k) is E's best checkpoint, so the branches continue from it.
+E does still flatten from ~13 h (1,900-2,000, puzzles flat at ~72%): the
+LR-vs-capacity question stands, at a higher level, and the branch comparison
+restarts from the fixed engines (their buffers hold corrupted-engine games
+until ~23:30 UTC; ratings before ~21:20 measured broken engines). Void: "LR
+decay alone makes it worse" and "wrong resignations cause the plateau".
 
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
