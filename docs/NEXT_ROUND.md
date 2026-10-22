@@ -106,6 +106,22 @@ may matter more than clean outcomes at this stage). Also: the encoder arm's
 ladder daemon died at ~9 h (TensorRT OOM next to a 14.7 GB trainer); restarted
 with a batch-256 runner.
 
+### Collapse / scaling health check (2026-10-22 ~11:30 UTC, ~14 h in)
+
+| signal | C signal | E encoder | read |
+|---|---|---|---|
+| policy entropy | 2.93 -> 2.05 | 2.82 -> 1.77 | smooth decline, no collapse |
+| search-target entropy | 2.11 -> 1.29 (flat since 6 h) | 2.22 -> 1.30 | stable |
+| draws | 32% -> 7% | 25% -> 7% | no draw death |
+| castle rate | -> 1.1% | -> 1.1% | healthy (canonical 0.8-1.2%) |
+| games ending by resignation | 66% | 74% | games ~55-59 plies: few endgames |
+| wrong resignations (playthrough audit) | 7.4% | 7.3% | above the 5% AlphaZero target |
+
+Response: resignation auto-calibration to <= 5% (`resign_target_fp`),
+plateau-triggered growth, hold-then-decay LR, and watchdog alarms on
+target entropy < 0.8, decisive < 30%, wrong resignations > 10%. All in the
+final run (`configs/encoder_final.yaml`).
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.
