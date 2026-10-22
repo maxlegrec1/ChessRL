@@ -99,10 +99,15 @@ class Trainer:
         self._wandb_run = self._init_wandb()
         if ckpt is not None:
             self._load_checkpoint(ckpt, config.resume_path)
+        # start_step -1 = "the step this schedule was first resumed at". Only a value
+        # resolved that way is carried forward (checkpoint key lr_start_step); a
+        # checkpoint's own config start_step is just the previous run's setting.
+        self.lr_start_step: int | None = None
         if config.lr_schedule.start_step < 0:
-            saved = ((ckpt or {}).get("config") or {}).get("lr_schedule", {}).get("start_step", -1)
-            config.lr_schedule.start_step = saved if saved >= 0 else self.step
-            self.console.log(f"[lr] schedule counts from step {config.lr_schedule.start_step}")
+            carried = (ckpt or {}).get("lr_start_step")
+            self.lr_start_step = int(carried) if carried is not None else self.step
+            config.lr_schedule.start_step = self.lr_start_step
+            self.console.log(f"[lr] schedule counts from step {self.lr_start_step}")
         self._log_event("start", spec=self.model_spec(), params=self.param_count())
 
     # ------------------------------------------------------------------ #
@@ -422,6 +427,8 @@ class Trainer:
             "last_growth_step": self.last_growth_step,
             "config": self.config.to_dict(),
         }
+        if self.lr_start_step is not None:
+            ckpt["lr_start_step"] = self.lr_start_step
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
         tmp = path.with_suffix(".pt.tmp")
         torch.save(ckpt, tmp)
