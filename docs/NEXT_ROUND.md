@@ -117,6 +117,10 @@ with a batch-256 runner.
 | games ending by resignation | 66% | 74% | games ~55-59 plies: few endgames |
 | wrong resignations (playthrough audit) | 7.4% | 7.3% | above the 5% AlphaZero target |
 
+The −policy ablation (weak net, rated ~355) reached 15.4% wrong resignations
+with the same fixed threshold: a weaker value head makes a fixed resign
+threshold worse, another reason to calibrate it.
+
 Response: resignation auto-calibration to <= 5% (`resign_target_fp`),
 plateau-triggered growth, hold-then-decay LR, and watchdog alarms on
 target entropy < 0.8, decisive < 30%, wrong resignations > 10%. All in the
