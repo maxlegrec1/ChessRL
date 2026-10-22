@@ -201,6 +201,14 @@ positions (E: 901 at 2.9 h, 1,470 at 3.9 h, 1,652 at 4.4 h, 1,800 at 8 h).
 Deep-encoder bench (armB, 32 CPUs, 800 sims): enc128x4 281 pos/s, x6 215,
 x8 171; all fit in TensorRT memory next to the trainer.
 
+Start-up (19:03 UTC, random-init nets, trainer + ladder running): armF
+(Ryzen 7950X) 284 pos/s at 4 layers; armD 200 at 2 layers and armB 104 at 8
+layers (both on the slower Thailand host, ladder Stockfish on the same 32
+cores). Box speed differs by ~1.5x, so from-scratch runs are compared on the
+**positions axis** first, hours second. Growth branch: 4 -> 6 layers (1.14M)
+at its first step as expected; its first resignation window measured 12%
+wrong at threshold 0.05, calibrated to 0.04.
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.
