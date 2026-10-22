@@ -52,7 +52,7 @@ case "$cmd" in
     ;;
   ladder)
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
+    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu CHESSRL_MCTS_BATCH_SIZE=256 $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
     echo "ladder for $dir"
     ;;
   dash)
@@ -77,7 +77,7 @@ case "$cmd" in
     sleep 90
     dir="$(ls -d /workspace/ChessRL-main/artifacts/runs/*_"$name" | sort | tail -1)"
     tmux new -d -s "legacy-$name" "source /workspace/env.sh && uv run python scripts/legacy_metrics.py --run-dir $dir"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
+    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu CHESSRL_MCTS_BATCH_SIZE=256 $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
     echo "main run in $dir"
     ;;
   calibrate)
