@@ -59,3 +59,20 @@ def test_onnx_export(tmp_path):
                       input_names=["input"], output_names=["policy", "value", "mlh", "mlh_q"],
                       dynamic_axes={"input": {0: "batch_size"}}, opset_version=17, dynamo=False)
     assert (tmp_path / "enc.onnx").stat().st_size > 0
+
+
+def test_rmsnorm_is_fp16_safe_on_a_grown_residual_stream():
+    # TensorRT runs the norm in FP16; the residual stream reached |x| ~ 350 in the
+    # encoder arm, where x.pow(2) overflows FP16 (> 65504).
+    from src.models.encoder import RMSNorm
+
+    torch.manual_seed(0)
+    norm = RMSNorm(128)
+    x = torch.randn(4, 64, 128) * 120.0
+    x[0, 0, 0] = 400.0
+    naive = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + norm.eps) * norm.weight
+    torch.testing.assert_close(norm(x), naive, rtol=1e-5, atol=1e-4)  # fp32 rounding
+    half = norm.half()(x.half()).float()
+    assert torch.isfinite(half).all()
+    assert (x.half().pow(2).mean(-1) == float("inf")).any()  # the old formula breaks here
+    torch.testing.assert_close(half, naive, atol=2e-2, rtol=2e-2)
