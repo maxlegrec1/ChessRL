@@ -155,15 +155,17 @@ def cmd_launch(a) -> None:
 
 
 def cmd_cpus(a) -> None:
-    """CPU range to pin this box's run to: boxes on the same host get disjoint 32-CPU blocks.
+    """CPU range to pin this box's run to: boxes on the same machine get disjoint 32-CPU blocks.
 
     Several of our GPUs can land in one physical machine, and every container
-    sees all host CPUs, so identical pins would share cores. Blocks go by
-    instance id among live boxes with the same public IP."""
+    there sees all its CPUs, so identical pins would share cores. Grouping is by
+    Vast's machine_id — not the public IP: one host operator can put several
+    machines behind one NAT address (armB/armD, abl-value/abl-temp were separate
+    machines sharing an IP, each container limited to its own CPUs 0-31)."""
     ledger = load_ledger()
     iid, _ = by_label(ledger, a.label)
-    ips = {i: ((vast("show", "instance", i) or {}).get("public_ipaddr") or "").strip() for i in active(ledger)}
-    peers = sorted((i for i, ip in ips.items() if ip and ip == ips.get(iid)), key=int)
+    machines = {i: (vast("show", "instance", i) or {}).get("machine_id") for i in active(ledger)}
+    peers = sorted((i for i, m in machines.items() if m is not None and m == machines.get(iid)), key=int)
     idx = peers.index(iid) if iid in peers else 0
     print(f"{32 * idx}-{32 * idx + 31}")
 

@@ -14,7 +14,10 @@ RUNS=/workspace/ChessRL/artifacts/runs
 # CPUS=0-31 box.sh run ... pins the run (and its ladder) to those CPUs so every
 # arm gets the same core count whatever box it lands on.
 PIN=""
-[ -n "${CPUS:-}" ] && PIN="taskset -c $CPUS"
+if [ -n "${CPUS:-}" ]; then
+  # Containers limited to their own cpuset reject other ranges: run unpinned then.
+  if taskset -c "$CPUS" true 2>/dev/null; then PIN="taskset -c $CPUS"; else echo "CPUS=$CPUS not allowed here; not pinning"; fi
+fi
 cmd="${1:-status}"
 shift || true
 

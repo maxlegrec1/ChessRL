@@ -142,13 +142,14 @@ Projected campaign total ≈ $110 of $200. Boxes on a shared host get disjoint
   enc192x6 OOMs creating TensorRT contexts (649 MB each at batch 1024).
   Attention over 64 tokens is costlier per parameter than the ResNet's convs
   at this size, so the encoder arm uses 128x4. Started 23:09 UTC.
-- **Core-sharing incident:** armB and armD turned out to be two GPUs of the
-  same Thailand host (64 cores) and both were pinned to CPUs 0-31 from 22:23
-  to 01:38 UTC. B's self-play fell from 561 to 422 pos/s (-25%) in that
-  window; D ran ~300 pos/s. D re-pinned live to 32-63 at 01:38. Wall-clock
-  comparisons for B and D must account for this window (the positions axis
-  is unaffected). dev1/armA share a host too, but were pinned 0-31 / 32-63
-  from the start.
+- ~~Core-sharing incident~~ (corrected 08:45 UTC): armB and armD share a
+  public IP but are **different machines** (Vast machine_id 30113 / 28904),
+  so they never shared cores; D's live re-pin to 32-63 at 01:38 was a no-op.
+  B's self-play did fall from 561 to 422 pos/s after ~1.3 h, but the likely
+  cause is the net itself: sharper priors -> deeper trees -> more CPU per
+  simulation (C slowed similarly). Only dev1/armA truly share a machine
+  (10236), pinned 0-31 / 32-63 from the start. Pinning now groups boxes by
+  machine_id, not IP.
 - t ≈ 2.5-5 h (01:38 UTC): A 99, B 117, C 1100 (step 9.5k), D 867 (step
   7.5k, seed replicate of C until its 8k growth: C was 863 at 6.5k), E 462
   (step 4k). Puzzle line accuracy at step ~4k: C 25%, D 23%, E 47% — the
