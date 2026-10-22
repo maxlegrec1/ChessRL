@@ -42,8 +42,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_BASE_CONFIG,
-        help="Base YAML config (paths inside it are overridden per-run).",
+        default=None,
+        help="Base YAML config (paths inside it are overridden per-run). Default: "
+        "src/train/config.yaml for a new run, the run's own config.yaml on --resume.",
     )
     p.add_argument(
         "--name", type=str, default=None, help="Optional human-readable suffix for the run id."
@@ -201,13 +202,18 @@ def main() -> int:
         run_dir = _make_run_dir(args.name)
         print(f"[launcher] new run -> {run_dir}", flush=True)
         if not args.no_selfplay:
-            _build_initial_engine(run_dir, args.config)
+            _build_initial_engine(run_dir, args.config or DEFAULT_BASE_CONFIG)
         else:
             # Trainer-only fresh run: still need an iteration file so the
             # trainer's later build_trt invocations append cleanly.
             (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
         resume_path = None
 
+    # On --resume without --config, keep the run's own settings (main fell back
+    # to src/train/config.yaml here, silently replacing an arm's config).
+    if args.config is None:
+        own = run_dir / "config.yaml"
+        args.config = own if (args.resume and own.is_file()) else DEFAULT_BASE_CONFIG
     cfg_path = _write_run_config(args.config, run_dir, resume_path)
     selfplay_log = run_dir / "selfplay.log"
     trainer_log = run_dir / "training.log"

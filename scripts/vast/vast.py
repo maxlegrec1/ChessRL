@@ -135,10 +135,28 @@ def cmd_launch(a) -> None:
     ledger["instances"][iid] = {
         "label": a.label, "offer": a.offer, "gpu": offer["gpu_name"], "dph": offer["dph_total"],
         "cores": offer.get("cpu_cores_effective"), "started": time.time(), "ended": None, "local_port": port,
+        "deadline": time.time() + a.hours * 3600 if a.hours else None,
     }
     save_ledger(ledger)
     print(f"launched {a.label}: instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/h), "
-          f"dashboard -> http://localhost:{port}")
+          f"dashboard -> http://localhost:{port}" + (f", auto-destroy in {a.hours:g} h" if a.hours else ""))
+
+
+def cmd_deadline(a) -> None:
+    """Set (or clear with --clear) the time after which guard syncs and destroys a box."""
+    ledger = load_ledger()
+    iid, inst = by_label(ledger, a.label)
+    if a.clear:
+        inst["deadline"] = None
+    elif a.at:
+        from datetime import datetime
+
+        inst["deadline"] = datetime.fromisoformat(a.at.replace("Z", "+00:00")).timestamp()
+    else:
+        inst["deadline"] = time.time() + a.hours * 3600
+    save_ledger(ledger)
+    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(inst["deadline"])) if inst["deadline"] else "none"
+    print(f"{inst['label']}: deadline {when}")
 
 
 def cmd_status(a) -> None:
@@ -212,6 +230,11 @@ def cmd_guard(a) -> None:
         else:
             inst["ended"] = time.time()
     save_ledger(ledger)
+    for iid, inst in list(active(ledger).items()):
+        if inst.get("deadline") and time.time() >= inst["deadline"]:
+            sync_one(iid, inst)  # final pull before the box disappears
+            destroy(ledger, iid)
+            print(f"deadline reached: synced and destroyed {inst['label']} ({iid})")
     spent = spend(ledger)
     if spent >= CAP_USD:
         for iid in list(active(ledger)):
@@ -266,23 +289,30 @@ def cmd_tunnels(a) -> None:
         time.sleep(15)
 
 
+def sync_one(iid: str, inst: dict) -> None:
+    try:
+        target = ssh_target(iid)
+    except Exception:
+        target = None
+    if not target:
+        return
+    host, port = target
+    dest = RUNS_HOME / inst["label"]
+    dest.mkdir(parents=True, exist_ok=True)
+    ssh = f"ssh -p {port} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+    filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
+               "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", "--exclude=*"]
+    for src in BOX_RUNS:
+        r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
+                            f"root@{host}:{src}", f"{dest}/"], capture_output=True, text=True)
+        if r.returncode not in (0, 23):  # 23: source dir absent on this box
+            print(f"sync {inst['label']} {src}: rc={r.returncode} {r.stderr.strip()[:200]}")
+
+
 def cmd_sync(a) -> None:
     ledger = load_ledger()
     for iid, inst in active(ledger).items():
-        target = ssh_target(iid)
-        if not target:
-            continue
-        host, port = target
-        dest = RUNS_HOME / inst["label"]
-        dest.mkdir(parents=True, exist_ok=True)
-        ssh = f"ssh -p {port} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-        filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
-                   "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", "--exclude=*"]
-        for src in BOX_RUNS:
-            r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
-                                f"root@{host}:{src}", f"{dest}/"], capture_output=True, text=True)
-            if r.returncode not in (0, 23):  # 23: source dir absent on this box
-                print(f"sync {inst['label']} {src}: rc={r.returncode} {r.stderr.strip()[:200]}")
+        sync_one(iid, inst)
 
 
 def main() -> None:
@@ -299,7 +329,14 @@ def main() -> None:
     la.add_argument("--label", required=True)
     la.add_argument("--image", default=IMAGE)
     la.add_argument("--disk", type=int, default=120)
+    la.add_argument("--hours", type=float, default=0, help="auto sync+destroy after this many hours (0 = never)")
     la.set_defaults(fn=cmd_launch)
+    dl = sub.add_parser("deadline")
+    dl.add_argument("label")
+    dl.add_argument("--hours", type=float, default=0)
+    dl.add_argument("--at", help="ISO time, e.g. 2026-10-22T20:50Z")
+    dl.add_argument("--clear", action="store_true")
+    dl.set_defaults(fn=cmd_deadline)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     s = sub.add_parser("ssh")
     s.add_argument("label")
