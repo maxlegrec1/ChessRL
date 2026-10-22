@@ -121,15 +121,27 @@ def cmd_launch(a) -> None:
     # `search offers id=N` matches nothing, so find the offer in the usual search.
     # Same filters as `offers` (a looser query hits the result cap before cheap 32-core boxes).
     rows = [o for o in search_offers(["RTX_4090", "RTX_5090"], 32, a.disk) if str(o["id"]) == str(a.offer)]
-    if not rows:
-        sys.exit(f"offer {a.offer} not available (run `offers` again)")
-    offer = rows[0]
+    # Vast's search returns slightly different result sets between calls, so an
+    # offer just listed can be missing here; then assume ~$1.2/h for the budget
+    # check and read the real price from the created instance.
+    offer = rows[0] if rows else {"gpu_name": "?", "dph_total": 1.2}
     projected = spend(ledger) + burn_rate(ledger) + offer["dph_total"]  # one more hour of everything
     if projected > LAUNCH_CAP_USD:
         sys.exit(f"refusing: projected spend ${projected:.2f} > launch cap ${LAUNCH_CAP_USD:.0f}")
-    res = vast("create", "instance", str(a.offer), "--image", a.image, "--disk", str(a.disk),
-               "--ssh", "--direct", "--label", a.label)
+    try:
+        res = vast("create", "instance", str(a.offer), "--image", a.image, "--disk", str(a.disk),
+                   "--ssh", "--direct", "--label", a.label)
+    except subprocess.CalledProcessError as exc:
+        sys.exit(f"offer {a.offer} not available: {exc.stdout or exc.stderr}")
     iid = str(res["new_contract"])
+    if not rows:
+        for _ in range(10):
+            info = vast("show", "instance", iid) or {}
+            if info.get("dph_total"):
+                offer = {"gpu_name": info.get("gpu_name", "?"), "dph_total": float(info["dph_total"]),
+                         "cpu_cores_effective": info.get("cpu_cores_effective")}
+                break
+            time.sleep(3)
     used = {i.get("local_port") for i in active(ledger).values()}
     port = next(p for p in range(DASHBOARD_PORT, DASHBOARD_PORT + 50) if p not in used)
     ledger["instances"][iid] = {
@@ -140,6 +152,20 @@ def cmd_launch(a) -> None:
     save_ledger(ledger)
     print(f"launched {a.label}: instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/h), "
           f"dashboard -> http://localhost:{port}" + (f", auto-destroy in {a.hours:g} h" if a.hours else ""))
+
+
+def cmd_cpus(a) -> None:
+    """CPU range to pin this box's run to: boxes on the same host get disjoint 32-CPU blocks.
+
+    Several of our GPUs can land in one physical machine, and every container
+    sees all host CPUs, so identical pins would share cores. Blocks go by
+    instance id among live boxes with the same public IP."""
+    ledger = load_ledger()
+    iid, _ = by_label(ledger, a.label)
+    ips = {i: ((vast("show", "instance", i) or {}).get("public_ipaddr") or "").strip() for i in active(ledger)}
+    peers = sorted((i for i, ip in ips.items() if ip and ip == ips.get(iid)), key=int)
+    idx = peers.index(iid) if iid in peers else 0
+    print(f"{32 * idx}-{32 * idx + 31}")
 
 
 def cmd_deadline(a) -> None:
@@ -331,6 +357,9 @@ def main() -> None:
     la.add_argument("--disk", type=int, default=120)
     la.add_argument("--hours", type=float, default=0, help="auto sync+destroy after this many hours (0 = never)")
     la.set_defaults(fn=cmd_launch)
+    cp = sub.add_parser("cpus")
+    cp.add_argument("label")
+    cp.set_defaults(fn=cmd_cpus)
     dl = sub.add_parser("deadline")
     dl.add_argument("label")
     dl.add_argument("--hours", type=float, default=0)
