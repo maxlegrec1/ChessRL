@@ -196,7 +196,14 @@ wrongly 10.2% (armE) and 12% (dev1) of the time at the fixed 0.05 threshold,
 vs 7.3% at 14 h. A wrong resignation labels a drawn or won position as lost,
 and rising draws make "looks lost, isn't" positions more common: a plausible
 feedback loop behind the late decline. armE stays LR-only so each branch
-changes one thing.
+changes one thing. armG (California, EPYC 9374F) started 19:22 UTC at 257
+pos/s; first calibration window 8.4% wrong -> threshold 0.04.
+
+Early-phase watch (19:15): enc-sims400's decisive-outcome share fell
+0.69 -> 0.24 in its first 1.75k steps (47% draws, mostly repetition) while
+value accuracy rose 0.49 -> 0.77: the early "shuffle and repeat" phase, deeper
+than E's (0.55 at the same stage) as 400/50 sims find fewer mates. Collapse
+alarms now apply from step 4k; compared step-for-step with seed 2 at 20:15.
 
 The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
 taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
