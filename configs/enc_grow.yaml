@@ -1,0 +1,14 @@
+# Encoder HP search, from scratch: progressive growth (GAN-style) 2 -> 4 -> 6 -> 8
+# layers at fixed steps; each step is a function-preserving append. The small
+# early net plays faster self-play while it learns the basics; compare with
+# enc_deep (8 layers from step 0) and the encoder arm (4 layers throughout).
+extends: encoder.yaml
+model:
+  layers: 2
+growth:
+  trigger: steps
+  schedule:
+    - [3000, 4]
+    - [9000, 6]
+    - [16000, 8]
+  lr_rewarmup_steps: 500

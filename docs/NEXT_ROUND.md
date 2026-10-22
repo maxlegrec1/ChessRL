@@ -146,6 +146,48 @@ plateau-triggered growth, hold-then-decay LR, and watchdog alarms on
 target entropy < 0.8, decisive < 30%, wrong resignations > 10%. All in the
 final run (`configs/encoder_final.yaml`).
 
+## Phase 3: encoder only (2026-10-22 18:45 UTC)
+
+The ResNet arms had answered their questions (signal fixes, growth, which fix
+matters) by ~20 h, and the encoder beat every ResNet arm from hour 3 on, yet it
+was the only encoder run. The planned ResNet ablations (−resign, −pcr, −buffer)
+and C's LR-decay continuation were cancelled; A, B, C, D stopped at 21 h.
+
+**Why E stopped gaining (diagnosis at step 45k, 19.5 h):**
+
+| steps | 5k | 10k | 15k | 20k | 30k | 40k | 45k |
+|---|---|---|---|---|---|---|---|
+| policy loss | 2.00 | 1.83 | 1.81 | 1.79 | 1.77 | 1.78 | 1.80 |
+| KL(search target ‖ net) | 0.60 | 0.55 | 0.52 | 0.49 | 0.47 | 0.46 | 0.48 |
+| value loss | 0.70 | 0.70 | 0.68 | 0.67 | 0.66 | 0.65 | 0.69 |
+| ladder Elo | 576 | 1652 | 1576-1745 | 1809 | 1840 | 1904 | 1820 |
+
+- Learning stopped at ~12k steps (5 h): the policy loss moved 0.04 in the
+  next 30k steps and the net still sits 0.46 nats from its own search's
+  visit distribution. Elo kept creeping (+100 from 8 h to 16 h) on that flat
+  loss, then stalled.
+- The LR was a constant 1e-3 (Adam, no weight decay) for all 45k steps, no
+  decay ever, and the model is 0.81M parameters. Both are textbook causes
+  of this curve; the run cannot tell them apart, so they are now tested as
+  separate branches of the same checkpoint.
+- Self-play is GPU-bound (96% utilisation; trainer steps take 0.2 s of every
+  ~1.4 s, pacing at k = 5 samples per record), so a bigger net costs
+  self-play speed one-for-one.
+- Late drift from ~17 h: draws 7.0% -> 9.7%, games 51 -> 58 plies, puzzles
+  73% -> 66% (1,000 puzzles: ~3.5 sigma), training losses rising. Nothing
+  changed on the box (only self-play, trainer, ladder running). A
+  constant-LR net drifting toward drawish play is the early shape of a draw
+  collapse; watched in the branches.
+
+**Phase 3 runs (all encoder):**
+
+| box | run | question |
+|---|---|---|
+| armE | E @ 45k + cosine LR decay only (`encoder_decay.yaml`) | is the plateau the LR noise floor? |
+| dev1 | E @ 45k copy + plateau growth + LR hold/decay + resign calibration (`encoder_final.yaml`) | is it capacity? (final run) |
+| armA | from scratch, 400/50 sims (`enc_sims400.yaml`) | more games vs deeper search |
+| armF (new) | from scratch, `encoder.yaml` again | seed noise: the yardstick for every comparison |
+
 ## Log
 
 - 2026-10-21 — audit done, branch `worktree-next-round` created.

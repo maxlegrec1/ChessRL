@@ -1,0 +1,6 @@
+# Encoder HP search, from scratch: capacity. 8 layers (1.47M params) instead of 4.
+# Bench (armB, 4090, 32 CPUs, 800 sims): enc128x4 281 pos/s, x6 215, x8 171
+# (-39%): self-play is GPU-bound, so the extra depth is paid in games.
+extends: encoder.yaml
+model:
+  layers: 8
