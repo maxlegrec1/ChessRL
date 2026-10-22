@@ -28,13 +28,18 @@ uv run python -m src.export.to_onnx \
   --onnx_path "$ONNX_PATH"
 
 echo "[build_trt] Building TensorRT engine ${TRT_PATH}"
+# Max batch 512: each execution context is sized for the profile's max shape,
+# and an in-place engine swap holds the old and new contexts at once. At 1024 an
+# 8-layer encoder's context needed 723 MB and the swap went out of memory.
+# Self-play batches are capped at its thread count (CUDA-graph buckets <= 256)
+# and the ladder runs at 64; other tools must set CHESSRL_MCTS_BATCH_SIZE <= 512.
 trtexec \
   --onnx="$ONNX_PATH" \
   --saveEngine="$TRT_PATH" \
   --fp16 \
   --minShapes=input:1x8x8x111 \
   --optShapes=input:256x8x8x111 \
-  --maxShapes=input:1024x8x8x111 \
+  --maxShapes=input:512x8x8x111 \
   --shapes=input:256x8x8x111 \
 
 TRT_ABS="$(realpath "$TRT_PATH")"
