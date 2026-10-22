@@ -130,3 +130,17 @@ instance at $200.
   enc192x6 OOMs creating TensorRT contexts (649 MB each at batch 1024).
   Attention over 64 tokens is costlier per parameter than the ResNet's convs
   at this size, so the encoder arm uses 128x4. Started 23:09 UTC.
+- **Core-sharing incident:** armB and armD turned out to be two GPUs of the
+  same Thailand host (64 cores) and both were pinned to CPUs 0-31 from 22:23
+  to 01:38 UTC. B's self-play fell from 561 to 422 pos/s (-25%) in that
+  window; D ran ~300 pos/s. D re-pinned live to 32-63 at 01:38. Wall-clock
+  comparisons for B and D must account for this window (the positions axis
+  is unaffected). dev1/armA share a host too, but were pinned 0-31 / 32-63
+  from the start.
+- t ≈ 2.5-5 h (01:38 UTC): A 99, B 117, C 1100 (step 9.5k), D 867 (step
+  7.5k, seed replicate of C until its 8k growth: C was 863 at 6.5k), E 462
+  (step 4k). Puzzle line accuracy at step ~4k: C 25%, D 23%, E 47% — the
+  encoder is far stronger tactically per step at equal ladder Elo. Low-end
+  ladder caveat: deterministic MCTS-100 eval draws many won games by
+  repetition vs weak anchors (C @3k: 20W 28D 0L vs random), compressing
+  the low end of the scale equally for all arms.
