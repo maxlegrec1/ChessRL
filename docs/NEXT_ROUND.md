@@ -184,11 +184,17 @@ and C's LR-decay continuation were cancelled; A, B, C, D stopped at 21 h.
 | box | run | question |
 |---|---|---|
 | armE | E @ 45k + cosine LR decay only (`encoder_decay.yaml`) | is the plateau the LR noise floor? |
-| dev1 | E @ 45k copy + plateau growth + LR hold/decay + resign calibration (`encoder_final.yaml`) | is it capacity? (final run) |
+| dev1 | E @ 45.5k copy + plateau growth + LR hold/decay + resign calibration (`encoder_final.yaml`), fresh buffer | is it capacity? (final run) |
 | armA | from scratch, 400/50 sims (`enc_sims400.yaml`) | more games vs deeper search |
 | armB | from scratch, 8 layers (`enc_deep.yaml`, 1.47M) | capacity from step 0, at −39% self-play |
 | armD | from scratch, 2 -> 4 -> 6 -> 8 layers at 3k/9k/16k steps (`enc_grow.yaml`) | progressive growth vs starting big |
 | armF (new) | from scratch, `encoder.yaml` again | seed noise: the yardstick for every comparison |
+
+The growth branch starts on an empty buffer: E's 2.5 GB buffer would have
+taken ~70 min through this machine (0.6 MB/s down from armE). E's 2M-record
+FIFO turns over every ~2 h anyway, so the difference is confined to the
+branch's first ~2 h. The ladder history was copied so the plateau trigger
+fires at once (E: 1,904 -> 1,820 over its last 2 h).
 
 From-scratch runs get 8.5 h each and are compared with E at equal hours and
 positions (E: 901 at 2.9 h, 1,470 at 3.9 h, 1,652 at 4.4 h, 1,800 at 8 h).
