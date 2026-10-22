@@ -292,6 +292,26 @@ restarts from the fixed engines (their buffers hold corrupted-engine games
 until ~23:30 UTC; ratings before ~21:20 measured broken engines). Void: "LR
 decay alone makes it worse" and "wrong resignations cause the plateau".
 
+22:30 UTC report (fixed engines from ~21:15; branch buffers still flushing):
+
+| branch @ 45.5k (1,989) | ratings on fixed engines (puzzles) |
+|---|---|
+| cal only (armG) | 1,834 -> 1,948 (71%) |
+| cal + growth, 6 layers (dev1) | 1,821 -> 1,897 (73-74%) |
+| cal + LR decay (armE) | 1,893 -> 1,913 (71%) |
+
+| from scratch at ~3.5 h | Elo by hours | Elo by self-play records |
+|---|---|---|
+| E (orig) | 1,303 at 3.4 h | 1,303 at 3M, 1,652 at 4M |
+| seed 2 (armF) | 1,296 at 3.5 h | 793 at 3M, 1,296 at 4M |
+| sims 400/50 (armA) | 1,504 at 3.5 h | 1,082 at 4M, 1,504 at 6M |
+| 8 layers (armB) | 459 at 2.8 h | 459 at 1M |
+| grow 2->8 (armD) | 423 at 2.9 h | 454 at 2M |
+
+Seed 2 tracks E closely in hours (first noise read). Sims-400 leads by ~200 at
+equal hours (twice the games), about level per record. 8 layers and grow are
+behind in hours but level per record, on the slower host.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
