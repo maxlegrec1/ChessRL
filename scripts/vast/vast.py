@@ -234,10 +234,22 @@ def cmd_bootstrap(a) -> None:
     sys.exit(f"{inst['label']}: ssh not ready after {a.timeout}s")
 
 
-def destroy(ledger: dict, iid: str) -> None:
-    subprocess.run(["vastai", "destroy", "instance", iid], capture_output=True, text=True)
-    ledger["instances"][iid]["ended"] = time.time()
-    save_ledger(ledger)
+def live_ids() -> set[str]:
+    return {str(i["id"]) for i in (vast("show", "instances") or [])}
+
+
+def destroy(ledger: dict, iid: str) -> bool:
+    """Destroy and verify. Without -y the CLI waits for a y/n answer, which with no
+    terminal silently aborts — three boxes survived that way while marked ended."""
+    r = subprocess.run(["vastai", "destroy", "instance", iid, "-y"], capture_output=True, text=True)
+    for _ in range(10):
+        if iid not in live_ids():
+            ledger["instances"][iid]["ended"] = time.time()
+            save_ledger(ledger)
+            return True
+        time.sleep(3)
+    print(f"WARNING: instance {iid} still exists after destroy: {r.stdout.strip()} {r.stderr.strip()}")
+    return False
 
 
 def cmd_destroy(a) -> None:
@@ -257,6 +269,13 @@ def cmd_guard(a) -> None:
             inst["dph"] = float(live[iid].get("dph_total") or inst["dph"])
         else:
             inst["ended"] = time.time()
+    # Safety net: a ledger instance marked ended but still alive on Vast is ours
+    # and still billing — destroy it (and keep billing it in the ledger meanwhile).
+    for iid, inst in ledger["instances"].items():
+        if inst.get("ended") is not None and iid in live:
+            print(f"zombie {inst['label']} ({iid}) still alive: destroying")
+            inst["ended"] = None
+            destroy(ledger, iid)
     save_ledger(ledger)
     for iid, inst in list(active(ledger).items()):
         if inst.get("deadline") and time.time() >= inst["deadline"]:

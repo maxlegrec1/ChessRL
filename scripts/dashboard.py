@@ -76,7 +76,7 @@ def load_run(run_dir: str) -> dict:
 
 def list_runs() -> list[Path]:
     runs = [p for root in RUNS_ROOTS if root.exists() for p in root.rglob("metrics") if p.is_dir()]
-    return sorted({p.parent for p in runs}, key=lambda p: p.stat().st_mtime, reverse=True)
+    return sorted({p.parent for p in runs}, key=lambda p: p.name)  # names start with the start time
 
 
 def smooth(s: pd.Series, k: int) -> pd.Series:
@@ -115,11 +115,21 @@ XLABEL = {"hours": "hours since run start", "step": "trainer step", "positions":
 
 
 def run_label(path: Path) -> str:
-    # Run dirs are <date>_<time>_<hex>[_<name>]; show "name · hex".
+    # Run dirs are <date>_<time>_<hex>[_<name>]; show "name (box)" when synced
+    # home under ~/chessrl-runs/<box>/, else "name · hex".
     parts = path.name.split("_")
-    if len(parts) > 3:
-        return f"{'_'.join(parts[3:])} · {parts[2]}"
-    return path.name
+    name = "_".join(parts[3:]) if len(parts) > 3 else path.name
+    box = path.parent.name
+    if box not in ("runs", ""):
+        return f"{name} ({box})"
+    return f"{name} · {parts[2]}" if len(parts) > 3 else name
+
+
+PRESETS = {
+    "all runs": lambda n: not n.split(" ")[0].endswith("-v0"),
+    "phase 1 arms": lambda n: n.split(" ")[0] in ("baseline", "infra", "signal", "growth", "encoder"),
+    "ablations vs signal": lambda n: n.split(" ")[0].startswith("ablate") or n.split(" ")[0] == "signal",
+}
 
 
 def kpi_table(runs: dict) -> None:
@@ -192,7 +202,12 @@ def body() -> None:
         st.info(f"No runs with metrics under {', '.join(map(str, RUNS_ROOTS))}")
         return
     labels = {run_label(p): p for p in all_runs}
-    chosen = st.sidebar.multiselect("compare", list(labels), default=list(labels)[:4])
+    preset = st.sidebar.radio("show", list(PRESETS) + ["custom"])
+    if preset == "custom":
+        chosen = st.sidebar.multiselect("compare", list(labels), default=[n for n in labels if PRESETS["all runs"](n)])
+    else:
+        chosen = [n for n in labels if PRESETS[preset](n)]
+        st.sidebar.caption(", ".join(chosen))
     xkey = st.sidebar.radio("x axis", list(XLABEL), format_func=XLABEL.get)
     k = st.sidebar.slider("smoothing (points)", 1, 200, 20)
     runs = {n: load_run(str(labels[n])) for n in chosen}
