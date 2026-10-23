@@ -4,6 +4,7 @@
 #   box.sh run <config> <name> [gpu]   start a training run in tmux session run-<name>
 #   box.sh resume <name> [gpu]         resume the newest run dir ending in _<name>
 #   box.sh ladder <name> [gpu]         live ladder daemon for that run
+#   box.sh keep <name> [gpu]           resume run-<name> if it dies (up to 5 times)
 #   box.sh dash                        dashboard on :8501
 #   box.sh calibrate                   one-off anchor round robin
 #   box.sh status                      sessions, GPU, newest log lines
@@ -18,6 +19,9 @@ if [ -n "${CPUS:-}" ]; then
   # Containers limited to their own cpuset reject other ranges: run unpinned then.
   if taskset -c "$CPUS" true 2>/dev/null; then PIN="taskset -c $CPUS"; else echo "CPUS=$CPUS not allowed here; not pinning"; fi
 fi
+# EXTRA_ENV="CHESSRL_CUDA_GRAPHS=0 ..." is prepended to the run's command (tmux
+# sessions take the tmux server's environment, not the caller's).
+XENV="${EXTRA_ENV:-}"
 cmd="${1:-status}"
 shift || true
 
@@ -36,19 +40,27 @@ case "$cmd" in
     ;;
   run)
     cfg="$1"; name="$2"; gpu="${3:-0}"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --config $cfg --name $name 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $XENV $PIN uv run python -m src.run --config $cfg --name $name 2>&1 | tee -a /workspace/run-$name.log"
     echo "started run-$name on GPU $gpu"
     ;;
   resume)
     name="$1"; gpu="${2:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --resume $dir 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $XENV $PIN uv run python -m src.run --resume $dir 2>&1 | tee -a /workspace/run-$name.log"
     echo "resumed $dir"
     ;;
   resume-with)
     # resume-with <name> <config> [gpu]: continue a run under a different config.
     name="$1"; cfg="$2"; gpu="${3:-0}"; dir="$(run_dir "$name")"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $PIN uv run python -m src.run --resume $dir --config $cfg 2>&1 | tee -a /workspace/run-$name.log"
+    tmux new -d -s "run-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu $XENV $PIN uv run python -m src.run --resume $dir --config $cfg 2>&1 | tee -a /workspace/run-$name.log"
     echo "resumed $dir with $cfg"
+    ;;
+  keep)
+    # keep <name> [gpu]: if run-<name> dies (self-play crash -> the launcher stops
+    # both halves), resume it from its newest checkpoint; at most 5 times. Takes
+    # the same CPUS / EXTRA_ENV as the run.
+    name="$1"; gpu="${2:-0}"
+    tmux new -d -s "keep-$name" "for i in 1 2 3 4 5; do while tmux has-session -t run-$name 2>/dev/null; do sleep 60; done; echo \"[keep] \$(date -u +%H:%M) run-$name gone; resume \$i\" >> /workspace/keep-$name.log; CPUS='${CPUS:-}' EXTRA_ENV='$XENV' bash /workspace/box.sh resume $name $gpu >> /workspace/keep-$name.log 2>&1; sleep 120; done"
+    echo "keep-alive for run-$name"
     ;;
   ladder)
     # Next to a 6-8 layer encoder's self-play + trainer (~20 GB) the default
@@ -103,6 +115,8 @@ case "$cmd" in
     # Ctrl-C lets src.run forward SIGINT to its children (they live in their own
     # process groups, so killing the tmux session alone orphans them).
     session="$1"
+    # A deliberate stop must not be undone by the keep-alive loop.
+    case "$session" in run-*) tmux kill-session -t "keep-${session#run-}" 2>/dev/null || true ;; esac
     tmux send-keys -t "$session" C-c 2>/dev/null || true
     for _ in $(seq 1 30); do
       tmux has-session -t "$session" 2>/dev/null || break
