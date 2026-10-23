@@ -39,7 +39,10 @@ What mattered and what didn't:
 - **Weight decay** (AdamW 0.05, matrices only) keeps the residual stream
   bounded at equal strength: max activation into the final norm 46 vs 171 at
   30k steps (weight norm 99 vs 164); 1,818 vs ~1,820. Its effect on the
-  plateau is untested (run ended at 8.5 h).
+  plateau is untested (run ended at 8.5 h). **Continued overnight**
+  (2026-10-23 22:00 UTC -> ~08:30 UTC): same box type (France 7950X),
+  resumed from its synced step-32k checkpoint with a fresh buffer, to reach
+  ~18 training hours, past the 11-17 h where seed 1 flattened.
 
 Tooling added on the way: Vast launch/deadline/guard/sync CLI (`chessrl-vast`),
 per-run anchor ladder, combined dashboard with run toggles, keep-alive resume
