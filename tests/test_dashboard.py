@@ -47,6 +47,12 @@ def test_dashboard_renders(tmp_path, monkeypatch):
     monkeypatch.setenv("CHESSRL_BUDGET", str(budget))
     at = AppTest.from_file("../scripts/dashboard.py", default_timeout=60).run()
     assert not at.exception, at.exception
-    at.sidebar.radio[0].set_value("all runs").run()  # the default preset shows phase-3 encoder runs only
+    # Written just now, so it counts as running and is shown by default.
+    assert any("visits" in str(df.value) for df in at.dataframe)
+    by_label = {b.label: b for b in at.sidebar.button}
+    by_label["None"].click().run()
+    assert not at.exception, at.exception
+    assert not any("visits" in str(df.value) for df in at.dataframe)
+    {b.label: b for b in at.sidebar.button}["All"].click().run()
     assert not at.exception, at.exception
     assert any("visits" in str(df.value) for df in at.dataframe)

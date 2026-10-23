@@ -137,10 +137,10 @@ def line_chart(title: str, runs: dict, table: str, cols: list[str], xkey: str, k
         fig.update_yaxes(tickformat=yfmt)
     if log_y:
         fig.update_yaxes(type="log")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
-XLABEL = {"hours": "hours since run start", "step": "trainer step", "positions": "self-play positions"}
+XLABEL = {"hours": "hours of training", "step": "trainer step", "positions": "self-play positions"}
 
 
 def run_label(path: Path) -> str:
@@ -154,12 +154,62 @@ def run_label(path: Path) -> str:
     return f"{name} · {parts[2]}" if len(parts) > 3 else name
 
 
-PRESETS = {
-    "phase 3 encoder": lambda n: n.split(" ")[0] in ("encoder", "encfinal", "resigncal", "caldecay") or n.startswith(("enc-", "encoder-")),
-    "all runs": lambda n: not n.split(" ")[0].endswith("-v0"),
-    "phase 1 arms": lambda n: n.split(" ")[0] in ("baseline", "infra", "signal", "growth", "encoder"),
-    "ablations vs signal": lambda n: n.split(" ")[0].startswith("ablate") or n.split(" ")[0] == "signal",
-}
+# Runs shown by default: everything still running, plus these run names
+# (comma-separated, e.g. "enc-deep,signal"; overridable with $CHESSRL_PINNED).
+PINNED = {n.strip() for n in os.environ.get("CHESSRL_PINNED", "enc-deep").split(",") if n.strip()}
+RUNNING_WITHIN_S = 15 * 60  # self-play logs every 30 s; the home sync runs every 5 min
+
+
+def last_activity(run_dir: Path) -> float:
+    try:
+        return (run_dir / "metrics" / "selfplay.jsonl").stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
+@st.cache_data(ttl=55)
+def last_elo(run_dir: str) -> float | None:
+    try:
+        lines = (Path(run_dir) / "ladder" / "ladder.jsonl").read_text().strip().splitlines()
+        return json.loads(lines[-1])["elo"] if lines else None
+    except (FileNotFoundError, ValueError, KeyError):
+        return None
+
+
+def select_runs(labels: dict[str, Path]) -> list[str]:
+    """Sidebar run toggles. Defaults: running runs + PINNED; the choice survives refreshes."""
+    now = time.time()
+    running = {n for n, p in labels.items() if now - last_activity(p) < RUNNING_WITHIN_S}
+    default = running | {n for n in labels if n.split(" ")[0] in PINNED}
+    if not default:  # nothing running: the three most recent runs
+        default = set(sorted(labels, key=lambda n: last_activity(labels[n]))[-3:])
+    for n in labels:
+        st.session_state.setdefault(f"show::{n}", n in default)
+
+    def set_all(names, value):
+        for n in labels:
+            st.session_state[f"show::{n}"] = value if names is None else n in names
+
+    c = st.sidebar.columns(3)
+    c[0].button("Running", on_click=set_all, args=(running, True), width="stretch")
+    c[1].button("All", on_click=set_all, args=(None, True), width="stretch")
+    c[2].button("None", on_click=set_all, args=(None, False), width="stretch")
+
+    def toggle(n):
+        elo = last_elo(str(labels[n]))
+        st.checkbox(f"{n} · {elo:,.0f}" if elo is not None else n, key=f"show::{n}")
+
+    newest_first = sorted(labels, key=lambda n: last_activity(labels[n]), reverse=True)
+    st.sidebar.caption(f"Running now ({len(running)})")
+    with st.sidebar:
+        for n in newest_first:
+            if n in running:
+                toggle(n)
+        finished = [n for n in newest_first if n not in running]
+        with st.expander(f"Finished ({len(finished)})", expanded=False):
+            for n in finished:
+                toggle(n)
+    return [n for n in labels if st.session_state[f"show::{n}"]]
 
 
 def kpi_table(runs: dict) -> None:
@@ -188,7 +238,7 @@ def kpi_table(runs: dict) -> None:
             if len(lad) else "–",
             "puzzles": f"{last_lad.get('puzzles.line', float('nan')):.3f}" if len(lad) else "–",
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def budget_panel() -> None:
@@ -232,12 +282,9 @@ def body() -> None:
         st.info(f"No runs with metrics under {', '.join(map(str, RUNS_ROOTS))}")
         return
     labels = {run_label(p): p for p in all_runs}
-    preset = st.sidebar.radio("show", list(PRESETS) + ["custom"])
-    if preset == "custom":
-        chosen = st.sidebar.multiselect("compare", list(labels), default=[n for n in labels if PRESETS["all runs"](n)])
-    else:
-        chosen = [n for n in labels if PRESETS[preset](n)]
-        st.sidebar.caption(", ".join(chosen))
+    chosen = select_runs(labels)
+    if not chosen:
+        st.info("No runs selected: tick some in the sidebar.")
     xkey = st.sidebar.radio("x axis", list(XLABEL), format_func=XLABEL.get)
     k = st.sidebar.slider("smoothing (points)", 1, 200, 20)
     runs = {n: load_run(str(labels[n])) for n in chosen}
@@ -261,7 +308,7 @@ def body() -> None:
         fig.update_layout(title="Anchor-ladder Elo (random mover = 0)", height=340,
                           margin=dict(l=10, r=10, t=40, b=10), xaxis_title=XLABEL[xkey],
                           legend=dict(orientation="h", y=-0.25))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with c[1]:
         line_chart("Puzzle accuracy (1k Lichess, strict line, MCTS-100)", runs, "ladder",
                    ["puzzles.line", "puzzles.first_move"], xkey, 1, yfmt=".0%", height=340)
