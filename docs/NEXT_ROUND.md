@@ -385,6 +385,17 @@ rate the weak -policy ablation reached. Left as is (comparability with
 sims-400); watchdog line raised to 20%. armB's 8-layer net: 1,400 at step 5.7k
 (E needed ~7-8k steps for that): faster per step, slower per hour.
 
+08:00 UTC: **sims-400 replicates** (seed 2 on armF: 1,503 at 3.5 h and 1,619
+at 4.0 h vs seed 1's 1,504 / 1,614). **Sims 200/25 is too cheap**: 1,011 /
+1,245 / 1,394 / 1,343 / 1,381 at 2.5-4.5 h vs sims-400's 1,082 / 1,382 / 1,504 /
+1,614 / 1,638 on the same box; far behind per record (10M: 1,343 vs 1,822).
+Stopped at 4.5 h; armA now runs sims-400 + AdamW weight decay 0.05 on
+matrices (`enc_sims400_wd.yaml`, 08:02-16:33 UTC). Does sims-400 pass 2,000 if
+continued? E gained ~150-190 after 8 h (re-rated: ~1,950 at 13 h, ~1,990 at
+19.5 h) and sims-400 was ~50 ahead of E at 8 h with ~1.6x the steps per hour:
+plausible, right at the ~1,950 ceiling every E branch sits at. armF's seed 2
+extended to 20:34 UTC (~16.4 h) to find out.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
