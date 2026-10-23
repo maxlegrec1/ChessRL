@@ -317,6 +317,33 @@ engine: TensorRT asked 723 MB for an execution context (sized for the batch-1024
 max profile) while the old engine's contexts were still alive. Engines now build
 with max batch 512 (self-play batches stay <= 256, the ladder runs at 64); armB
 resumed on a rebuilt step-2.5k engine, deadline extended 1 h to 04:10 UTC.
+Its step-3k swap at 23:25 went through (18.0 GB).
+
+00:00 UTC report (buffers flushed of broken-engine games):
+
+| branch @ 45.5k | ratings since 21:15 (puzzles) | LR now |
+|---|---|---|
+| cal only (armG) | 1,834 1,948 1,846 1,907 1,968 (73%) | 1e-3 |
+| cal + LR decay (armE) | 1,893 1,913 1,927 1,941 1,896 (71 -> 76%) | 1.7e-4 |
+| cal + growth (dev1) | 1,821 1,897 1,872 1,890 1,913 (73-74%), 6 layers | 6.4e-4 |
+
+E's own fixed-engine level is ~1,940 (30k 1,947 / 40k 1,892 / 45.5k 1,989,
++-40 each): no branch is clearly above it after 3 h; LR decay leads on puzzles
+(76%, the best of any run). dev1 grew 6 -> 8 layers at step 53.4k (23:44 UTC,
+1.47M params; swap fine at 17.8 GB, self-play 250 -> 133 pos/s).
+
+| from scratch | Elo at 5 h | at 2M / 3M / 4M / 6M / 8M records |
+|---|---|---|
+| E (orig) | 1,589-1,633 | 462 / 1,303 / 1,652 / 1,576 / 1,768 |
+| seed 2 | 1,547 | 438 / 793 / 1,412 / - / - |
+| sims 400/50 | 1,718 | - / - / 1,082 / 1,504 / 1,718 |
+| 8 layers | 474 at 4.4 h | 459 at 1M (90 pos/s, lost 50 min) |
+| grow 2->8 | 480 at 4.6 h | 454 / 480 |
+
+Sims-400 is ~100 Elo ahead of E and seed 2 at equal hours (twice the games),
+level per record. Seed 2 and E agree in hours within ~50-100. The two
+slow-host runs are level with E per record so far but have only 1-3M records:
+both still sit before the 2-4M-record jump E and seed 2 made.
 
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
