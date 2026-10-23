@@ -353,6 +353,32 @@ resumed 01:51 with CUDA graphs off (`EXTRA_ENV=CHESSRL_CUDA_GRAPHS=0`), deadline
 06:15 UTC (+2 h: it was mid-jump, 474 -> 920). Every run now has a keep-alive
 (`box.sh keep`): a dead run resumes from its newest checkpoint, up to 5 times.
 
+**03:00 UTC: from-scratch results at 8 h** (single runs; seed 2 = noise yardstick)
+
+| run | 1,000+ | 1,500 | 1,800 | at 8 h |
+|---|---|---|---|---|
+| E, 800/100 sims | 3.4 h (1,303) | ~4.5 h | 8.0 h | 1,800 |
+| seed 2, 800/100 | 3.5 h (1,296) | ~5 h | - | 1,699 at 7.5 h |
+| **sims 400/50** | **2.5 h (1,082)** | **3.5 h** | **6.0 h** | **1,847** |
+| grow 2 -> 8 (slow host) | 6.1 h | 7.1 h | - | 1,573 at 7.6 h |
+| 8 layers (slow host, 2 crashes) | 8.0 h | - | - | 1,304 |
+
+Sims-400 is the best from-scratch recipe: the same Elo per self-play record as
+E (8M: 1,718 vs 1,768; 10M: 1,822 vs 1,829) at twice the records per hour.
+Growth from 2 layers and 8 layers from step 0 are level with seed 2 per record
+but lose in hours (slow host; the 8-layer net also costs 39% of self-play).
+
+Branches at ~5.75 h on fixed engines (mean of the last ~5 ratings): cal + LR
+decay ~1,960 (puzzles 75-76%, LR now at its 5e-5 floor), cal only ~1,950
+(72-76%), cal + growth to 8 layers ~1,940 (72-74%; 8 layers since 23:44). E's
+own fixed-engine level is ~1,940-1,990. **Over ~6 h none of LR decay, growth
+or resignation calibration moves the plateau beyond the +-40 noise.**
+
+Next (03:05 UTC): armA runs sims 200/25 from scratch (`enc_sims200.yaml`, same
+box as sims-400, to 11:35 UTC); armF runs a second seed of sims 400/50 from
+04:05 (to ~12:35). dev1's final run continues to 11:50, armB to 06:12, armG to
+~05:10; armD (grow) and armE (cal + decay) end at their deadlines.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
