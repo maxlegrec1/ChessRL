@@ -379,6 +379,12 @@ box as sims-400, to 11:35 UTC); armF runs a second seed of sims 400/50 from
 04:05 (to ~12:35). dev1's final run continues to 11:50, armB to 06:12, armG to
 ~05:10; armD (grow) and armE (cal + decay) end at their deadlines.
 
+04:34 UTC: sims-200 resigns wrongly 15.4% of the time at 1.5 h (fixed 0.05
+threshold, net at ~350): a quarter of the search gives noisier values, the same
+rate the weak -policy ablation reached. Left as is (comparability with
+sims-400); watchdog line raised to 20%. armB's 8-layer net: 1,400 at step 5.7k
+(E needed ~7-8k steps for that): faster per step, slower per hour.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
