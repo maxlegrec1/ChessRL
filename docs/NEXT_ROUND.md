@@ -4,6 +4,48 @@ Started 2026-10-21. Budget: **$200 of rented GPU time** (Vast.ai), tracked by
 `scripts/vast/budget_guard.py`. This file is the plan and the lab notebook —
 results get appended to the log at the bottom as they land.
 
+## Results summary (final, 2026-10-23 16:51 UTC)
+
+Spent **$139.49** of $200: 14 rented RTX 4090 boxes, 233 box-hours. Ladder Elo
+is anchored on calibrated Stockfish/random/greedy players (random = 0), ±40
+per rating; hours are hours of training (downtime excluded).
+
+| recipe (one 4090 each) | ~900 Elo | 1,500 | 1,800 | at 8 h | plateau |
+|---|---|---|---|---|---|
+| `main` (original code) | ~20.5 h | — | — | 233 | 921 at 21.7 h, still rising |
+| + learning-signal fixes (ResNet) | ~3 h | ~16 h | — | 1,234 | ~1,500 at 21 h |
+| + 0.81M transformer encoder, 800/100 sims | 2.9 h | ~4 h | 8.0 h | 1,800 | ~1,950 from ~13 h |
+| + 400/50 sims (best per hour) | **2.3 h** | **3.5 h** | **6.0 h** | **1,847** | ~1,860-1,900 from ~11 h |
+
+What mattered and what didn't:
+- **Policy targets = MCTS visit distribution** is the dominant fix (−730 Elo
+  without it at 6M positions); searching with outcome-trained value heads is
+  an early accelerator; opening-only temperature is neutral; infrastructure
+  alone buys throughput, not learning.
+- **Encoder > ResNet**: +450-580 Elo at equal positions despite −32%
+  self-play throughput.
+- **400/50 simulations** beat 800/100 per hour and replicate (seed 2: 1,503
+  vs 1,504 at 3.5 h); **200/25 is too cheap** (−100 to −250 from 3 h,
+  flattens ~1,400).
+- **Growth**: ResNet growth a modest +0-90 Elo from 8 h (puzzles 60% vs 54%);
+  encoder growth from 2 layers or 8 layers from scratch: level per position,
+  behind per hour; encoder grown 4 -> 6 -> 8 at its plateau (final run,
+  step 67k): **~1,970**, no gain beyond noise. LR decay and resignation
+  calibration branches: same ~1,950.
+- **The "collapse" at 17 h was an FP16 bug**, not learning: the hand-written
+  RMSNorm overflowed in the TensorRT engine once activations passed 256
+  (no weight decay). Fixed (54ac876); re-rated, E's checkpoints never declined
+  (45.5k = 1,989). `scripts/trt_parity.py` checks engine vs PyTorch.
+- **Weight decay** (AdamW 0.05, matrices only) keeps the residual stream
+  bounded at equal strength: max activation into the final norm 46 vs 171 at
+  30k steps (weight norm 99 vs 164); 1,818 vs ~1,820. Its effect on the
+  plateau is untested (run ended at 8.5 h).
+
+Tooling added on the way: Vast launch/deadline/guard/sync CLI (`chessrl-vast`),
+per-run anchor ladder, combined dashboard with run toggles, keep-alive resume
+on boxes, and a CPU analysis board (`scripts/analysis_server.py`, dashboard
+page "Analysis"). Blog draft: `docs/blog/chessrl-next-round.mdx`.
+
 ## Why (audit of `main` @ 128893c)
 
 | Finding | Where | Consequence |

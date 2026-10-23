@@ -6,8 +6,6 @@ draft: true
 summary: 'A second round on my from-scratch AlphaZero: fixing what the network learns from, swapping the ResNet for a tiny transformer and halving the search took the time to ~900 Elo from 21 hours to under 3 on one RTX 4090. Plus a silent FP16 bug that made a healthy network look like it was collapsing.'
 ---
 
-{/* DRAFT — numbers marked TODO are filled in when the last runs finish (2026-10-23 ~12:30 UTC). */}
-
 In the [first post](/blog/chessrl-alphazero-single-gpu) I trained a 1.29M-parameter chess agent from nothing but the rules, on the RTX 4090 in my desktop. It worked — roughly Stockfish-1400 strength after two weeks — but two weeks is a long time to wait for an answer, and I suspected the recipe was leaving most of its speed on the table.
 
 So for round two I set a budget (**$200 of rented GPUs** on Vast.ai), a rule (**every change gets its own run, rated on the same yardstick**), and a question: how fast can the same single-GPU setup learn chess if the learning itself is fixed, not just the plumbing?
@@ -61,7 +59,9 @@ With a stronger network, 800 simulations per recorded move started to look expen
 
 Per position, the cheaper search is worse in the middle of training — its visit distributions are noisier targets — and level again by ~8M positions. Per hour, it gets everywhere first: 1,000+ Elo at 2.5 h instead of 3.4 h, 1,800 at 6 h instead of 8 h. The second 800-simulation seed (lighter line) shows how much of that is noise: the two seeds stay within ~100 Elo of each other.
 
-TODO: 200/25 simulations (running) and a second 400-simulation seed.
+A second 400-simulation seed on a different box landed almost on top of the first (1,503 vs 1,504 at 3.5 h, 1,619 vs 1,614 at 4 h), so the gain isn't luck. Halving again doesn't keep paying: at 200/25 simulations the run was 100–250 Elo behind 400 from hour 3 on and flattened around 1,350–1,400, far behind per position too (1,343 vs 1,822 at 10M). About 400 is the sweet spot here.
+
+Cheaper search gets to the plateau faster, not past it. Continued to 17 hours, the 400-simulation run flattened at **~1,860–1,900**, about 60 Elo below where the 800-simulation encoder settled: noisier targets seem to cost a little at the top.
 
 ## Progressive growth: helpful early, not a plateau-breaker (yet)
 
@@ -69,9 +69,7 @@ Growing a network during training, GAN-style, was one of the ideas I most wanted
 
 - **ResNet:** growing 4×64 → 6×96 → 8×128 → 10×128 at fixed steps gave a modest edge over the fixed-size network: level for 6 hours, then 0–90 Elo ahead (best at 16–18 hours, once the small network had flattened) and clearly better at puzzles (60% vs 54% at ~20 hours). Real, but at the edge of seed noise.
 - **Encoder from 2 layers** (2 → 4 → 6 → 8): level with the fixed 4-layer encoder per position, but behind per hour, on a slower host.
-- **Encoder grown at its plateau** (4 → 6 → 8 layers from a 19-hour checkpoint): no measurable gain over ~6 hours. Neither was decaying the learning rate, nor calibrating resignations. The 0.8M encoder sits at about **1,950 on this ladder** and none of those three moves it within the noise.
-
-TODO: final result of the 17-hour grown run.
+- **Encoder grown at its plateau** (4 → 6 → 8 layers, 0.81M → 1.47M parameters, from a 19-hour checkpoint, then 17 more hours with a learning-rate decay at the end): it finished at **~1,970**, puzzles 74–76%, within the noise of where it started. Branches that only decayed the learning rate or only cleaned up the resignation labels landed in the same place. The encoder sits at about **1,950 on this ladder**, and none of those levers moved it within a day.
 
 ## The bug that looked like a collapse
 
@@ -101,14 +99,16 @@ So from ~40k steps a growing slice of positions was played by a different policy
 
 The network never got worse. Its deployed copy did. The lesson is the same one the first post ended on, one level up: **parity-test every boundary** — and the boundary between the model you train and the model you deploy is the one I'd stopped looking at. There's now a `trt_parity.py` script that compares any checkpoint with its exported engine in a few seconds.
 
+The norm fix treats the symptom. The cause is that nothing pulled the weights back: Adam with no weight decay, so their norm grew all run (105 → 192) and the activations with it. One last run added decoupled weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe, the violet line above: at 30k steps its largest activation is 46 instead of 171, growing slowly, at the same strength (1,818 vs ~1,820 at equal steps). It didn't run long enough to show whether it also lifts the plateau.
+
 ## What it cost
 
-TODO: final spend (≈$130 of the $200; 4090s at $0.43–0.75/h). The biggest single lesson about the budget: once one arm clearly wins, move every box onto variants of it — I kept the ResNet arms running for hours after the encoder had won, and those are hours I'd rather have spent on the encoder.
+**$139.49** of the $200 budget, about 230 GPU-hours on rented RTX 4090s at $0.43–0.75/h, over two days. The biggest single lesson about the budget: once one arm clearly wins, move every box onto variants of it. I kept the ResNet arms running for hours after the encoder had won, and those are hours I'd rather have spent on the encoder.
 
 ## What I'd try next
 
-1. **Weight decay**, so the residual stream stays bounded by design rather than by an FP16-safe norm.
-2. **Find the plateau's cause.** At ~1,950, learning-rate decay, growth and cleaner resignation targets don't help within hours. Candidates: the evaluation's 100 simulations compressing differences, or a bigger encoder needing much longer than six hours to pay for its slower self-play.
-3. **Cheaper search, further** (TODO: depends on the 200-simulation run).
+1. **Weight decay by default.** It keeps the network inside FP16 range by construction and cost nothing in strength over 8 hours; the open question is whether it also lifts the plateau over a longer run.
+2. **Find the plateau's cause.** At ~1,950, learning-rate decay, growth and cleaner resignation targets don't move it within a day. Candidates: the evaluation's 100 simulations compressing differences between strong networks, or a bigger encoder needing far longer than a day to pay for its slower self-play.
+3. **Keep the search at ~400 simulations**: half of that was too noisy.
 
 The code — the fixes, the encoder, growth, the ladder, the dashboard and the Vast tooling — is on the `worktree-next-round` branch of **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, with a full lab log in `docs/NEXT_ROUND.md`.

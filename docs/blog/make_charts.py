@@ -118,9 +118,14 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
     }
 
 
-def end_label(ax, x, y, text, dy=0):
+def end_label(ax, x, y, text, leader=None):
+    """End dot + value. leader=(dx, dy) in points moves the label off a crowded end, with a thin connector."""
     ax.plot([x], [y], "o", ms=6, color=ax.lines[-1].get_color(), mec=SURFACE, mew=2, zorder=5)
-    ax.annotate(text, (x, y), xytext=(8, dy), textcoords="offset points", va="center", color=INK2, fontsize=10)
+    if leader:
+        ax.annotate(text, (x, y), xytext=leader, textcoords="offset points", va="center", color=INK2, fontsize=10,
+                    arrowprops=dict(arrowstyle="-", color=MUTED, lw=0.8, shrinkA=2, shrinkB=4))
+    else:
+        ax.annotate(text, (x, y), xytext=(8, 0), textcoords="offset points", va="center", color=INK2, fontsize=10)
 
 
 def chart_speedup() -> None:
@@ -133,7 +138,7 @@ def chart_speedup() -> None:
     fig, ax = plt.subplots(figsize=(9, 5.2))
     for name, color, s in series:
         ax.plot(s["hours"], s["elo"], color=color, label=name)
-        end_label(ax, s["hours"][-1], s["elo"][-1], f"{s['elo'][-1]:,.0f}")
+        end_label(ax, s["hours"][-1], s["elo"][-1], f"{s['elo'][-1]:,.0f}", leader=(18, -34) if color == BLUE else None)
     ax.set_xlim(0, 23.5)
     ax.set_ylim(-100, 2100)
     ax.set_xlabel("hours of training (one RTX 4090 each)")
@@ -172,23 +177,27 @@ def chart_search_budget() -> None:
 
 
 def chart_fp16() -> None:
-    # Measured with artifacts/scratch/act_scale.py on the encoder arm's checkpoints
-    # (fp32, 512 puzzle positions): max |x| entering the final RMSNorm.
-    steps = [10_000, 20_000, 30_000, 40_000, 45_500]
-    max_abs = [46.0, 101.3, 194.0, 280.2, 349.3]
+    # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions): max |x|
+    # entering the final RMSNorm. No decay: the encoder arm (E); decay: sims-400 + AdamW 0.05.
+    VIOLET = "#6250d6"  # validated against ORANGE (all-pairs, light)
+    series = [("no weight decay", ORANGE, [10_000, 20_000, 30_000, 40_000, 45_500], [46.0, 101.3, 194.0, 280.2, 349.3]),
+              ("weight decay 0.05", VIOLET, [10_000, 20_000, 30_000], [24.9, 35.7, 45.8])]
     fig, ax = plt.subplots(figsize=(8, 4.4))
-    ax.plot([s / 1000 for s in steps], max_abs, color=ORANGE)
-    for s, v in zip(steps, max_abs):
-        ax.plot([s / 1000], [v], "o", ms=6, color=ORANGE, mec=SURFACE, mew=2, zorder=5)
+    for name, color, steps, vals in series:
+        xs = [s / 1000 for s in steps]
+        ax.plot(xs, vals, color=color, label=name)
+        ax.plot(xs, vals, "o", ms=6, color=color, mec=SURFACE, mew=2, zorder=5)
+        ax.annotate(f"{vals[-1]:.0f}", (xs[-1], vals[-1]), xytext=(8, 0), textcoords="offset points",
+                    va="center", color=INK2)
     ax.axhline(256, color=INK2, lw=1)
     ax.annotate("x² overflows FP16 above |x| = 256", (10.5, 256), xytext=(0, 6), textcoords="offset points",
                 color=INK2, fontsize=10)
-    ax.annotate("349", (45.5, 349.3), xytext=(8, 0), textcoords="offset points", va="center", color=INK2)
     ax.set_xlim(8, 50)
     ax.set_ylim(0, 400)
     ax.set_xlabel("training step (thousands)")
     ax.set_ylabel("largest activation into the final norm")
-    ax.set_title("No weight decay: the residual stream keeps growing")
+    ax.set_title("Without weight decay the residual stream keeps growing")
+    ax.legend(loc="upper left", fontsize=10)
     fig.tight_layout()
     fig.savefig(OUT / "fp16_activation_growth.png")
     plt.close(fig)
