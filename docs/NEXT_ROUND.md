@@ -393,8 +393,11 @@ Stopped at 4.5 h; armA now runs sims-400 + AdamW weight decay 0.05 on
 matrices (`enc_sims400_wd.yaml`, 08:02-16:33 UTC). Does sims-400 pass 2,000 if
 continued? E gained ~150-190 after 8 h (re-rated: ~1,950 at 13 h, ~1,990 at
 19.5 h) and sims-400 was ~50 ahead of E at 8 h with ~1.6x the steps per hour:
-plausible, right at the ~1,950 ceiling every E branch sits at. armF's seed 2
-extended to 20:34 UTC (~16.4 h) to find out.
+plausible, right at the ~1,950 ceiling every E branch sits at. Answered with
+the best run itself (08:19 UTC): seed 1 resumed on armA from step 32.5k with
+its own 2M-record buffer (stopped 03:05-08:19; dashboard hours now exclude
+downtime), deadline 16:50 UTC. Seed 2 stopped at 4.2 h (replication done);
+armF runs the weight-decay test instead (same box as seed 2, 08:20-16:51 UTC).
 
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
