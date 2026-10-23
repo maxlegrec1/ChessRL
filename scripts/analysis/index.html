@@ -232,7 +232,7 @@ const simsText = () => (+$("sims").value === 0 ? "policy only (0 simulations)" :
 $("simsval").textContent = simsText();
 
 const models = await (await fetch("/api/models")).json();
-$("model").innerHTML = models.map((m) => `<option value="${m.id}">${m.label}</option>`).join("");
+$("model").innerHTML = models.map((m) => `<option value="${m.id}"${m.default ? " selected" : ""}>${m.label}</option>`).join("");
 analyse();
 </script>
 </body>

@@ -370,9 +370,19 @@ def sync_one(iid: str, inst: dict) -> None:
     dest = RUNS_HOME / inst["label"]
     dest.mkdir(parents=True, exist_ok=True)
     ssh = f"ssh -p {port} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
-    filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
-               "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", "--exclude=*"]
     for src in BOX_RUNS:
+        # Every 10k-step checkpoint, plus each run's newest one: a run's final
+        # weights rarely land on a multiple of 10k before its deadline.
+        ls = subprocess.run([*ssh.split(), f"root@{host}", f"ls -1 {src}*/checkpoints/step_*.pt 2>/dev/null | sort"],
+                            capture_output=True, text=True)
+        last: dict[str, str] = {}
+        for line in ls.stdout.split():
+            rel = line[len(src):] if line.startswith(src) else None
+            if rel and rel.count("/") == 2:
+                last[rel.split("/")[0]] = rel
+        newest = [f"--include={rel}" for rel in last.values()]
+        filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
+                   "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", *newest, "--exclude=*"]
         r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
                             f"root@{host}:{src}", f"{dest}/"], capture_output=True, text=True)
         if r.returncode not in (0, 23):  # 23: source dir absent on this box

@@ -68,8 +68,8 @@ def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
 class Engines:
     """Discovered checkpoints (rescanned on demand) and loaded nets, least-recently-used first out."""
 
-    def __init__(self, runs_root: Path, extra: list[Path], threads: int, keep: int = 4) -> None:
-        self.runs_root, self.extra = runs_root, extra
+    def __init__(self, runs_root: Path, extra: list[Path], threads: int, default_run: str = "", keep: int = 4) -> None:
+        self.runs_root, self.extra, self.default_run = runs_root, extra, default_run
         self.models: dict[str, dict] = {}
         self.rescan()
         self.threads, self.keep = threads, keep
@@ -78,6 +78,11 @@ class Engines:
 
     def rescan(self) -> list[dict]:
         found = discover(self.runs_root, [d for d in self.extra if d.exists()])
+        # Preselect the default run's newest checkpoint (else the best-rated one).
+        mine = [m for m in found if m["run"].split(" ")[0] == self.default_run]
+        pick = max(mine, key=lambda m: m["step"]) if mine else (found[0] if found else None)
+        for m in found:
+            m["default"] = m is pick
         self.models = {m["id"]: m for m in found}
         return found
 
@@ -140,7 +145,7 @@ def make_handler(engines: Engines):
             if self.path in ("/", "/index.html"):
                 self._send(200, STATIC.read_bytes(), "text/html; charset=utf-8")
             elif self.path == "/api/models":
-                self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo")} for m in engines.rescan()])
+                self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo", "default")} for m in engines.rescan()])
             else:
                 self._json(404, {"error": "not found"})
 
@@ -175,8 +180,9 @@ def main() -> None:
     p.add_argument("--threads", type=int, default=8, help="torch CPU threads per search")
     p.add_argument("--runs-root", type=Path, default=Path(os.environ.get("CHESSRL_RUNS_ROOT", Path.home() / "chessrl-runs")))
     p.add_argument("--extra", type=Path, nargs="*", default=[ROOT / "artifacts" / "scratch" / "branch45500"])
+    p.add_argument("--default-run", default="encfinal", help="preselect this run's newest checkpoint")
     a = p.parse_args()
-    engines = Engines(a.runs_root, a.extra, a.threads)
+    engines = Engines(a.runs_root, a.extra, a.threads, a.default_run)
     best = max(engines.models.values(), key=lambda m: m["elo"] or 0, default=None)
     print(f"{len(engines.models)} checkpoints; best: {best['label'] if best else '-'}", flush=True)
     ThreadingHTTPServer((a.host, a.port), make_handler(engines)).serve_forever()
