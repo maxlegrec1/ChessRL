@@ -119,10 +119,15 @@ class Trainer:
 
     def _make_optimizer(self) -> optim.Optimizer:
         cfg = self.config
-        kwargs = dict(lr=cfg.learning_rate, weight_decay=cfg.weight_decay, betas=(cfg.beta1, cfg.beta2))
+        kwargs = dict(lr=cfg.learning_rate, betas=(cfg.beta1, cfg.beta2))
+        params = list(self.model.parameters())
+        if cfg.weight_decay > 0:
+            # Decay matrices only: norm weights, biases and scalar gains stay free.
+            params = [{"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
+                      {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0}]
         if cfg.optimizer == "adamw":
-            return optim.AdamW(self.model.parameters(), **kwargs)
-        return optim.Adam(self.model.parameters(), **kwargs)
+            return optim.AdamW(params, **kwargs)
+        return optim.Adam(params, **kwargs)
 
     def lr_at(self, step: int) -> float:
         cfg = self.config

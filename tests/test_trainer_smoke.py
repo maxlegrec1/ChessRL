@@ -80,3 +80,14 @@ def test_lr_schedule_cosine_and_growth_rewarmup(tmp_path):
     assert trainer.lr_at(10) == pytest.approx(cfg.learning_rate * cfg.lr_schedule.final_ratio)
     trainer.last_growth_step = 5
     assert trainer.lr_at(5) < trainer.lr_at(9)
+
+
+def test_weight_decay_spares_norms_and_biases(tmp_path):
+    cfg = _config(tmp_path, "visits")
+    cfg.optimizer = "adamw"
+    cfg.weight_decay = 0.05
+    t = Trainer(cfg)
+    decayed, free = t.optimizer.param_groups
+    assert decayed["weight_decay"] == 0.05 and free["weight_decay"] == 0.0
+    assert all(p.ndim >= 2 for p in decayed["params"]) and all(p.ndim < 2 for p in free["params"])
+    assert len(decayed["params"]) + len(free["params"]) == len(list(t.model.parameters()))
