@@ -345,6 +345,14 @@ level per record. Seed 2 and E agree in hours within ~50-100. The two
 slow-host runs are level with E per record so far but have only 1-3M records:
 both still sit before the 2-4M-record jump E and seed 2 made.
 
+01:26 UTC: armB's self-play died again, CUDA error 901 (stream capture
+invalidated) launching the new norm's fused kernel right after an engine swap:
+a CUDA-graph capture on one inference worker racing another worker's launch.
+Only armB (8 layers, slowest) hit it in ~5 h of swaps on seven boxes. armB
+resumed 01:51 with CUDA graphs off (`EXTRA_ENV=CHESSRL_CUDA_GRAPHS=0`), deadline
+06:15 UTC (+2 h: it was mid-jump, 474 -> 920). Every run now has a keep-alive
+(`box.sh keep`): a dead run resumes from its newest checkpoint, up to 5 times.
+
 20:42 UTC: decline confirmed (LR-decay branch 1,583 at step 49k, LR 0.60x);
 stopped. 20:46: armE restarted from step 45.5k as calibration + LR decay
 (`caldecay`, fresh buffer like the other two); first window 8.0% wrong ->
