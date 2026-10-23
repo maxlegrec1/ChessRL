@@ -58,23 +58,32 @@ def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
         for ck in sorted(d.glob("**/step_*.pt")):
             step = int(ck.stem.split("_")[1])
             found.append({"path": str(ck), "run": "encoder (armE)", "step": step, "elo": RERATED.get(("encoder", step))})
-    for i, m in enumerate(sorted(found, key=lambda m: -(m["elo"] or 0))):
-        m["id"] = str(i)
+    for m in found:
+        m["id"] = m["path"]  # stable across rescans
         elo = f"{m['elo']:,.0f}" if m["elo"] is not None else "unrated"
         m["label"] = f"{m['run']} · step {m['step'] / 1000:g}k · {elo}"
     return sorted(found, key=lambda m: -(m["elo"] or 0))
 
 
 class Engines:
-    """Loaded nets, least-recently-used first out."""
+    """Discovered checkpoints (rescanned on demand) and loaded nets, least-recently-used first out."""
 
-    def __init__(self, models: list[dict], threads: int, keep: int = 4) -> None:
-        self.models = {m["id"]: m for m in models}
+    def __init__(self, runs_root: Path, extra: list[Path], threads: int, keep: int = 4) -> None:
+        self.runs_root, self.extra = runs_root, extra
+        self.models: dict[str, dict] = {}
+        self.rescan()
         self.threads, self.keep = threads, keep
         self.cache: OrderedDict[str, Net] = OrderedDict()
         self.lock = threading.Lock()
 
+    def rescan(self) -> list[dict]:
+        found = discover(self.runs_root, [d for d in self.extra if d.exists()])
+        self.models = {m["id"]: m for m in found}
+        return found
+
     def get(self, model_id: str) -> Net:
+        if model_id not in self.models:
+            raise ValueError(f"unknown model {model_id}")
         with self.lock:
             if model_id in self.cache:
                 self.cache.move_to_end(model_id)
@@ -111,7 +120,7 @@ def board_state(board: chess.Board) -> dict:
             "check": board.is_check(), "last": last, "history": len(board.move_stack)}
 
 
-def make_handler(engines: Engines, models: list[dict]):
+def make_handler(engines: Engines):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # quiet
             pass
@@ -131,7 +140,7 @@ def make_handler(engines: Engines, models: list[dict]):
             if self.path in ("/", "/index.html"):
                 self._send(200, STATIC.read_bytes(), "text/html; charset=utf-8")
             elif self.path == "/api/models":
-                self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo")} for m in models])
+                self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo")} for m in engines.rescan()])
             else:
                 self._json(404, {"error": "not found"})
 
@@ -167,10 +176,10 @@ def main() -> None:
     p.add_argument("--runs-root", type=Path, default=Path(os.environ.get("CHESSRL_RUNS_ROOT", Path.home() / "chessrl-runs")))
     p.add_argument("--extra", type=Path, nargs="*", default=[ROOT / "artifacts" / "scratch" / "branch45500"])
     a = p.parse_args()
-    models = discover(a.runs_root, [d for d in a.extra if d.exists()])
-    engines = Engines(models, a.threads)
-    print(f"{len(models)} checkpoints; best: {models[0]['label'] if models else '-'}", flush=True)
-    ThreadingHTTPServer((a.host, a.port), make_handler(engines, models)).serve_forever()
+    engines = Engines(a.runs_root, a.extra, a.threads)
+    best = max(engines.models.values(), key=lambda m: m["elo"] or 0, default=None)
+    print(f"{len(engines.models)} checkpoints; best: {best['label'] if best else '-'}", flush=True)
+    ThreadingHTTPServer((a.host, a.port), make_handler(engines)).serve_forever()
 
 
 if __name__ == "__main__":
