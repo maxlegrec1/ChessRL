@@ -68,9 +68,24 @@ def load_run(run_dir: str) -> dict:
     if not lad.empty and "t" in lad:
         lad = lad[lad["t"] >= own_t0 - 1800].copy()  # a run's first rating may precede its metrics a little
     t0 = float(branch.get("parent_t0", own_t0))
+    # Hours of training, not of wall clock: a run stopped and resumed later (or down
+    # after a crash) would otherwise jump right by its downtime. Self-play logs every
+    # 30 s; any longer silence counts as downtime.
+    ts = np.sort(selfplay["t"].to_numpy(dtype=float)) if not selfplay.empty and "t" in selfplay else np.array([])
+    gaps = np.diff(ts)
+    big = np.append(gaps > 600, True)  # the open interval after the last row counts once it is > 600 s
+    down_s = np.concatenate([[0.0], np.cumsum(np.where(gaps > 600, gaps - 30, 0.0))])
     for df in (train, selfplay, events, lad):
         if not df.empty and "t" in df:
-            df["hours"] = (df["t"] - t0) / 3600.0
+            t = df["t"].to_numpy(dtype=float)
+            down = np.zeros_like(t)
+            if len(ts):
+                i = np.clip(np.searchsorted(ts, t, side="right") - 1, 0, None)
+                since = t - ts[i]
+                # Inside a gap (or past the last row by > 600 s) the extra time is downtime.
+                inside = big[i] & (since > np.where(i == len(ts) - 1, 600, 0))
+                down = down_s[i] + np.where(inside, np.maximum(0.0, since - 30), 0.0)
+            df["hours"] = (t - t0 - down) / 3600.0
     # Self-play positions written so far, for every table (interpolated on time).
     if not selfplay.empty and "total_records_written" in selfplay:
         xs = selfplay["t"].to_numpy(dtype=float)

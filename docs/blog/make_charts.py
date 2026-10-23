@@ -92,8 +92,27 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
         before = [c for tt, c in pts if tt <= t]
         return before[-1] if before else 0.0
 
+    # Hours of training, not wall clock (same rule as the dashboard): self-play
+    # logs every 30 s, so a longer silence (a stop/resume, a crash) is downtime.
+    ts = sorted(r["t"] for r in sp)
+
+    def active_hours(t: float) -> float:
+        down, prev = 0.0, None
+        for tt in ts:
+            if tt > t:
+                if prev is not None and tt - prev > 600:
+                    down += max(0.0, t - prev - 30)
+                break
+            if prev is not None and tt - prev > 600:
+                down += tt - prev - 30
+            prev = tt
+        else:
+            if prev is not None and t - prev > 600:
+                down += t - prev - 30
+        return max(0.0, (t - t0 - down) / 3600)
+
     return {
-        "hours": [max(0.0, (r["t"] - t0) / 3600) for r in lad],
+        "hours": [active_hours(r["t"]) for r in lad],
         "records_m": [records_at(r["t"]) / 1e6 for r in lad],
         "elo": [r["elo"] for r in lad],
     }
