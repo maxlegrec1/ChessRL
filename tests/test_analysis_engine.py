@@ -33,10 +33,10 @@ def test_encode_history_and_repetition_planes():
 
 def test_priors_are_a_distribution_over_legal_moves(net):
     b = chess.Board("8/4P1k1/8/8/8/8/8/4K3 w - - 0 1")
-    (priors, wdl), = net.evaluate([b])
+    (priors, wdl, plies), = net.evaluate([b])
     assert set(priors) == set(b.legal_moves)
     assert sum(priors.values()) == pytest.approx(1.0)
-    assert sum(wdl) == pytest.approx(1.0)
+    assert sum(wdl) == pytest.approx(1.0) and plies >= 0
     assert policy_key(chess.Move.from_uci("e7e8n")) == "e7e8"  # knight promotion = bare move
     assert policy_key(chess.Move.from_uci("e7e8q")) == "e7e8q"
 
@@ -49,3 +49,30 @@ def test_search_finds_mate_in_one_with_an_untrained_net(net, fen, mate):
     res = analyse(net, chess.Board(fen), 300)
     assert res["best"] == mate
     assert res["moves"][0]["score"] == pytest.approx(1.0)
+
+
+def test_repetition_rules():
+    from src.analysis.engine import end_reason, terminal_value
+
+    b = chess.Board()
+    for u in ["g1f3", "g8f6", "f3g1", "f6g8"]:  # start position, second time
+        b.push_uci(u)
+    assert terminal_value(b) is None and end_reason(b) is None  # not over by the rules
+    assert terminal_value(b, twofold=True) == 0.0  # but a draw inside the search tree
+    for u in ["g1f3", "g8f6", "f3g1"]:  # Black could now claim with ...Ng8: still not over
+        b.push_uci(u)
+    assert b.can_claim_threefold_repetition() and end_reason(b) is None
+    b.push_uci("f6g8")
+    assert end_reason(b) == "threefold repetition"
+
+
+def test_twofold_repetition_is_a_draw_inside_the_search(net):
+    from src.analysis.engine import search
+
+    # K+Q vs K; after Qd2 Kb8 Qd1 Ka8 the move Qd2 returns to a position seen before.
+    b = chess.Board("k7/8/2K5/8/8/8/8/3Q4 w - - 0 1")
+    for u in ["d1d2", "a8b8", "d2d1", "b8a8"]:
+        b.push_uci(u)
+    repeat = chess.Move.from_uci("d1d2")
+    assert search(net, b, 50, twofold_draw=True)["root"].children[repeat].terminal == 0.0
+    assert search(net, b, 50, twofold_draw=False)["root"].children[repeat].terminal is None

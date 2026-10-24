@@ -6,6 +6,17 @@ vocabulary (castling as the king's move, knight promotions as the bare move),
 WDL from the side to move, values in [-1, 1], unvisited children at Q = 0,
 U = cpuct * P * sqrt(N_parent) / (1 + N). No root noise (this is analysis).
 Leaves are evaluated in small batches with virtual loss.
+
+Two rules on top of the self-play engine, both on by default:
+- twofold_draw: a position that already occurred (in the game or the search
+  path) scores as a draw inside the tree. The self-play engine only stops at a
+  threefold repetition, so a winning side can shuffle pieces until the game is
+  drawn; with this rule the search avoids repeating when it is ahead and seeks
+  repetition when it is behind (as Leela does).
+- mlh_eps: the self-play engine's moves-left tiebreak: among children,
+  score += eps * (1 - 2 W) * tanh(plies / 25), W = the mover's win chance
+  (approximated by its mean value), plies = the backed-up moves-left estimate.
+  When winning it prefers shorter wins; when losing, longer games.
 """
 
 from __future__ import annotations
@@ -70,10 +81,12 @@ class Net:
         return net
 
     @torch.no_grad()
-    def evaluate(self, boards: list[chess.Board]) -> list[tuple[dict[chess.Move, float], tuple[float, float, float]]]:
+    def evaluate(self, boards: list[chess.Board]) -> list[tuple[dict[chess.Move, float], tuple[float, float, float], float]]:
+        """Per board: legal-move priors, WDL for the side to move, estimated plies left."""
         x = torch.from_numpy(np.stack([encode(b) for b in boards]))
-        p, v, vq, _, _ = self.model(x, return_all=True)
+        p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
         wdl = torch.softmax(v if self.outcome_heads else vq, dim=-1).numpy()
+        plies = (mlh if self.outcome_heads else mlh_q).float().clamp_min(0).numpy() * 25.0
         logits = p.float().numpy()
         out = []
         for i, b in enumerate(boards):
@@ -82,17 +95,34 @@ class Net:
             lg = np.array([logits[i, j] if j >= 0 else -1e9 for j in idx], dtype=np.float64)
             pr = np.exp(lg - lg.max()) if len(lg) else lg
             pr = pr / pr.sum() if len(pr) else pr
-            out.append(({m: float(q) for m, q in zip(moves, pr)}, tuple(float(t) for t in wdl[i])))
+            out.append(({m: float(q) for m, q in zip(moves, pr)}, tuple(float(t) for t in wdl[i]), float(plies[i])))
         return out
 
 
-def terminal_value(board: chess.Board) -> float | None:
-    """Value for the side to move if the game is over (-1 mated, 0 drawn), else None."""
+def terminal_value(board: chess.Board, twofold: bool = False) -> float | None:
+    """Value for the side to move if the game is over (-1 mated, 0 drawn), else None.
+
+    twofold: count a position seen before as a draw (search tree rule)."""
     if board.is_checkmate():
         return -1.0
     if (board.is_stalemate() or board.is_insufficient_material() or board.halfmove_clock >= 100
-            or board.is_repetition(3)):
+            or board.is_repetition(2 if twofold else 3)):
         return 0.0
+    return None
+
+
+def end_reason(board: chess.Board) -> str | None:
+    """Why the game is over by the rules (an actual threefold, not a claimable one), else None."""
+    if board.is_checkmate():
+        return "checkmate"
+    if board.is_stalemate():
+        return "stalemate"
+    if board.is_insufficient_material():
+        return "insufficient material"
+    if board.halfmove_clock >= 100:
+        return "fifty-move rule"
+    if board.is_repetition(3):
+        return "threefold repetition"
     return None
 
 
@@ -107,19 +137,22 @@ class Node:
     expanded: bool = False
     terminal: float | None = None
     wdl: tuple[float, float, float] | None = None
+    plies_est: float = 0.0  # network's moves-left estimate at this node
+    plies_sum: float = 0.0  # backed-up moves-left, summed over visits
 
     def q(self) -> float:
         return self.w / self.n if self.n else 0.0
 
 
-def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: int = 8) -> dict:
+def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: int = 8,
+           twofold_draw: bool = True, mlh_eps: float = 0.05) -> dict:
     """PUCT search from `board`. Returns the root, its evaluation and timing."""
     t0 = time.time()
     root = Node(board.copy())
     root.terminal = terminal_value(root.board)
     if root.terminal is None:
-        (priors, wdl), = net.evaluate([root.board])
-        _expand(root, priors, wdl)
+        (priors, wdl, plies), = net.evaluate([root.board])
+        _expand(root, priors, wdl, plies, twofold_draw)
     done = 0
     while done < sims and root.terminal is None:
         leaves, paths = [], []
@@ -127,7 +160,7 @@ def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: 
             path = [root]
             node = root
             while node.expanded and node.terminal is None and node.children:
-                node = _select(node, cpuct)
+                node = _select(node, cpuct, mlh_eps)
                 path.append(node)
             for nd in path[1:]:
                 nd.vloss += 1
@@ -139,47 +172,54 @@ def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: 
             paths.append(path)
         pending = [l for l in leaves if l.terminal is None and not l.expanded]
         if pending:
-            for l, (priors, wdl) in zip(pending, net.evaluate([l.board for l in pending])):
-                _expand(l, priors, wdl)
+            for l, (priors, wdl, plies) in zip(pending, net.evaluate([l.board for l in pending])):
+                _expand(l, priors, wdl, plies, twofold_draw)
         for leaf, path in zip(leaves, paths):
             for nd in path[1:]:
                 nd.vloss -= 1
             v = leaf.terminal if leaf.terminal is not None else (leaf.wdl[0] - leaf.wdl[2])
+            plies = 0.0 if leaf.terminal is not None else leaf.plies_est
             # v is from the side to move at the leaf; the node's w is from the mover's side.
             for nd in reversed(path):
                 v = -v
                 nd.n += 1
                 nd.w += v
+                nd.plies_sum += plies
+                plies += 1.0
         done += len(leaves)
     return {"root": root, "sims": done, "seconds": time.time() - t0}
 
 
-def _expand(node: Node, priors: dict[chess.Move, float], wdl: tuple[float, float, float]) -> None:
-    node.wdl = wdl
+def _expand(node: Node, priors: dict[chess.Move, float], wdl: tuple[float, float, float], plies: float,
+            twofold_draw: bool) -> None:
+    node.wdl, node.plies_est = wdl, plies
     for m, p in priors.items():
         child = node.board.copy(stack=True)
         child.push(m)
         c = Node(child, prior=p)
-        c.terminal = terminal_value(child)
+        c.terminal = terminal_value(child, twofold=twofold_draw)
         node.children[m] = c
     node.expanded = True
 
 
-def _select(node: Node, cpuct: float) -> Node:
+def _select(node: Node, cpuct: float, mlh_eps: float = 0.0) -> Node:
     sq = math.sqrt(max(1, node.n))
     best, best_s = None, -math.inf
     for c in node.children.values():
         n = c.n + c.vloss
         q = (c.w - c.vloss) / n if n else 0.0  # a pending visit counts as a loss for the mover
         s = q + cpuct * c.prior * sq / (1 + n)
+        if mlh_eps and c.n:
+            # (1 - 2 W) ~ -Q: winning prefers fewer plies left, losing prefers more.
+            s -= mlh_eps * (c.w / c.n) * math.tanh(c.plies_sum / c.n / 25.0)
         if s > best_s:
             best, best_s = c, s
     return best
 
 
-def analyse(net: Net, board: chess.Board, sims: int) -> dict:
+def analyse(net: Net, board: chess.Board, sims: int, **search_kw) -> dict:
     """Everything the board UI shows for a position."""
-    res = search(net, board, sims)
+    res = search(net, board, sims, **search_kw)
     root = res["root"]
     rows = []
     for m, c in root.children.items():
@@ -190,8 +230,5 @@ def analyse(net: Net, board: chess.Board, sims: int) -> dict:
         })
     rows.sort(key=lambda r: (r["visits"], r["prior"]), reverse=True)
     best = rows[0]["uci"] if rows else None
-    status = None
-    if root.terminal is not None:
-        status = "checkmate" if board.is_checkmate() else "draw"
     return {"moves": rows, "best": best, "wdl": root.wdl, "sims": res["sims"],
-            "seconds": round(res["seconds"], 3), "status": status}
+            "seconds": round(res["seconds"], 3), "status": end_reason(board)}

@@ -21,7 +21,7 @@ import chess
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.analysis.engine import Net, analyse  # noqa: E402
+from src.analysis.engine import Net, analyse, end_reason  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "analysis" / "index.html"
 MAX_SIMS = 3200
@@ -166,9 +166,11 @@ def make_handler(engines: Engines):
                 sims = max(0, min(MAX_SIMS, int(req.get("sims", 0))))
                 state = board_state(board)
                 state["sans"] = sans
-                if board.is_game_over(claim_draw=True):
-                    state.update(moves=[], best=None, wdl=None, sims=0, seconds=0,
-                                 status="checkmate" if board.is_checkmate() else "draw")
+                # Over only by the rules (an actual threefold, not a claimable one): a
+                # side that could repeat may still play on.
+                reason = end_reason(board)
+                if reason:
+                    state.update(moves=[], best=None, wdl=None, sims=0, seconds=0, status=reason)
                     return self._json(200, state)
                 net = engines.get(str(req.get("model")))
                 res = analyse(net, board, sims)
