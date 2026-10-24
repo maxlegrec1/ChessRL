@@ -541,3 +541,47 @@ wrong at threshold 0.05, calibrated to 0.04.
   ladder caveat: deterministic MCTS-100 eval draws many won games by
   repetition vs weak anchors (C @3k: 20W 28D 0L vs random), compressing
   the low end of the scale equally for all arms.
+
+## Value-head study, step 0 (2026-10-24 22:00 UTC, one rented 4090, $0.34)
+
+Question: should the search read the head trained on the search's root WDL
+(`value_q`) instead of the one trained on game results (`value`), at least late
+in training? Test-time only: same checkpoint, three engines that differ only in
+the value the search reads (moves-left fixed on the outcome head), from the
+sims-400 run. `scripts/head_ab.py`; raw results in `~/chessrl-runs/headab/`.
+
+| | step 10k | step 61.5k (plateau) |
+|---|---|---|
+| ladder, `value` (288 games) | 1,494 ± 36 | **1,885 ± 23** |
+| ladder, `value_q` | 1,480 ± 35 | 1,808 ± 23 |
+| ladder, 50/50 blend | 1,459 ± 34 | 1,850 ± 23 |
+| head-to-head `value` vs `value_q` (400 games) | +16 (95%: −8 to +40) | **+54 (+30 to +79)** |
+| head-to-head `value` vs blend | +4 (−20 to +28) | **+44 (+19 to +69)** |
+| puzzles (line), value / value_q / blend | 58.7 / 59.7 / 59.8% | 72.6 / 72.7 / 72.8% |
+| Spearman vs Stockfish WDL, value / value_q (2,000 positions) | 0.841 / 0.840 | 0.882 / 0.889 |
+
+- At the plateau the search plays **50-80 Elo stronger reading the game-result
+  head**, although `value_q` is as good or slightly better as a static estimate
+  (rank correlation with Stockfish's WDL, every game phase). At step 10k the
+  heads are level. So switching at test time does not help; the gap even grows
+  with training.
+- Likely reasons (untested): the policy, search settings and data were all
+  trained with `value` in the search (a test-time switch pays the mismatch),
+  and `value_q` learns a visit-weighted root average, i.e. the value of the
+  position if play followed the search's visit distribution, which is softer
+  than best play (root average sits 0.016 below the most-visited move's value).
+  A training-time switch (step 1) is still untested; if run, use the
+  most-visited move's value as the target.
+- **Dirichlet noise barely moves the `value_q` target** (mean |shift| 0.004-0.005
+  in expected score, mean shift −0.001; the 0.016 root-vs-best gap is the same
+  with and without noise). It does change the most-visited move in 16-20% of
+  full-search positions (`scripts/search_determinism.py`: 0% without noise, so
+  it is the noise); the median value lost is 0.001 (near-ties), but 6-11% of
+  those changes lose > 0.10, i.e. ~1-2% of full-search moves are noise-induced
+  mistakes that end up in the games.
+- **Ladder lag in steep climbs**: the run's own ladder rated step 10k at 1,082,
+  against anchors it beat almost every game (greedy 561, sf_s0_r25 778); with
+  better-matched anchors (778 and 1,224) the same engine rates ~1,490, and its
+  puzzle accuracy is identical (59%). The daemon's anchors trail the estimate,
+  so ratings during fast rises are lower bounds; this applies to every run, most
+  to the fastest risers.
