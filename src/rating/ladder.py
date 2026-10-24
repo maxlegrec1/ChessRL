@@ -110,6 +110,19 @@ class Game:
         return (self.board.turn == chess.WHITE) == self.model_white
 
 
+def rules_end(board: chess.Board) -> tuple[bool, chess.Color | None]:
+    """(over, winner) under automatic draws, the same rules as the self-play referee:
+    checkmate, stalemate, insufficient material, the 50-move rule, or a position
+    occurring for the third time. Unlike python-chess's claim_draw, a threefold that
+    could be made with the next move does not end the game."""
+    if board.is_checkmate():
+        return True, not board.turn
+    if (board.is_stalemate() or board.is_insufficient_material() or board.halfmove_clock >= 100
+            or board.is_repetition(3)):
+        return True, None
+    return False, None
+
+
 def make_openings(n: int, plies: int = 8, seed: int = 1234) -> list[list[str]]:
     """Deterministic random openings (each is played twice, colours swapped)."""
     rng = random.Random(seed)
@@ -155,12 +168,9 @@ def play_match(engine_path: str, anchor: Anchor, openings: list[list[str]], sims
         if not live:
             break
         for g in live:
-            if g.board.is_game_over(claim_draw=True) or len(g.history) >= max_plies:
-                outcome = g.board.outcome(claim_draw=True)
-                if outcome is None or outcome.winner is None:
-                    g.result = 0.5
-                else:
-                    g.result = 1.0 if outcome.winner == g.model_white else 0.0
+            over, winner = rules_end(g.board)
+            if over or len(g.history) >= max_plies:
+                g.result = 0.5 if winner is None else (1.0 if winner == g.model_white else 0.0)
         live = [g for g in games if g.result is None]
         to_search = [g for g in live if g.model_to_move]
         if to_search:
@@ -168,7 +178,7 @@ def play_match(engine_path: str, anchor: Anchor, openings: list[list[str]], sims
                 g.board.push_uci(uci)
                 g.history.append(uci)
         for g in live:
-            if g.result is None and not g.model_to_move and not g.board.is_game_over(claim_draw=True):
+            if g.result is None and not g.model_to_move and not rules_end(g.board)[0]:
                 m = anchor.move(g.board)
                 g.board.push(m)
                 g.history.append(m.uci())
@@ -272,11 +282,11 @@ def _play_pair(a_name: str, b_name: str, openings: list[list[str]]) -> list[tupl
                 board = chess.Board()
                 for uci in opening:
                     board.push_uci(uci)
-                while not board.is_game_over(claim_draw=True) and board.ply() < 300:
+                while not rules_end(board)[0] and board.ply() < 300:
                     mover = a if (board.turn == chess.WHITE) == a_white else b
                     board.push(mover.move(board))
-                o = board.outcome(claim_draw=True)
-                s = 0.5 if o is None or o.winner is None else (1.0 if o.winner == a_white else 0.0)
+                winner = rules_end(board)[1]
+                s = 0.5 if winner is None else (1.0 if winner == a_white else 0.0)
                 out.append((a_name, b_name, s))
     finally:
         a.close()

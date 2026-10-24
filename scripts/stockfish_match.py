@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT))
 
 import _inference_cpp
 
+from src.rating.ladder import rules_end  # noqa: E402  (automatic threefold, as in self-play)
+
 
 def get_model_move(
     history: list[str],
@@ -57,7 +59,7 @@ def play_one(
 ):
     board = chess.Board()
     history: list[str] = []
-    while not board.is_game_over(claim_draw=True) and len(history) < max_plies:
+    while not rules_end(board)[0] and len(history) < max_plies:
         is_model_turn = (board.turn == chess.WHITE) == model_white
         if is_model_turn:
             uci = get_model_move(history, engine_path, simulations, cpuct, virtual_loss_width)
@@ -71,10 +73,10 @@ def play_one(
         history.append(mv.uci())
         board.push(mv)
 
-    outcome = board.outcome(claim_draw=True)
-    if outcome is None or outcome.winner is None:
+    winner = rules_end(board)[1]
+    if winner is None:
         return board, history, "1/2-1/2"
-    return board, history, ("1-0" if outcome.winner == chess.WHITE else "0-1")
+    return board, history, ("1-0" if winner == chess.WHITE else "0-1")
 
 
 def main():

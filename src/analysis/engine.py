@@ -7,16 +7,16 @@ WDL from the side to move, values in [-1, 1], unvisited children at Q = 0,
 U = cpuct * P * sqrt(N_parent) / (1 + N). No root noise (this is analysis).
 Leaves are evaluated in small batches with virtual loss.
 
-Two rules on top of the self-play engine, both on by default:
-- twofold_draw: a position that already occurred (in the game or the search
-  path) scores as a draw inside the tree. The self-play engine only stops at a
-  threefold repetition, so a winning side can shuffle pieces until the game is
-  drawn; with this rule the search avoids repeating when it is ahead and seeks
-  repetition when it is behind (as Leela does).
+Repetitions follow the self-play rules: a position occurring for the third time
+(counting the game so far and the searched line, since the last capture or pawn
+move) is an automatic draw, both inside the tree and as the game's end.
+
 - mlh_eps: the self-play engine's moves-left tiebreak: among children,
   score += eps * (1 - 2 W) * tanh(plies / 25), W = the mover's win chance
   (approximated by its mean value), plies = the backed-up moves-left estimate.
   When winning it prefers shorter wins; when losing, longer games.
+- twofold_draw (off by default): also score a position's second occurrence as a
+  draw inside the tree, Leela-style.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ class Node:
 
 
 def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: int = 8,
-           twofold_draw: bool = True, mlh_eps: float = 0.05) -> dict:
+           twofold_draw: bool = False, mlh_eps: float = 0.05) -> dict:
     """PUCT search from `board`. Returns the root, its evaluation and timing."""
     t0 = time.time()
     root = Node(board.copy())

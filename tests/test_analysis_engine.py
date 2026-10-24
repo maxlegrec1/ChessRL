@@ -75,4 +75,17 @@ def test_twofold_repetition_is_a_draw_inside_the_search(net):
         b.push_uci(u)
     repeat = chess.Move.from_uci("d1d2")
     assert search(net, b, 50, twofold_draw=True)["root"].children[repeat].terminal == 0.0
-    assert search(net, b, 50, twofold_draw=False)["root"].children[repeat].terminal is None
+    assert search(net, b, 50)["root"].children[repeat].terminal is None  # default: threefold only
+
+
+def test_threefold_is_a_draw_inside_the_search_by_default(net):
+    from src.analysis.engine import search
+
+    # After this the position with the queen on d1 and the king on b8 (Black to move) has
+    # occurred twice, and ...Ka8 brings back the starting position for the third time.
+    b = chess.Board("k7/8/2K5/8/8/8/8/3Q4 w - - 0 1")
+    for u in ["d1d2", "a8b8", "d2d1", "b8a8", "d1d2", "a8b8", "d2d1"]:
+        b.push_uci(u)
+    root = search(net, b, 50)["root"]
+    assert root.children[chess.Move.from_uci("b8a8")].terminal == 0.0
+    assert root.children[chess.Move.from_uci("b8c8")].terminal is None
