@@ -8,4 +8,5 @@
 # Compare with enc_sims400 (seeds 1 and 2).
 extends: enc_sims400.yaml
 selfplay:
+  save_pgn: true  # for the opening-diversity metrics
   random_opening_plies: 0

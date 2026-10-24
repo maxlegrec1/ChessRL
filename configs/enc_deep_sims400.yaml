@@ -5,3 +5,6 @@
 extends: enc_sims400.yaml
 model:
   layers: 8
+# Self-play games are saved (artifacts/pgns) for the opening-diversity metrics.
+selfplay:
+  save_pgn: true
