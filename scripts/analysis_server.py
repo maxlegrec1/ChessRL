@@ -40,18 +40,26 @@ def ladder_elo(run_dir: Path, step: int) -> float | None:
         rows = [json.loads(l) for l in (run_dir / "ladder" / "ladder.jsonl").read_text().splitlines() if l.strip()]
     except (FileNotFoundError, ValueError):
         return None
-    near = [r for r in rows if abs(r.get("step", -10**9) - step) <= 1000]
+    near = [r for r in rows if abs(r.get("step", -10**9) - step) <= 2500]
     return min(near, key=lambda r: abs(r["step"] - step))["elo"] if near else None
 
 
 def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
     found = []
-    for ck in sorted(runs_root.glob("*/*/checkpoints/step_*.pt")):
+    newest: dict[Path, int] = {}
+    cks = sorted(runs_root.glob("*/*/checkpoints/step_*.pt"))
+    for ck in cks:
+        newest[ck.parent] = max(newest.get(ck.parent, 0), int(ck.stem.split("_")[1]))
+    for ck in cks:
         run = ck.parent.parent
         name = run_name(run)
         if name == "baseline" or name.endswith("-v0"):  # main-branch checkpoint format
             continue
         step = int(ck.stem.split("_")[1])
+        # The sync brings home every 500-step checkpoint of a live run: list every
+        # 5k steps plus each run's newest, so the picker stays usable.
+        if step % 5000 and step != newest[ck.parent] and (name, step) not in RERATED:
+            continue
         elo = RERATED.get((name, step), ladder_elo(run, step))
         found.append({"path": str(ck), "run": f"{name} ({run.parent.name})", "step": step, "elo": elo})
     for d in extra:

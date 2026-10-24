@@ -21,6 +21,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--page); color: var(--ink);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; }
@@ -80,24 +81,36 @@
       as input, so it plays best on positions reached by playing moves from the start.</p>
   </section>
   <section class="card">
-    <div class="label">Evaluation (value head)</div>
-    <div class="wdl" id="wdl"><div id="w"></div><div id="d"></div><div id="l"></div></div>
-    <div class="wdl-legend"><span id="wtext">White –</span><span id="dtext">draw –</span><span id="ltext">Black –</span></div>
+    <div class="label">Mode</div>
+    <div class="row" style="margin-top:0">
+      <select id="mode">
+        <option value="analysis">Analysis</option>
+        <option value="white">Play as White</option>
+        <option value="black">Play as Black</option>
+      </select>
+      <label id="hintsbox" hidden><input type="checkbox" id="hints"> Show hints</label>
+      <button id="newgame" hidden>New game</button>
+    </div>
 
     <div class="label" style="margin-top:14px">Search: <span id="simsval"></span></div>
     <input type="range" id="sims" min="0" max="1600" step="50" value="400">
-    <div class="row">
+    <div class="row" id="analysis-buttons">
       <button id="play" class="primary">▶ Self-play</button>
       <button id="step">Play best move</button>
     </div>
     <div id="status" style="margin-top:8px"></div>
 
-    <div class="label" style="margin-top:10px">Candidate moves</div>
-    <div class="scroll">
-      <table>
-        <thead><tr><th>Move</th><th>Policy</th><th>Visits</th><th>Score</th></tr></thead>
-        <tbody id="moves"></tbody>
-      </table>
+    <div id="hintpanel">
+      <div class="label" style="margin-top:10px">Evaluation (value head)</div>
+      <div class="wdl" id="wdl"><div id="w"></div><div id="d"></div><div id="l"></div></div>
+      <div class="wdl-legend"><span id="wtext">White –</span><span id="dtext">draw –</span><span id="ltext">Black –</span></div>
+      <div class="label" style="margin-top:10px">Candidate moves</div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Move</th><th>Policy</th><th>Visits</th><th title="expected score for the side to move">Score</th></tr></thead>
+          <tbody id="moves"></tbody>
+        </table>
+      </div>
     </div>
     <div class="label" style="margin-top:12px">Game</div>
     <div id="movelist"></div>
@@ -110,6 +123,9 @@ const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const $ = (id) => document.getElementById(id);
 const pct = (x) => (x == null ? "–" : `${(100 * x).toFixed(1)}%`);
 let baseFen = START, moves = [], orientation = "white", playing = false, inflight = null, last = null;
+let mode = "analysis", thinking = false;  // mode: "analysis" | "white" | "black" (the colour you play)
+const playMode = () => mode !== "analysis";
+const showHints = () => !playMode() || $("hints").checked;
 
 const cg = Chessground($("board"), {
   fen: START, orientation,
@@ -123,23 +139,23 @@ function onUserMove(orig, dest) {
   const promo = piece && piece.role === "pawn" && (dest[1] === "8" || dest[1] === "1") ? "q" : "";
   stopPlay();
   moves.push(orig + dest + promo);
-  analyse();
+  if (playMode()) modelReply(); else analyse();
 }
 
-async function request() {
+async function request(sims) {
   if (inflight) inflight.abort();
   inflight = new AbortController();
-  const body = { model: $("model").value, fen: baseFen, moves, sims: +$("sims").value };
+  const body = { model: $("model").value, fen: baseFen, moves, sims: sims ?? +$("sims").value };
   const res = await fetch("/api/analyse", { method: "POST", body: JSON.stringify(body), signal: inflight.signal });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }
 
-async function analyse() {
+async function analyse(sims) {
   $("status").textContent = "thinking…";
   try {
-    const data = await request();
+    const data = await request(sims);
     render(data);
     return data;
   } catch (e) {
@@ -148,14 +164,28 @@ async function analyse() {
   }
 }
 
+// Play mode: the model searches the position in front of it (slider simulations) and plays its best move.
+async function modelReply() {
+  thinking = true;
+  const d = await analyse();
+  if (d && !d.status && d.best && d.turn !== mode) {
+    moves.push(d.best);
+    await analyse(showHints() ? undefined : 0);  // your turn: search only if hints are shown
+  }
+  thinking = false;
+  if (last) render(last);
+}
+
 function render(d) {
   last = d;
   const turn = d.turn;
+  const yourTurn = !playMode() || turn === mode;
   cg.set({
     fen: d.fen, turnColor: turn, check: d.check, lastMove: d.last ? [d.last.slice(0, 2), d.last.slice(2, 4)] : undefined,
-    movable: { color: playing || d.status ? undefined : turn, dests: new Map(Object.entries(d.dests)) },
+    movable: { color: playing || thinking || d.status || !yourTurn ? undefined : turn, dests: new Map(Object.entries(d.dests)) },
   });
   $("fen").value = d.fen;
+  $("hintpanel").hidden = !showHints();
   // Arrows: the search's visit share (or the raw policy at 0 simulations).
   const useShare = d.sims > 0;
   const shapes = (d.moves || []).slice(0, 5)
@@ -163,7 +193,7 @@ function render(d) {
     .filter(({ w, i }) => i === 0 || w >= 0.04)
     .map(({ m, w, i }) => ({ orig: m.uci.slice(0, 2), dest: m.uci.slice(2, 4), brush: i === 0 ? "green" : "blue",
                               modifiers: { lineWidth: Math.round(3 + 13 * w) } }));
-  cg.setAutoShapes(shapes);
+  cg.setAutoShapes(showHints() ? shapes : []);
   // Value head, shown from White's side.
   if (d.wdl) {
     const [w, dr, l] = turn === "white" ? d.wdl : [d.wdl[2], d.wdl[1], d.wdl[0]];
@@ -179,17 +209,29 @@ function render(d) {
       <td>${useShare ? `${m.visits}<span class="bar" style="width:${Math.round(40 * m.share / maxShare)}px"></span>` : "–"}</td>
       <td>${m.score == null ? "–" : pct(m.score)}</td></tr>`).join("");
   document.querySelectorAll("#moves tr").forEach((tr) => tr.addEventListener("click", () => {
-    stopPlay(); moves.push(tr.dataset.uci); analyse();
+    if (playMode() && !yourTurn) return;
+    stopPlay(); moves.push(tr.dataset.uci);
+    if (playMode()) modelReply(); else analyse();
   }));
-  const status = d.status ? `Game over: ${d.status}` : `${turn} to move`;
-  $("status").textContent = `${status} · ${d.sims} simulations in ${d.seconds}s`
-    + (d.params ? ` · ${(d.params / 1e6).toFixed(2)}M params` : "");
+  $("status").textContent = statusText(d, yourTurn);
   const sans = d.sans || [];
   const firstNo = +baseFen.split(" ")[5] || 1, blackFirst = baseFen.split(" ")[1] === "b";
   let out = [], n = firstNo, i = 0;
   if (blackFirst && sans.length) { out.push(`${n}… ${sans[0]}`); i = 1; n++; }
   for (; i < sans.length; i += 2, n++) out.push(`${n}. ${sans[i]}${sans[i + 1] ? " " + sans[i + 1] : ""}`);
   $("movelist").textContent = out.join("  ") || "–";
+}
+
+function statusText(d, yourTurn) {
+  const params = d.params ? ` · ${(d.params / 1e6).toFixed(2)}M params` : "";
+  if (!playMode()) {
+    const s = d.status ? `Game over: ${d.status}` : `${d.turn} to move`;
+    return `${s} · ${d.sims} simulations in ${d.seconds}s${params}`;
+  }
+  if (d.status === "checkmate") return d.turn === mode ? "Checkmate: the model wins." : "Checkmate: you win!";
+  if (d.status) return `Game over: ${d.status}.`;
+  const who = `model plays with ${$("sims").value} simulations per move${params}`;
+  return thinking || !yourTurn ? `Model thinking… (${who})` : `Your move (${who})`;
 }
 
 async function playLoop() {
@@ -207,9 +249,33 @@ async function playLoop() {
 function stopPlay() {
   playing = false;
   $("play").textContent = "▶ Self-play";
-  if (last && !last.status) cg.set({ movable: { color: last.turn, dests: new Map(Object.entries(last.dests)) } });
+  if (last && !last.status && !thinking && (!playMode() || last.turn === mode)) {
+    cg.set({ movable: { color: last.turn, dests: new Map(Object.entries(last.dests)) } });
+  }
 }
 
+// Start (or restart) from baseFen; in play mode the model moves first when it's its turn.
+async function newGame() {
+  stopPlay();
+  moves = [];
+  const d = await analyse(playMode() && !showHints() ? 0 : undefined);
+  if (playMode() && d && !d.status && d.turn !== mode) modelReply();
+}
+
+function setMode(m) {
+  mode = m;
+  const p = playMode();
+  $("hintsbox").hidden = !p;
+  $("newgame").hidden = !p;
+  $("analysis-buttons").hidden = p;
+  if (p) { $("hints").checked = false; orientation = mode; cg.set({ orientation }); }
+}
+
+$("mode").addEventListener("change", () => { setMode($("mode").value); newGame(); });
+$("newgame").addEventListener("click", () => { baseFen = START; newGame(); });
+$("hints").addEventListener("change", () => {
+  if ($("hints").checked && last && !last.status && last.turn === mode && !thinking) analyse(); else if (last) render(last);
+});
 $("play").addEventListener("click", () => {
   if (playing) return stopPlay();
   playing = true;
@@ -221,18 +287,33 @@ $("step").addEventListener("click", async () => {
   const d = last && !last.status ? last : await analyse();
   if (d && d.best) { moves.push(d.best); analyse(); }
 });
-$("undo").addEventListener("click", () => { stopPlay(); moves.pop(); analyse(); });
-$("start").addEventListener("click", () => { stopPlay(); baseFen = START; moves = []; analyse(); });
-$("load").addEventListener("click", () => { stopPlay(); baseFen = $("fen").value.trim() || START; moves = []; analyse(); });
+$("undo").addEventListener("click", () => {
+  if (thinking) return;
+  stopPlay();
+  // In play mode take back your move and the model's reply together.
+  const plies = playMode() && last && last.turn === mode && moves.length >= 2 ? 2 : 1;
+  moves.splice(Math.max(0, moves.length - plies));
+  analyse(playMode() && !showHints() ? 0 : undefined).then((d) => {
+    if (playMode() && d && !d.status && d.turn !== mode) modelReply();
+  });
+});
+$("start").addEventListener("click", () => { baseFen = START; newGame(); });
+$("load").addEventListener("click", () => { baseFen = $("fen").value.trim() || START; newGame(); });
 $("flip").addEventListener("click", () => { orientation = orientation === "white" ? "black" : "white"; cg.set({ orientation }); });
-$("model").addEventListener("change", () => analyse());
+$("model").addEventListener("change", () => { if (!thinking) analyse(playMode() && !showHints() ? 0 : undefined); });
 $("sims").addEventListener("input", () => { $("simsval").textContent = simsText(); });
-$("sims").addEventListener("change", () => analyse());
+$("sims").addEventListener("change", () => { if (!playMode()) analyse(); else if (last) render(last); });
 const simsText = () => (+$("sims").value === 0 ? "policy only (0 simulations)" : `${$("sims").value} simulations`);
 $("simsval").textContent = simsText();
 
+// Models grouped by run (best-rated run first), newest checkpoint first within a run.
 const models = await (await fetch("/api/models")).json();
-$("model").innerHTML = models.map((m) => `<option value="${m.id}"${m.default ? " selected" : ""}>${m.label}</option>`).join("");
+const groups = new Map();
+for (const m of models) { if (!groups.has(m.run)) groups.set(m.run, []); groups.get(m.run).push(m); }
+const elo = (m) => (m.elo == null ? "unrated" : Math.round(m.elo).toLocaleString("en-US"));
+$("model").innerHTML = [...groups].map(([run, ms]) => `<optgroup label="${run}">${
+  ms.sort((a, b) => b.step - a.step).map((m) => `<option value="${m.id}"${m.default ? " selected" : ""}>${run} · step ${m.step / 1000}k · ${elo(m)}</option>`).join("")
+}</optgroup>`).join("");
 analyse();
 </script>
 </body>
