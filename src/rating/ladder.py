@@ -230,6 +230,42 @@ def pick_anchors(estimate: float | None, ratings: dict[str, float], k: int = 2) 
     return picks
 
 
+def next_anchor(current: str, ratings: dict[str, float], up: bool, exclude: set[str]) -> str | None:
+    """The closest calibrated anchor above (up) or below `current` not yet played."""
+    names = sorted(ratings, key=ratings.get)
+    i = names.index(current)
+    for name in (names[i + 1:] if up else names[:i][::-1]):
+        if name not in exclude:
+            return name
+    return None
+
+
+def adaptive_anchor_scores(play, anchors: list[str], ratings: dict[str, float], sweep: float = 0.85,
+                           max_extra: int = 3) -> dict[str, list[float]]:
+    """Play the picked anchors, then step up (or down) while the result is lopsided.
+
+    Anchors are picked around the previous rating, so a network that improved a lot
+    since then sweeps both, and a sweep only says "stronger", not by how much: the fit
+    then leans on its prior (two virtual draws at the previous rating) and the rating
+    trails the network in steep climbs (measured: 1,082 where matched anchors give
+    ~1,490). While the model scores >= `sweep` against the strongest anchor played, add
+    the next anchor up; while it scores <= 1 - `sweep` against the weakest, the next one
+    down; at most `max_extra` extra matches (0 = the original two-anchor ladder).
+    play(name) -> the model's scores against that anchor."""
+    scores = {name: play(name) for name in anchors}
+    for _ in range(max_extra):
+        top, bottom = max(scores, key=ratings.get), min(scores, key=ratings.get)
+        nxt = None
+        if sum(scores[top]) / len(scores[top]) >= sweep:
+            nxt = next_anchor(top, ratings, up=True, exclude=set(scores))
+        elif sum(scores[bottom]) / len(scores[bottom]) <= 1.0 - sweep:
+            nxt = next_anchor(bottom, ratings, up=False, exclude=set(scores))
+        if nxt is None:
+            break
+        scores[nxt] = play(nxt)
+    return scores
+
+
 def load_puzzles(path: Path = PUZZLES) -> list[dict]:
     with path.open(newline="") as fh:
         return [

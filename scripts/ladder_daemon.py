@@ -37,18 +37,22 @@ def latest_engine(run_dir: Path) -> tuple[int, str] | None:
 def rate_engine(engine: str, estimate: float | None, ratings: dict, args) -> dict:
     t0 = time.time()
     row: dict = {"puzzles": ladder.puzzle_accuracy(engine, ladder.load_puzzles(), args.sims)}
-    results, per_anchor = [], {}
     openings = ladder.make_openings(args.games // 2)
-    for name in ladder.pick_anchors(estimate, ratings, k=args.anchors):
+
+    def play(name: str) -> list[float]:
         anchor = ladder.Anchor(name, seed=7)
         try:
-            scores = ladder.play_match(engine, anchor, openings, args.sims)
+            return ladder.play_match(engine, anchor, openings, args.sims)
         finally:
             anchor.close()
-        per_anchor[name] = {"w": scores.count(1.0), "d": scores.count(0.5), "l": scores.count(0.0)}
-        results += [(ratings.get(name, 0.0), s) for s in scores]
+
+    picked = ladder.pick_anchors(estimate, ratings, k=args.anchors)
+    scores = ladder.adaptive_anchor_scores(play, picked, ratings, sweep=args.sweep, max_extra=args.max_extra)
+    per_anchor = {n: {"w": s.count(1.0), "d": s.count(0.5), "l": s.count(0.0)} for n, s in scores.items()}
+    results = [(ratings.get(n, 0.0), x) for n, s in scores.items() for x in s]
     elo, se = ladder.fit_rating(results, prior=estimate if estimate is not None else 0.0)
-    row.update(elo=round(elo, 1), elo_se=round(se, 1), anchors=per_anchor, seconds=round(time.time() - t0, 1))
+    row.update(elo=round(elo, 1), elo_se=round(se, 1), anchors=per_anchor, extra_anchors=len(scores) - len(picked),
+               seconds=round(time.time() - t0, 1))
     return row
 
 
@@ -59,6 +63,9 @@ def main() -> None:
     p.add_argument("--sims", type=int, default=100)
     p.add_argument("--games", type=int, default=48, help="games per anchor (both colours)")
     p.add_argument("--anchors", type=int, default=2)
+    p.add_argument("--sweep", type=float, default=0.85,
+                   help="score that counts as a sweep and adds the next anchor up (or down)")
+    p.add_argument("--max-extra", type=int, default=3, help="extra anchors per rating (0 = original ladder)")
     p.add_argument("--calibrate", action="store_true")
     p.add_argument("--once", action="store_true")
     args = p.parse_args()

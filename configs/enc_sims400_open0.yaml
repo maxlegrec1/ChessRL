@@ -1,0 +1,11 @@
+# Run C: "free" openings. The sims-400 recipe without the 8 uniformly random
+# opening plies, the only change: games start from the initial position and get
+# their variety from root-temperature sampling (first 30 plies) and Dirichlet
+# noise, as in AlphaZero, so the network trains on normal chess positions. Risk:
+# the openings narrow (watch the first-move share and distinct positions at ply 8
+# and 12, from the self-play games). The rating ladder still starts from random
+# openings, so also rate its checkpoints on normal openings afterwards.
+# Compare with enc_sims400 (seeds 1 and 2).
+extends: enc_sims400.yaml
+selfplay:
+  random_opening_plies: 0
