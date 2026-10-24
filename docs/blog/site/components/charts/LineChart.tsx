@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import './charts.css'
 
 export type Series = {
   name: string
   slot: number // categorical palette slot, see charts.css
   dim?: boolean // same entity, de-emphasised (e.g. a second seed)
+  dots?: boolean // mark every point (sparse measurements)
   points: [number, number][]
 }
 
@@ -22,6 +23,8 @@ type Props = {
   xFormat?: (x: number) => string
   yFormat?: (y: number) => string
   refLine?: { y: number; label: string }
+  xMarks?: { x: number; label: string }[] // dashed vertical lines for events (a fix, a change)
+  band?: { y0: number; y1: number; label: string } // shaded reference range
   snap: number // a series' value shows in the tooltip if its point is within this x distance
   endLabels?: boolean
 }
@@ -47,7 +50,7 @@ export function Legend({ series }: { series: Series[] }) {
 
 function ticks(lo: number, hi: number, step: number) {
   const out: number[] = []
-  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) out.push(Math.round(t * 1e6) / 1e6)
+  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) out.push(Math.round(t * 1e6) / 1e6 || 0) // no -0
   return out
 }
 
@@ -59,9 +62,10 @@ function nearest(points: [number, number][], x: number, snap: number) {
 
 export default function LineChart({
   series, xLabel, yLabel, xDomain, yDomain, xStep, yStep, height = 320,
-  xFormat = (x) => String(x), yFormat = fmtInt, refLine, snap, endLabels = true,
+  xFormat = (x) => String(x), yFormat = fmtInt, refLine, xMarks = [], band, snap, endLabels = true,
 }: Props) {
   const wrap = useRef<HTMLDivElement>(null)
+  const clipId = `cr-clip-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
   const [width, setWidth] = useState(640)
   const [hoverX, setHoverX] = useState<number | null>(null)
   const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null)
@@ -129,6 +133,12 @@ export default function LineChart({
   return (
     <div ref={wrap} className="cr-chart relative w-full">
       <svg width={width} height={height} role="img" aria-label={`${yLabel} by ${xLabel}`}>
+        <defs>
+          {/* lines leaving the y range are cut at the plot edge (4 px slack keeps edge dots whole) */}
+          <clipPath id={clipId}>
+            <rect x={m.left - 4} y={m.top - 4} width={pw + 8} height={ph + 8} />
+          </clipPath>
+        </defs>
         {ticks(yDomain[0], yDomain[1], yStep).map((t) => (
           <g key={`y${t}`}>
             <line x1={m.left} x2={width - m.right} y1={sy(t)} y2={sy(t)} stroke="var(--cr-grid)" />
@@ -141,16 +151,35 @@ export default function LineChart({
         ))}
         <text x={m.left + pw / 2} y={height - 6} textAnchor="middle">{xLabel}</text>
         <text transform={`translate(14 ${m.top + ph / 2}) rotate(-90)`} textAnchor="middle">{yLabel}</text>
+        {band && (
+          <g>
+            <rect x={m.left} y={sy(band.y1)} width={pw} height={sy(band.y0) - sy(band.y1)} fill="var(--cr-text)"
+              fillOpacity={0.1} />
+            <text x={width - m.right - 6} y={sy(band.y1) + 14} textAnchor="end">{band.label}</text>
+          </g>
+        )}
         {refLine && (
           <g>
             <line x1={m.left} x2={width - m.right} y1={sy(refLine.y)} y2={sy(refLine.y)} stroke="var(--cr-text)" />
             <text x={m.left + 6} y={sy(refLine.y) - 6}>{refLine.label}</text>
           </g>
         )}
+        {xMarks.map((k, i) => (
+          <g key={`m${k.x}`}>
+            <line x1={sx(k.x)} x2={sx(k.x)} y1={m.top} y2={m.top + ph} stroke="var(--cr-text)" strokeDasharray="4 4" />
+            {/* staggered so neighbouring labels don't collide on narrow charts */}
+            <text x={sx(k.x) + 5} y={m.top + 11 + (i % 2) * 15}>{k.label}</text>
+          </g>
+        ))}
         {series.map((s) => (
-          <path key={s.name} fill="none" stroke={`var(--cr-s${s.slot})`} strokeWidth={2} strokeLinejoin="round"
-            strokeLinecap="round" opacity={s.dim ? 0.5 : 1}
-            d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join('')} />
+          <g key={s.name} opacity={s.dim ? 0.5 : 1} clipPath={`url(#${clipId})`}>
+            <path fill="none" stroke={`var(--cr-s${s.slot})`} strokeWidth={2} strokeLinejoin="round"
+              strokeLinecap="round"
+              d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join('')} />
+            {s.dots && s.points.map((p) => (
+              <circle key={p[0]} cx={sx(p[0])} cy={sy(p[1])} r={3} fill={`var(--cr-s${s.slot})`} />
+            ))}
+          </g>
         ))}
         {labels.map((l) => (
           <g key={`e${l.slot}${l.text}`}>

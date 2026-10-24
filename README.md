@@ -11,6 +11,15 @@ GPU.
 The trainer has been running continuously since 2026-05-15; the current
 build plays at ~Stockfish 1400 on a 100ms-per-move budget.
 
+## Write-ups
+
+- [ChessRL: training an AlphaZero from scratch on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu):
+  the architecture, the self-play loop, the performance work, and the bugs
+  that taught the most.
+- [ChessRL, round two: 9× faster self-play learning on a single RTX 4090](https://mvdbk.fr/blog/chessrl-next-round):
+  better training targets, a small transformer and a cheaper search, an FP16
+  bug that looked like a collapse, and Elo per hour vs Elo per step.
+
 ## Live progress
 
 The two graphs below regenerate from disk every time the training run

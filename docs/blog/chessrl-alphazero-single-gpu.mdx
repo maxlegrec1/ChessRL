@@ -1,0 +1,180 @@
+---
+title: 'ChessRL: training an AlphaZero from scratch on a single consumer GPU'
+date: '2026-08-07'
+tags: ['chess', 'machine-learning', 'reinforcement-learning']
+draft: false
+summary: 'How I trained a 1.29M-parameter chess agent only by playing against itself, with no human games and no opening book, to about the strength of Stockfish limited to 1400 Elo, mostly on the RTX 4090 in my desktop. The architecture, the training loop, the performance work, and the bugs that taught me the most.'
+---
+
+In 2017, DeepMind's AlphaZero learned chess from nothing but the rules, using around **5,000 TPUs** to generate its self-play games. I wanted to know how far the same recipe can go on hardware one person can own. The answer: further than I expected.
+
+> Since then, a [second round](/blog/chessrl-next-round) of this project made the training about 9 times faster on the same kind of GPU, with an AI agent doing most of the work.
+
+**ChessRL** is a 1.29M-parameter chess agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
+
+The code is open source (MIT): **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**. This post covers the architecture, the training loop, the performance work that made a single GPU enough, and the bugs, which taught me the most.
+
+## Why everything depends on positions per second
+
+AlphaZero's training works like this: the program plays games against itself (self-play), the positions are saved, and a trainer teaches the network to predict them. The network only improves as fast as new positions arrive. Producing them is the expensive part. Every move needs hundreds of MCTS simulations: MCTS (Monte Carlo tree search) is the look-ahead search that picks the move, and each of its simulations asks the neural network to evaluate one position. DeepMind spread this over a data centre. On one GPU, **self-play speed decides everything**, and every design choice below comes back to it.
+
+That leads to a first, surprising result: **on one GPU, a small model is the best choice, not a compromise.** When I profiled the network on small batches, only **21 µs of each ~1 ms call was actual GPU computation**. The other 97% was overhead: launching GPU kernels, copying data between CPU and GPU, and waiting for synchronisation. A model 10 times bigger would have been barely slower per batch, but it would not have learned 10 times more from each position, and what I needed was a fast supply of positions. So I kept 1.29M parameters and worked on the 97% instead.
+
+## The system: two processes, a file and a pointer
+
+<LoopDiagram />
+
+The system is two independent processes that share **no memory and no inter-process communication**. They only communicate through files:
+
+1. **Self-play workers (C++)** play 1,024 games at the same time. Each move is chosen with 800 MCTS simulations. The positions that need evaluating are grouped into batches and sent to the network, which runs with TensorRT (NVIDIA's library for running networks fast). When a game ends, all its positions are written to a shared buffer file.
+2. **The trainer (PyTorch)** maps that buffer file into memory, samples batches of 2,048 positions, and trains the network's five outputs with the Adam optimizer in 16-bit floating point (FP16 mixed precision).
+3. Every 500 training steps, the trainer saves a checkpoint, converts it from **PyTorch to ONNX** (a standard file format for networks) **to TensorRT**, puts the new engine in a directory, and updates a one-line pointer file (`engines/.iteration`) in a single atomic write.
+4. Self-play checks the pointer file between simulations and **switches to the new engine without restarting**: games in progress simply continue with the newer, stronger network.
+
+Files sound primitive, but they make the system robust. Either process can crash, be restarted or be upgraded on its own, and resuming is easy because the whole state is in files. When a training run lasts weeks on the computer you also use every day, that matters more than elegance.
+
+### The replay buffer: 832 bytes per position
+
+Each self-play move becomes one record of exactly 832 bytes:
+
+| offset | size | field |
+| ------ | ---- | ----- |
+| 0 | 777 | input planes (111 × 8 × 8, packed) |
+| 777 | 1 | side to move |
+| 778 | 4 | policy target (index of the move the search chose) |
+| 782 | 2 | value target: result of the game (win / draw / loss) |
+| 784 | 2 | value_q target: the search's estimate of the position |
+| 786 | 2 | moves-left target (plies until the end of the game) |
+| 788 | 44 | metadata (game id, ply, …) |
+
+The buffer holds **2 million records (about 1.7 GB)**. Once it is full, each new record replaces a random old one. Because every record has the same size, the trainer can map the file into memory and index it like an array: no serialisation format, no database, no queue. A game's records are all written at once when the game ends, which matters later (see the pacing bugs).
+
+## The model: a small trunk and five outputs
+
+<ResNetDiagram />
+
+The trunk is deliberately simple: a 3×3 convolution to 64 channels, then **four residual blocks** (pairs of convolutions whose input is added back to their output), a small version of AlphaZero's design. The interesting part is the outputs, called heads. There are five:
+
+- **Policy** (1,929 outputs, one per possible move): which moves look good. Trained on the move the search chose.
+- **Value** (win / draw / loss): trained on the **real result of the game**.
+- **Value_q** (win / draw / loss): trained on the **search's estimate** of the same position (the value at the root of the search, often called Q).
+- **MLH** (moves-left head): predicts how many plies (half-moves) remain until the end of the game, divided by 25.
+- **MLH_q**: the same, trained on the search's estimate.
+
+Why two versions of each? The game result is **unbiased but noisy**: a winning position is labelled as a loss whenever the game was later thrown away. The search's estimate is **less noisy but biased**: it reflects what the current, possibly wrong, network believes. Training both gives one reference and one smoother estimate. The search uses the search-based versions (`value_q`, `mlh_q`), while the outcome-based ones keep training tied to real results. (The [second round](/blog/chessrl-next-round) found that this choice badly slows down early training; the search now reads the outcome-based heads.) The `mlh_q` head has a concrete chess purpose: when several moves win, it makes the engine prefer the one that wins faster, instead of shuffling pieces in a won position, a well-known problem of self-play engines. I also logged how often the two value targets disagree (the game result says White won, the search says Black is winning). Those positions, usually blunders and reversals, turned out to carry the most useful training signal.
+
+**Inputs** are AlphaZero's **111 planes** of 8 × 8: which piece stands on each square in the current position and the 7 before it, plus castling rights, side to move and move counters. The history matters even for a small model, because without it the network cannot know about repetitions. (It also caused one of my favourite bugs, see below.)
+
+## Self-play: making one GPU work like a cluster
+
+Self-play is where the computation goes, so it is where the engineering went.
+
+**Batched search with virtual loss.** Classic MCTS is sequential: go down the tree, evaluate one position, update the tree, repeat. That leaves the GPU working on batches of about one position. The fix is to go down the tree **8 times before evaluating** (`virtual_loss_width=8`). Each path in progress gets a temporary penalty (a "virtual loss") so that the next descents explore other moves. Across the 1,024 games, the batches sent to the GPU average about 127 positions. On my benchmark:
+
+| metric | width = 1 | width = 8 | change |
+| ------ | --------: | --------: | -----: |
+| positions/sec | 168 | 356 | **+112%** |
+| nodes/sec | 134,619 | 285,117 | +112% |
+| mean batch size | 46.5 | 127.3 | +174% |
+| ms/batch | 0.88 | 0.99 | +12% |
+
+The search gets slightly blurrier, because the 8 descents cannot see each other's results, so this is a real trade-off: width 48 gave no extra speed and lost a lot of Elo. Width 8 was the best setting.
+
+**Fewer threads, not more.** A sweep over thread counts found 128 threads faster than 256 (347 against 293 positions per second). With virtual-loss width 8, each thread already has 8 positions waiting, and more threads only made each batch slower. The obvious setting (more threads, more speed) was wrong.
+
+**CUDA graphs.** With only 21 µs of computation per batch, launching the GPU work took most of the time. Recording the sequence of GPU operations once as a CUDA graph and replaying it gave **about 1.8× overall**.
+
+**A transposition table that did not pay off.** Chess engines usually rely on a transposition table, which reuses the result for a position reached by a different move order. Profiling showed a **1.5% hit rate** in self-play (the random opening moves make repeated positions rare), so the cost of locking and hashing for every position was higher than what it saved. It ships disabled. Textbook optimisations need measuring too.
+
+**Packing positions for the GPU.** Sending 111 planes of FP16 values for every position made the copy from CPU to GPU the bottleneck. The fix was to send a compact encoding of the board and expand it into planes **on the GPU** with a custom CUDA kernel (a small program that runs on the GPU). I shipped it, found the same day that it was broken, reverted it, and brought it back two days later with a different design. What made the second attempt safe was a test suite checking that the Python encoder, the C++ encoder and the GPU expansion give bit-identical results. Those tests are in `tests/test_packed_parity.py`.
+
+**Exploration settings.** Three settings make self-play try varied moves. Dirichlet noise mixes random values into the network's move probabilities at the root of the search, so that moves the network dislikes still get explored (α = 0.3, ε = 0.25, AlphaZero's values; why they matter is explained below). A temperature of 1.3 for the whole game picks moves at random in proportion to the search results, with extra randomness. And **8 random opening moves** start every game somewhere different, which also greatly increased the share of games with a decisive result.
+
+## The trainer: pacing is the hidden control loop
+
+Most AlphaZero write-ups treat the trainer as simple: sample batches, compute the loss. On limited hardware, the hard part is **the balance between the two processes**. If the trainer runs too fast compared to self-play, it trains on the same positions again and again and overfits to its own buffer. If it runs too slowly, it wastes the positions that self-play worked hard to produce. ChessRL paces the trainer so that each record is used about **5 times on average** before it is replaced (`target_k=5`; AlphaZero used about 3, Leela Chess Zero about 5). It measures how fast self-play adds records and waits between steps to keep `steps per second = records per second × target_k / batch size`.
+
+This simple idea still hid two bugs that I shipped:
+
+1. **Measuring the insertion rate from the file size** stops working once the buffer is full: the file stops growing while records keep arriving. Fix: a counter of writes, kept in a separate small file.
+2. **Measuring the rate with a moving average of instantaneous changes** fails because records arrive in bursts at the end of games: 1,024 games of about 80 plies each finish around the same time, so the rate at any one instant means nothing. Fix: count the writes over a 30-second sliding window.
+
+Other trainer details that mattered: batches of 2,048 (up from 1,024, for less noisy updates); FP16 mixed precision throughout; a new engine every 500 steps (with one every 100 steps, the network used by self-play changed so often that the games came from a moving target); and **no training before the buffer holds 200k records**, so the first steps do not overfit to a small and uniform buffer.
+
+## The bugs that taught me the most
+
+The charts in this section and the next have two dashed vertical lines. Each one marks a bug, or a bad setting, whose fix clearly changed the learning curve. If you try this project, you will probably meet relatives of all three.
+
+### 1. The mirror bug (fixed at step 64.5k)
+
+To double the training data, the trainer flipped boards from left to right and flipped the target move to match. The code that flipped the moves had a bug that mixed up ranks, so some flipped targets pointed at the wrong square. There was no crash and no error message. The model learned, with full confidence, from **systematically wrong labels on half of its data**. It still got stronger, because the unflipped half was correct and the search ignores illegal moves when it plays. That is what makes this kind of bug dangerous: **self-play training degrades slowly under wrong labels**, so nothing obviously fails. My first run on the 4090 had this bug almost until the end and still reached the level of Stockfish-1400.
+
+One metric had shown the problem all along: `legal_move_prob`, the share of the policy's probability that falls on legal moves. A healthy policy pushes it toward 1.0 as it learns the rules. With the mirror bug, it **rose to about 0.66 by step 15k, then slowly fell to about 0.58**. Half of the data taught the network to bet on squares that were illegal in the real position, and the two halves pulled the policy in opposite directions. The fix took effect at step 64.5k of the instrumented run:
+
+<LegalMoveChart />
+
+Within about 2k steps of the fix, the probability on legal moves **jumped from about 0.58 to 0.81**, a sudden step rather than a trend, and then kept rising to about 0.91 by the end of the run. In the same window, how often the policy's top move matched the search's choice rose from 0.18 to 0.23. The Elo chain further down shows the three biggest gains of the whole run right after the fix (+147, +210 and +123 Elo per 5k steps). The right panel also shows the cost of the later Dirichlet change: agreement drops slightly after step 140k, because more noise at the root makes the search's choices noisier too. As the next section shows, that cost was worth paying.
+
+Write tests for your data augmentations: in both directions, round trip, on real positions. And log a legality metric from the first day. It is the cheapest bug detector in this whole project.
+
+### 2. Castling starvation (fixed at about step 140k)
+
+For most of the run, the Dirichlet noise was set to α = 0.12, ε = 0.05, well below AlphaZero's α = 0.3, ε = 0.25. It looked harmless, since the model kept improving. Then I checked the buffer and found **132 castling moves in 2 million positions**. In one test position, the model ranked castling **last, 48th of 48 legal moves**, even though **its own value head** rated the position after castling as the best one available. The policy and the value had learned contradictory things, and the policy won, because the search explores moves in proportion to the policy. A move the policy never suggests is never tried by the search, so it never appears in the buffer, so the policy never learns it. The loop closes on itself.
+
+Root Dirichlet noise is how AlphaZero breaks this loop. With ε = 0.25, the move probabilities at the root of the search are a mix of 75% network and 25% random noise, so every legal move gets searched now and then. My lower values had quietly switched that off. Going back to AlphaZero's values at about step 140k is the second dashed line on the charts. After that, the score against Stockfish-1400 went from a low of 32% (at step 175k, while the fix was still working its way through the buffer) to 55% 60k steps later.
+
+The same change added the metric this bug deserved: `buffer/castle_rate`, the share of buffer records that are castling moves (in normal chess, roughly 0.8 to 1.2% of all moves). Its recovery is slow, because each stage waits for the one before: the noise must first make the search try castling, those games must reach the buffer, the policy must learn from them, and only then does the search consider castling on its own. From about 0.05% at the change, the rate needed about 70k more steps to really start rising, then climbed to about 0.75%, close to the normal range, by the end of the run:
+
+<CastleChart />
+
+That delay of about 70k steps is worth remembering: even after you fix a starvation bug, the buffer keeps serving the old distribution for a long time. I now track a metric like this one by default.
+
+The general lesson: **the published settings of a landmark paper matter until you have shown otherwise.** If you change one, do it on purpose, with a metric that watches what the setting protects.
+
+### 3. The history planes that were empty (fixed mid-May)
+
+The 111 input planes include 8 positions of history. For a while, the C++ code that ran the network during self-play **filled the history planes with zeros**. The model was trained with history and received none when playing. Everything ran; it was simply weaker than it should have been. The commit message understates it: _"feed correct AlphaZero history at inference (was inert)."_ The pattern: **a difference between training and inference stays invisible without a parity test**, a test that checks that both give the same result. My Python-vs-C++ tests only covered the planes of the current position, not the history. They do now.
+
+(Also worth a mention: a "teacher" network, an average of past weights, whose BatchNorm statistics (the running averages its normalisation layers rely on) were left out of the averaging. It was slightly broken from the start. It is still saved in the checkpoints but not used, so benchmark the student network.)
+
+## Results
+
+Three measurements, from the weakest claim to the strongest:
+
+**1. Elo against Stockfish-1400, desktop run.** Regular matches (up to 100 games) against Stockfish set to `UCI_Elo=1400` (its built-in option for playing at a chosen rating) at 100 ms per move, during the two-week 4090 run. From about step 45k the model stays around 1,250 to 1,350. It reaches equal strength around step 100k and **about 1,492 at step 138k**, on a consumer GPU, with the mirror bug still in the code:
+
+<SfEloChart />
+
+**2. Elo against its own earlier checkpoints, instrumented H200 run.** Every 5k steps, the new checkpoint plays the previous one (50 games, 800 simulations per move, 8 random opening moves). Adding up the differences gives a curve over the whole run: **+1,314 Elo from step 5k to step 255k**. The dashed lines are the mirror-bug fix and the Dirichlet fix:
+
+<EloChainChart />
+
+**3. Automatic matches against Stockfish-1400 at the end of that run** (steps 160k to 255k): 50 games for each new checkpoint. From a low of 32% at step 175k, the score rises to **55% at best, above equal strength**:
+
+<BrawlChart />
+
+Finally, my favourite measurement, because it is the most about chess: mating with king, queen and rook against a lone king (KQR vs K). The model plays both sides with MCTS. Before step 100k, checkpoints mate in 2 to 5 of the 6 test positions and sometimes need 22 to 36 plies to do it. From step 105k on, they mate in all 6, in about 15 plies:
+
+<KqrkChart />
+
+A note on what these numbers mean. "Stockfish-1400" is Stockfish 16 with `UCI_Elo=1400` at 100 ms per move, a deliberately weakened setting. Full-strength Stockfish would crush this model, as it would anything short of a top engine. I am not claiming a strong engine. The claim is that **the AlphaZero recipe, run faithfully at a thousandth of the scale, works**: starting from nothing, the model learns openings, tactics, endgame technique and, eventually, castling.
+
+## Advice before you start
+
+If you want to try this yourself (I recommend it: it is the most instructive ML project I have done), here is what I learned:
+
+1. **Size the model for the data path, not for ambition.** Measure where inference time goes before choosing width and depth. At small batch sizes the overhead dominates, and a small model with CUDA graphs and batched search wins.
+2. **Use the published settings until you have a metric that would catch a problem.** My two months of castling starvation were self-inflicted. `buffer/castle_rate` costs nothing to log and catches that whole class of failure.
+3. **Test every boundary between two implementations of the same thing**: augmentation round trips, Python and C++ encoders, CPU and GPU expansion, training and inference inputs. Every serious bug I had lived on one of those boundaries.
+4. **Make the loop restartable from files.** Buffer, checkpoints and a pointer file. You will restart it dozens of times, so make restarting free.
+5. **Pace the trainer against self-play** (how many times each record is used), and measure the insertion rate with a write counter over a sliding window, not with file sizes or instantaneous rates.
+6. **Evaluate three ways**: Elo against your own past checkpoints (cheap, always on), a fixed external opponent (Stockfish at a set level), and specific tests such as endgame conversion. Each one alone will mislead you at some point, and when they disagree, the disagreement tells you something.
+7. **Keep your diagnostic scripts.** Mine are in `archive/legacy_scripts/`: `diagnose_mate_blindness.py`, buffer checks, policy entropy probes. They record how each bug above was found, and half of them were reused within a month.
+
+## Closing
+
+Total cost: a 1.29M-parameter network, two weeks of one desktop RTX 4090, about ten days of a rented H200 for the instrumented run, and a 1.7 GB buffer file. Next to that, AlphaZero's 5,000 TPUs look less like a requirement of the algorithm and more like a statement about deadlines. The recipe itself (self-play, a search that improves the policy, and a few settings that matter) fits on a desk.
+
+In a [second round](/blog/chessrl-next-round), an AI agent and I made the training about 9 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
+
+The code, the docs (`docs/ARCHITECTURE.md`, `docs/CONFIG.md`), the Streamlit dashboard and all the diagnostic tools are at **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, under the MIT license. If you build your own, I would love to hear how it goes: [maxime.vanderbeken@mvdbk.fr](mailto:maxime.vanderbeken@mvdbk.fr).

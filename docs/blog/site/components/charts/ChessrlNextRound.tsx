@@ -1,23 +1,13 @@
 'use client'
 
-import type { ReactNode } from 'react'
 import data from './chessrl-next-round.json'
 import BarChart from './BarChart'
+import Figure from './Figure'
 import LineChart, { DataTable, Legend, type Series } from './LineChart'
 
 /** The charts of the "ChessRL, round two" post (data: docs/blog/make_charts.py in ChessRL). */
 
 export { default as EncoderDiagram } from './EncoderDiagram'
-
-function Figure({ title, caption, children }: { title: string; caption: string; children: ReactNode }) {
-  return (
-    <figure className="cr-chart not-prose my-8">
-      <div className="mb-2 text-base font-semibold text-gray-900 dark:text-gray-100">{title}</div>
-      {children}
-      <figcaption className="mt-2 text-sm text-gray-500 dark:text-gray-400">{caption}</figcaption>
-    </figure>
-  )
-}
 
 const hours = (x: number) => `${x.toFixed(1)} h`
 const range = (lo: number, hi: number, step: number) =>

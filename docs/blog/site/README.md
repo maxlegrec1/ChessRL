@@ -1,42 +1,37 @@
-# Native charts for the "ChessRL, round two" post
+# Native charts for the two ChessRL posts
 
-The post's five charts and its encoder diagram are React components drawing SVG
-(`components/charts/`), so they use the site's fonts and colours and follow its light/dark
-theme. The charts show values on hover (and with the arrow keys) and each has a collapsible
-data table. Data: `chessrl-next-round.json`, written by `docs/blog/make_charts.py` from the
-synced runs.
+Both posts on mvdbk.fr draw their charts and diagrams as React components (SVG and HTML in
+`components/charts/`), so they use the site's fonts and colours and follow its light/dark theme.
+The charts show values on hover (and with the arrow keys) and each has a collapsible data table.
 
-Preview without touching the live site: `docs/blog/preview.sh` (port 3003 by default).
+| post | source | components | data |
+|---|---|---|---|
+| ChessRL: training an AlphaZero from scratch… | `docs/blog/chessrl-alphazero-single-gpu.mdx` | `ChessrlRoundOne.tsx` | `chessrl-round-one.json`, from `docs/blog/make_round1_charts.py` |
+| ChessRL, round two… | `docs/blog/chessrl-next-round.mdx` | `ChessrlNextRound.tsx`, `EncoderDiagram.tsx` | `chessrl-next-round.json`, from `docs/blog/make_charts.py` |
+
+The first post's run data is partly gone (the experiment files stayed on the rented machine), so
+`make_round1_charts.py` holds the match results copied from the labels of the original PNG charts,
+and reads the training metrics from `docs/blog/data/round1_wandb.json` (exported from W&B).
+
+## Preview
+
+`docs/blog/preview.sh` (port 3003 by default) serves both posts on a throwaway copy of the site.
 
 ## Publishing to mvdbk-site
 
-1. Copy `site/components/charts/` to `mvdbk-site/components/charts/`.
-2. Register the components in `mvdbk-site/components/MDXComponents.tsx`:
+```bash
+python3 docs/blog/site/apply.py ~/mvdbk-site --publish   # charts, component registry, both posts, MobileNav fix
+git -C ~/mvdbk-site diff --stat                          # review, then commit and push
+mvdbk-deploy
+```
 
-   ```tsx
-   import {
-     SpeedupChart, SearchBudgetChart, ActivationChart, AblationChart, StepChart, EncoderDiagram,
-   } from './charts/ChessrlNextRound'
+`apply.py` is idempotent. The old images in `public/static/images/chessrl/` are no longer used by
+either post and can be deleted.
 
-   export const components: MDXComponents = {
-     // ...existing entries
-     SpeedupChart,
-     SearchBudgetChart,
-     ActivationChart,
-     AblationChart,
-     StepChart,
-     EncoderDiagram,
-   }
-   ```
-3. Copy `chessrl-next-round.mdx` to `mvdbk-site/data/blog/`, set `draft: false`.
-4. `mvdbk-deploy`.
-
-The PNGs in `docs/blog/img/` are no longer used by the post (kept for sharing).
-
-## Mobile menu hydration error (unrelated to the post, every page)
+## Mobile menu hydration error (unrelated to the posts, every page)
 
 In dev mode the site shows "Hydration failed … components/MobileNav.tsx": Headless UI 2.x
 renders the closed menu dialog (`unmount={false}`) as a hidden `<span>` on the server and a
-portal `<div>` in the browser. In production React recovers silently (a console error). Fix,
-idempotent: `python3 docs/blog/site/fix_mobilenav.py ~/mvdbk-site` (mounts the dialog after
-hydration; the menu is closed at load, so nothing visible changes).
+portal `<div>` in the browser. In production React recovers silently (a console error).
+`fix_mobilenav.py` (run by `apply.py`) mounts the dialog after hydration; the menu is closed at
+load, so nothing visible changes.
