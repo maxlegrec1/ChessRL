@@ -114,6 +114,7 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
     return {
         "hours": [active_hours(r["t"]) for r in lad],
         "records_m": [records_at(r["t"]) / 1e6 for r in lad],
+        "steps_k": [r["step"] / 1000 for r in lad],
         "elo": [r["elo"] for r in lad],
     }
 
@@ -235,22 +236,30 @@ def export_json() -> None:
     enc = load("armE", "encoder", max_step=40000)
     s400 = load("armA", "enc-sims400")
     s2 = load("armF", "encoder-s2")
+    deep = load("armB", "enc-deep")
     clip = lambda s, key, xmax: [[round(x, 2), round(y)] for x, y in zip(s[key], s["elo"]) if x <= xmax]  # noqa: E731
     data = {
         "speedup": [
             {"name": "Original code (main)", "slot": 4, "points": pts(main_["hours"], main_["elo"])},
-            {"name": "+ learning-signal fixes", "slot": 3, "points": pts(sig["hours"], sig["elo"])},
-            {"name": "+ small transformer encoder", "slot": 2, "points": pts(enc["hours"], enc["elo"])},
+            {"name": "+ better training targets", "slot": 3, "points": pts(sig["hours"], sig["elo"])},
+            {"name": "+ small transformer", "slot": 2, "points": pts(enc["hours"], enc["elo"])},
             {"name": "+ half the search per move", "slot": 1, "points": pts(s400["hours"], s400["elo"])},
         ],
         "searchBudget": {
             key: [
-                {"name": "800 sims, seed 1", "slot": 2, "points": clip(enc, key, xmax)},
-                {"name": "800 sims, seed 2", "slot": 2, "dim": True, "points": clip(s2, key, xmax)},
-                {"name": "400 sims", "slot": 1, "points": clip(s400, key, xmax)},
+                {"name": "800 simulations, seed 1", "slot": 2, "points": clip(enc, key, xmax)},
+                {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "points": clip(s2, key, xmax)},
+                {"name": "400 simulations", "slot": 1, "points": clip(s400, key, xmax)},
             ]
             for key, xmax in (("hours", 8.6), ("records_m", 12))
         },
+        # Same batch size and trainer pacing in all three, so a step is the same amount of
+        # training data; only the search budget and the depth differ.
+        "perStep": [
+            {"name": "4 layers, 400 simulations", "slot": 1, "points": clip(s400, "steps_k", 16)},
+            {"name": "4 layers, 800 simulations", "slot": 2, "points": clip(enc, "steps_k", 16)},
+            {"name": "8 layers, 800 simulations", "slot": 3, "points": clip(deep, "steps_k", 16)},
+        ],
         # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions).
         "activation": [
             {"name": "no weight decay", "slot": 2,
@@ -259,10 +268,10 @@ def export_json() -> None:
              "points": [[10, 24.9], [20, 35.7], [30, 45.8], [50, 64.4], [70, 79.9]]},
         ],
         "ablations": [
-            {"label": "All learning-signal fixes", "value": 1198},
-            {"label": "without the value-head fix", "value": 1137},
-            {"label": "without opening-only temperature", "value": 1130},
-            {"label": "without visit-distribution policy targets", "value": 466},
+            {"label": "All three changes", "value": 1198},
+            {"label": "without the value-head change", "value": 1137},
+            {"label": "without limiting randomness to the opening", "value": 1130},
+            {"label": "without the visit-count policy target", "value": 466},
         ],
     }
     CHART_JSON.parent.mkdir(parents=True, exist_ok=True)

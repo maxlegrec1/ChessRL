@@ -15,7 +15,7 @@ cp "$SRC/chessrl-next-round.mdx" "$P/data/blog/"
 mkdir -p "$P/components/charts"
 cp "$SRC"/site/components/charts/* "$P/components/charts/"
 # Register the chart components for MDX (the same edit as in site/README.md).
-sed -i "s|^import TableWrapper from './TableWrapper'$|import TableWrapper from './TableWrapper'\nimport { SpeedupChart, SearchBudgetChart, ActivationChart, AblationChart } from './charts/ChessrlNextRound'|; s|^  BlogNewsletterForm,$|  BlogNewsletterForm,\n  SpeedupChart,\n  SearchBudgetChart,\n  ActivationChart,\n  AblationChart,|" "$P/components/MDXComponents.tsx"
+sed -i "s|^import TableWrapper from './TableWrapper'$|import TableWrapper from './TableWrapper'\nimport { SpeedupChart, SearchBudgetChart, ActivationChart, AblationChart, StepChart, EncoderDiagram } from './charts/ChessrlNextRound'|; s|^  BlogNewsletterForm,$|  BlogNewsletterForm,\n  SpeedupChart,\n  SearchBudgetChart,\n  ActivationChart,\n  AblationChart,\n  StepChart,\n  EncoderDiagram,|" "$P/components/MDXComponents.tsx"
 # The site's mobile menu hydration fix (site/README.md); a no-op once the site has it.
 python3 "$SRC/site/fix_mobilenav.py" "$P"
 cd "$P"
