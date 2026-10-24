@@ -1,0 +1,65 @@
+/* Native blog charts. Series colours are the validated categorical slots (light and dark
+   steps checked against this site's white / gray-950 backgrounds); chrome uses the site's
+   grays. The dark values apply under the site's `.dark` class. */
+.cr-chart {
+  --cr-s1: #2a78d6;
+  --cr-s2: #eb6834;
+  --cr-s3: #1baf7a;
+  --cr-s4: #eda100;
+  --cr-s7: #6250d6;
+  --cr-grid: #e5e7eb;
+  --cr-axis: #d1d5db;
+  --cr-text: #6b7280;
+  --cr-ink: #111827;
+  --cr-surface: #ffffff;
+  --cr-tip-bg: #ffffff;
+  --cr-tip-border: rgba(17, 24, 39, 0.12);
+  --cr-hover: rgba(17, 24, 39, 0.04);
+}
+.dark .cr-chart {
+  --cr-s1: #3987e5;
+  --cr-s2: #d95926;
+  --cr-s3: #199e70;
+  --cr-s4: #c98500;
+  --cr-s7: #9085e9;
+  --cr-grid: #1f2937;
+  --cr-axis: #374151;
+  --cr-text: #9ca3af;
+  --cr-ink: #f3f4f6;
+  --cr-surface: #030712;
+  --cr-tip-bg: #111827;
+  --cr-tip-border: rgba(255, 255, 255, 0.12);
+  --cr-hover: rgba(255, 255, 255, 0.05);
+}
+.cr-chart svg text {
+  fill: var(--cr-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cr-chart svg text.cr-strong {
+  fill: var(--cr-ink);
+}
+.cr-chart .cr-tip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10;
+  min-width: 10rem;
+  padding: 0.5rem 0.625rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--cr-tip-border);
+  background: var(--cr-tip-bg);
+  color: var(--cr-text);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  font-variant-numeric: tabular-nums;
+}
+.cr-chart .cr-tip b {
+  color: var(--cr-ink);
+  font-weight: 600;
+}
+.cr-chart .cr-plot:focus-visible {
+  outline: 2px solid var(--cr-s1);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

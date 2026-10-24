@@ -224,10 +224,56 @@ def chart_ablations() -> None:
     plt.close(fig)
 
 
+CHART_JSON = Path(__file__).resolve().parent / "site" / "components" / "charts" / "chessrl-next-round.json"
+
+
+def export_json() -> None:
+    """The same data for the blog's native SVG charts (docs/blog/site/components/charts/)."""
+    pts = lambda xs, ys, dx=2: [[round(x, dx), round(y)] for x, y in zip(xs, ys)]  # noqa: E731
+    main_ = load("armA", "baseline")
+    sig = load("dev1", "signal")
+    enc = load("armE", "encoder", max_step=40000)
+    s400 = load("armA", "enc-sims400")
+    s2 = load("armF", "encoder-s2")
+    clip = lambda s, key, xmax: [[round(x, 2), round(y)] for x, y in zip(s[key], s["elo"]) if x <= xmax]  # noqa: E731
+    data = {
+        "speedup": [
+            {"name": "Original code (main)", "slot": 4, "points": pts(main_["hours"], main_["elo"])},
+            {"name": "+ learning-signal fixes", "slot": 3, "points": pts(sig["hours"], sig["elo"])},
+            {"name": "+ small transformer encoder", "slot": 2, "points": pts(enc["hours"], enc["elo"])},
+            {"name": "+ half the search per move", "slot": 1, "points": pts(s400["hours"], s400["elo"])},
+        ],
+        "searchBudget": {
+            key: [
+                {"name": "800 sims, seed 1", "slot": 2, "points": clip(enc, key, xmax)},
+                {"name": "800 sims, seed 2", "slot": 2, "dim": True, "points": clip(s2, key, xmax)},
+                {"name": "400 sims", "slot": 1, "points": clip(s400, key, xmax)},
+            ]
+            for key, xmax in (("hours", 8.6), ("records_m", 12))
+        },
+        # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions).
+        "activation": [
+            {"name": "no weight decay", "slot": 2,
+             "points": [[10, 46.0], [20, 101.3], [30, 194.0], [40, 280.2], [45.5, 349.3]]},
+            {"name": "weight decay 0.05", "slot": 7,
+             "points": [[10, 24.9], [20, 35.7], [30, 45.8], [50, 64.4], [70, 79.9]]},
+        ],
+        "ablations": [
+            {"label": "All learning-signal fixes", "value": 1198},
+            {"label": "without the value-head fix", "value": 1137},
+            {"label": "without opening-only temperature", "value": 1130},
+            {"label": "without visit-distribution policy targets", "value": 466},
+        ],
+    }
+    CHART_JSON.parent.mkdir(parents=True, exist_ok=True)
+    CHART_JSON.write_text(json.dumps(data, indent=1) + "\n")
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     chart_speedup()
     chart_search_budget()
     chart_fp16()
     chart_ablations()
-    print("wrote", sorted(p.name for p in OUT.glob("*.png")))
+    export_json()
+    print("wrote", sorted(p.name for p in OUT.glob("*.png")), "and", CHART_JSON.name)
