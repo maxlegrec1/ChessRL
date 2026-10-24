@@ -27,3 +27,11 @@ Preview without touching the live site: `docs/blog/preview.sh` (port 3003 by def
 4. `mvdbk-deploy`.
 
 The PNGs in `docs/blog/img/` are no longer used by the post (kept for sharing).
+
+## Mobile menu hydration error (unrelated to the post, every page)
+
+In dev mode the site shows "Hydration failed … components/MobileNav.tsx": Headless UI 2.x
+renders the closed menu dialog (`unmount={false}`) as a hidden `<span>` on the server and a
+portal `<div>` in the browser. In production React recovers silently (a console error). Fix,
+idempotent: `python3 docs/blog/site/fix_mobilenav.py ~/mvdbk-site` (mounts the dialog after
+hydration; the menu is closed at load, so nothing visible changes).
