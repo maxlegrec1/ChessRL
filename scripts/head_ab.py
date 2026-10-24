@@ -107,8 +107,11 @@ def head_to_head(engine_a: str, engine_b: str, openings: list[list[str]], sims: 
         live = [g for g in games if g.result is None]
         if not live:
             break
-        for engine, side in ((engine_a, True), (engine_b, False)):
-            batch = [g for g in live if g.model_to_move == side]
+        # Split before anyone moves: each game makes one move per pass, so the end
+        # check above runs before every search (a game A just ended must not reach B).
+        batches = [(engine_a, [g for g in live if g.model_to_move]),
+                   (engine_b, [g for g in live if not g.model_to_move])]
+        for engine, batch in batches:
             if batch:
                 for g, uci in zip(batch, ladder.mcts_moves(engine, batch, sims), strict=True):
                     g.board.push_uci(uci)
