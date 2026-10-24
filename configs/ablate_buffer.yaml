@@ -1,0 +1,8 @@
+# Leave-one-out ablation of the signal arm: random-replacement buffer sampled
+# whole, 200k-record warmup (main) instead of FIFO + growing window + 50k.
+extends: signal.yaml
+selfplay:
+  fifo_buffer: false
+data:
+  window_c: 0
+  min_samples_to_start: 200000

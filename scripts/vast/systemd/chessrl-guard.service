@@ -1,0 +1,8 @@
+[Unit]
+Description=ChessRL: Vast budget guard ($200 cap) + pull run metrics home
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/.local/bin/chessrl-vast guard
+ExecStart=-/usr/bin/python3 %h/.local/bin/chessrl-vast sync

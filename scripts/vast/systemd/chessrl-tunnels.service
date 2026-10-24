@@ -1,0 +1,12 @@
+[Unit]
+Description=ChessRL: forward localhost:85xx to each rented box's dashboard (:8501)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/chessrl-vast tunnels
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

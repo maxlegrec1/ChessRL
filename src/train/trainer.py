@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
+import math
 import subprocess
 import time
 from collections import deque
 from pathlib import Path
 
-import bulletchess
 import chess
 import numpy as np
 import torch
@@ -13,19 +14,21 @@ import torch.nn.functional as F
 from rich.console import Console
 from torch import amp, optim
 
-import wandb
-from src.models.small.small_model import SmallModel
+from src.models.factory import build_model, normalize_spec
+from src.models.growth import grow_encoder, grow_resnet
 from src.models.small.vocab import policy_index, policy_to_idx
 
 from .config import TrainingConfig
-from .dataset import NULL_POLICY_INDEX, RECORD_SIZE, SelfPlayBatch, SelfPlayDataset
-
-# Vocab indices of the four "king→destination" castle UCIs. Used by the
-# per-batch buffer/castle_rate metric: castling is a rare action (~0.007% of
-# the buffer historically, vs ~0.8–1% in real chess) so the metric tracks
-# whether tuning (Dirichlet, cpuct, etc.) lifts it back toward canonical.
-_CASTLE_CAND_INDICES = np.array(
-    sorted({policy_to_idx[u] for u in ("e1g1", "e1c1", "e8g8", "e8c8")}), dtype=np.int64
+from .dataset import (
+    CASTLE_INDEX,
+    FLAG_FULL_SEARCH,
+    IGNORE_INDEX,
+    RECORD_SIZE,
+    Batch,
+    Prefetcher,
+    ReplayBuffer,
+    decode_planes,
+    dense_policy_target,
 )
 
 AMP_DTYPES: dict[str, torch.dtype] = {
@@ -36,6 +39,24 @@ AMP_DTYPES: dict[str, torch.dtype] = {
     "bf16": torch.bfloat16,
 }
 
+_CASTLE_IDX = torch.tensor(sorted(CASTLE_INDEX))
+_E1, _E8 = 4, 60
+
+
+def legal_move_probability(probs: torch.Tensor, fens: list[str]) -> float:
+    """Mean policy mass on legal moves (python-chess; call on a handful of rows)."""
+    total = 0.0
+    for p, fen in zip(probs, fens, strict=True):
+        board = chess.Board(fen)
+        idx = []
+        for move in board.legal_moves:
+            uci = move.uci()
+            uci = uci[:-1] if uci.endswith("n") else uci
+            if uci in policy_to_idx:
+                idx.append(policy_to_idx[uci])
+        total += float(p[idx].sum()) if idx else 0.0
+    return total / max(1, len(fens))
+
 
 class Trainer:
     def __init__(self, config: TrainingConfig) -> None:
@@ -43,115 +64,98 @@ class Trainer:
         self.console = Console()
         self.device = torch.device(config.device)
         self.device_type = config.device
-        self.dataset = SelfPlayDataset(
+        self.run_dir = config.checkpoint.dir.parent
+        self.metrics_path = config.metrics_path or (self.run_dir / "metrics" / "train.jsonl")
+        self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.buffer = ReplayBuffer(
             config.data.dataset_path,
-            reload_seconds=config.data.reload_seconds,
+            window_c=config.data.window_c,
+            window_alpha=config.data.window_alpha,
+            window_beta=config.data.window_beta,
         )
 
-        self.model = SmallModel().to(self.device)
-        self.model.train()
-
-        self.optimizer = optim.Adam(
-            self.model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-            betas=(config.beta1, config.beta2),
-        )
-        self.scaler = amp.GradScaler(device=self.device)
-
-        self.amp_dtype = AMP_DTYPES.get(config.amp_dtype.lower(), torch.float16)
-        self.checkpoint_dir = config.checkpoint.dir
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.step = 0
         self.samples_processed = 0
-        self.start_time = time.time()
-        self.last_log_time = self.start_time
-        self._current_stockfish_elo = 1400
+        self.last_growth_step = -(10**9)
+        self.amp_dtype = AMP_DTYPES.get(config.amp_dtype.lower(), torch.float16)
+        self.scaler = amp.GradScaler(device=self.device_type, enabled=self.amp_dtype == torch.float16)
+
+        spec = normalize_spec(config.model)
+        ckpt = None
+        if config.resume_path:
+            ckpt = torch.load(config.resume_path, map_location=self.device, weights_only=False)
+            spec = normalize_spec(ckpt.get("model_spec"))
+        self.model = build_model(spec).to(self.device)
+        self.model.train()
+        self.optimizer = self._make_optimizer()
+        self._forward = torch.compile(self.model) if config.compile else self.model
+
+        self.checkpoint_dir = config.checkpoint.dir
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self._build_proc: subprocess.Popen | None = None
+        self._build_log = None
 
         self._wandb_run = self._init_wandb()
-
-        # Initialize teacher model
-        self.teacher_model = SmallModel().to(self.device)
-        self.teacher_model.eval()
-        for param in self.teacher_model.parameters():
-            param.requires_grad = False
-
-        # Load or create initial teacher
-        initial_teacher_path = self.checkpoint_dir / "initial_teacher.pt"
-        if initial_teacher_path.exists():
-            self.console.log(f"Loading initial teacher from {initial_teacher_path}")
-            ckpt = torch.load(initial_teacher_path, map_location=self.device, weights_only=False)
-            # strict=False so a teacher saved before the MLH head was added
-            # still loads — the new params stay at their fresh init.
-            self.teacher_model.load_state_dict(ckpt["model"], strict=False)
-        else:
-            self.console.log(f"Creating initial teacher at {initial_teacher_path}")
-            # Initialize teacher with current model weights
-            self.teacher_model.load_state_dict(self.model.state_dict())
-            ckpt = {
-                "model": self.teacher_model.state_dict(),
-                "config": self.config.to_dict(),
-                "step": 0,
-            }
-            torch.save(ckpt, initial_teacher_path)
-
-        if config.resume_path:
-            self._load_checkpoint(config.resume_path)
+        if ckpt is not None:
+            self._load_checkpoint(ckpt, config.resume_path)
+        # start_step -1 = "the step this schedule was first resumed at". Only a value
+        # resolved that way is carried forward (checkpoint key lr_start_step); a
+        # checkpoint's own config start_step is just the previous run's setting.
+        self.lr_start_step: int | None = None
+        if config.lr_schedule.start_step < 0:
+            carried = (ckpt or {}).get("lr_start_step")
+            self.lr_start_step = int(carried) if carried is not None else self.step
+            config.lr_schedule.start_step = self.lr_start_step
+            self.console.log(f"[lr] schedule counts from step {self.lr_start_step}")
+        self._log_event("start", spec=self.model_spec(), params=self.param_count())
 
     # ------------------------------------------------------------------ #
-    def _compute_legal_move_mask(self, fen: str, device: torch.device) -> torch.Tensor:
-        """Create a binary mask (1 for legal moves, 0 for illegal) for a given FEN."""
-        board = bulletchess.Board.from_fen(fen)
-        mask = torch.zeros(1929, dtype=torch.float32, device=device)
+    def model_spec(self) -> dict:
+        return self.model.spec()
 
-        for move in board.legal_moves():
-            uci = move.uci()
-            # Handle knight promotions: strip 'n' suffix
-            if uci.endswith("n"):
-                uci = uci[:-1]
+    def param_count(self) -> int:
+        return sum(p.numel() for p in self.model.parameters())
 
-            if uci in policy_to_idx:
-                idx = policy_to_idx[uci]
-                mask[idx] = 1.0
+    def _make_optimizer(self) -> optim.Optimizer:
+        cfg = self.config
+        kwargs = dict(lr=cfg.learning_rate, betas=(cfg.beta1, cfg.beta2))
+        params = list(self.model.parameters())
+        if cfg.weight_decay > 0:
+            # Decay matrices only: norm weights, biases and scalar gains stay free.
+            params = [{"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
+                      {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0}]
+        if cfg.optimizer == "adamw":
+            return optim.AdamW(params, **kwargs)
+        return optim.Adam(params, **kwargs)
 
-        return mask
-
-    # ------------------------------------------------------------------ #
-    def _compute_legal_move_probability(self, policy_probs: torch.Tensor, fens: list[str]) -> float:
-        """
-        Compute the probability that the network plays a legal move.
-
-        For each position:
-        1. Compute softmax of logits (already done, passed as policy_probs)
-        2. Create legal moves mask
-        3. Multiply softmax with mask
-        4. Sum to get probability mass on legal moves
-
-        Returns the average across the batch.
-        """
-        # only compute on the first 10 positions
-        fens = fens[:10]
-        policy_probs = policy_probs[:10]
-        B = policy_probs.shape[0]
-        legal_probs = []
-
-        for i in range(B):
-            legal_mask = self._compute_legal_move_mask(fens[i], policy_probs.device)
-            # Check if there are any legal moves (should always be true, but safety check)
-            if legal_mask.sum() > 0:
-                # Multiply policy probabilities with legal mask and sum
-                prob_on_legal = (policy_probs[i] * legal_mask).sum().item()
-                legal_probs.append(prob_on_legal)
-            else:
-                # Position with no legal moves (shouldn't happen in training, but handle gracefully)
-                legal_probs.append(0.0)
-
-        return sum(legal_probs) / len(legal_probs) if legal_probs else 0.0
+    def lr_at(self, step: int) -> float:
+        cfg = self.config
+        sched = cfg.lr_schedule
+        factor = 1.0
+        rel = max(0, step - max(0, sched.start_step))
+        if sched.kind == "cosine" and sched.total_steps > 0:
+            hold = max(0, sched.hold_steps)
+            progress = min(1.0, max(0, rel - hold) / max(1, sched.total_steps - hold))
+            factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        elif sched.kind == "steps":
+            for drop_step, drop_factor in sorted(sched.drops):
+                if step >= drop_step:
+                    factor = float(drop_factor)
+        warm = 1.0
+        if sched.warmup_steps > 0:
+            warm = min(1.0, (rel + 1) / sched.warmup_steps)
+        rewarm = cfg.growth.lr_rewarmup_steps
+        if rewarm > 0 and step - self.last_growth_step < rewarm:
+            warm = min(warm, (step - self.last_growth_step + 1) / rewarm)
+        return cfg.learning_rate * factor * warm
 
     # ------------------------------------------------------------------ #
     def _init_wandb(self):
         if not self.config.wandb.enabled:
             return None
+        import wandb
+
         wandb_dir = self.config.wandb.dir
         if wandb_dir is not None:
             Path(wandb_dir).mkdir(parents=True, exist_ok=True)
@@ -166,462 +170,309 @@ class Trainer:
             init_kwargs["id"] = self.config.wandb.resume_id
             init_kwargs["resume"] = "allow"
         run = wandb.init(**init_kwargs)
-        # Surface the run id so external metric producers (sf1400_autobrawl
-        # daemon, model_chain_brawl) can attach via wandb.init(id=..., resume).
+        # Surface the run id so external metric producers can attach.
         try:
-            run_dir = self.config.checkpoint.dir.parent
-            (run_dir / "wandb_run_id.txt").write_text(f"{run.id}\n")
+            (self.run_dir / "wandb_run_id.txt").write_text(f"{run.id}\n")
         except Exception as exc:  # never fail training over this
             self.console.log(f"[WARN] failed to write wandb_run_id.txt: {exc}")
         return run
 
+    def _write_metrics(self, row: dict) -> None:
+        with self.metrics_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+        if self._wandb_run:
+            import wandb
+
+            wandb.log({k: v for k, v in row.items() if isinstance(v, (int, float))})
+
+    def _log_event(self, event: str, **fields) -> None:
+        self._write_metrics({"event": event, "step": self.step, "t": time.time(), **fields})
+        self.console.log(f"[event] {event} {fields}")
+
     # ------------------------------------------------------------------ #
     def _wait_for_warmup(self) -> None:
         threshold = self.config.data.min_samples_to_start
-        if threshold <= 0:
-            return
         poll = max(1.0, float(self.config.data.warmup_poll_seconds))
-        buffer_path = self.config.data.dataset_path
+        path = self.config.data.dataset_path
 
-        def _live_size() -> int:
+        def live_size() -> int:
             try:
-                return buffer_path.stat().st_size // RECORD_SIZE
+                return path.stat().st_size // RECORD_SIZE
             except FileNotFoundError:
                 return 0
 
-        if _live_size() >= threshold:
-            self.dataset.reload(force=True)
-            return
-        self.console.log(
-            f"[warmup] waiting for buffer to reach {threshold:,} samples "
-            f"(currently {_live_size():,})"
-        )
-        # Cheap file-size probe — avoids re-parsing the entire 5 GB buffer
-        # every poll. We only do a real reload once the threshold is hit.
-        while _live_size() < threshold:
+        if live_size() < threshold:
+            self.console.log(f"[warmup] waiting for buffer to reach {threshold:,} samples")
+        while live_size() < threshold:
             time.sleep(poll)
-            self.console.log(f"[warmup] buffer at {_live_size():,}/{threshold:,}")
-        self.dataset.reload(force=True)
-        self.console.log("[warmup] threshold reached; starting training")
+        self.buffer.refresh()
+        self.console.log(f"[warmup] buffer at {self.buffer.size:,}; starting training")
+
+    def plateaued(self) -> bool:
+        """Has the ladder Elo flattened since the last growth? (growth.trigger = plateau)"""
+        g = self.config.growth
+        path = self.run_dir / "ladder" / "ladder.jsonl"
+        try:
+            rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        except (FileNotFoundError, ValueError):
+            return False
+        rows = [r for r in rows if r.get("step", 0) >= max(0, self.last_growth_step)]
+        if len(rows) < g.plateau_min_ratings or (rows[-1]["t"] - rows[0]["t"]) < g.plateau_hours * 3600:
+            return False
+        window = [r for r in rows if r["t"] >= rows[-1]["t"] - g.plateau_hours * 3600]
+        k = max(1, len(window) // 3)
+        early = sum(r["elo"] for r in window[:k]) / k
+        late = sum(r["elo"] for r in window[-k:]) / k
+        return late - early < g.plateau_min_gain
+
+    def _maybe_grow(self) -> None:
+        # Stages: [step, blocks, channels] for the ResNet, [step, layers] for the encoder.
+        plateau_mode = self.config.growth.trigger == "plateau"
+        if plateau_mode and self.step % 100:
+            return  # the ladder file only changes every ~30 min
+        for stage in sorted(self.config.growth.schedule):
+            cur = self.model.spec()
+            at_step = int(stage[0])
+            if self.step < at_step:
+                continue
+            if cur["arch"] == "encoder":
+                layers = int(stage[1])
+                if layers <= cur["layers"]:
+                    continue
+            else:
+                blocks, channels = int(stage[1]), int(stage[2])
+                if blocks <= cur["blocks"] and channels <= cur["channels"]:
+                    continue
+            # This stage would grow the model; in plateau mode only once Elo has flattened.
+            if plateau_mode and not self.plateaued():
+                return
+            before = self.param_count()
+            if cur["arch"] == "encoder":
+                self.model = grow_encoder(self.model, layers)
+            else:
+                self.model = grow_resnet(self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"]))
+            self.model.train()
+            self.optimizer = self._make_optimizer()
+            self._forward = torch.compile(self.model) if self.config.compile else self.model
+            self.last_growth_step = self.step
+            self._log_event("grow", spec=self.model.spec(), params_before=before, params=self.param_count())
 
     def run(self) -> None:
         self._wait_for_warmup()
-        self.console.log(
-            f"Starting training on {self.device} with dataset size {self.dataset.size}"
-        )
+        cfg = self.config
+        target_k = max(0.1, float(cfg.data.target_k))
+        prefetch = Prefetcher(self.buffer, cfg.batch_size, cfg.mirror_prob)
 
-        target_k = max(0.1, float(self.config.data.target_k))
-        buffer_path = self.config.data.dataset_path
-        writes_sidecar = buffer_path.parent / (buffer_path.name + ".writes")
-
-        def _live_record_count() -> int:
-            """Buffer file size / record size. Used for the warmup gate."""
-            try:
-                return buffer_path.stat().st_size // RECORD_SIZE
-            except FileNotFoundError:
-                return self.dataset.size
-
-        def _live_total_writes() -> int:
-            """Monotonic write counter from the C++ sidecar.
-
-            Counts every write self-play emits — appends *and* random
-            replacements — so it keeps growing after the buffer hits its cap
-            (when file size goes flat). Falls back to file-size-based count
-            for old runs without the sidecar.
-            """
-            try:
-                with writes_sidecar.open("r") as fh:
-                    return int(fh.read().strip())
-            except (FileNotFoundError, ValueError):
-                return _live_record_count()
-
-        # Sliding-window measurement of g. Records are flushed in BURSTS at
-        # game ends, so per-step instant rates spike or read 0 depending on
-        # whether the step window caught a flush. The 30s window absorbs
-        # bursts the same way `iostat` does. We track (time, total_writes)
-        # snapshots — total_writes is monotonic and keeps moving even after
-        # the buffer is capped.
+        # Token-bucket pacing: the trainer may consume target_k samples per
+        # record self-play has written since training started, re-checked every
+        # 0.2 s. (main estimated the insertion rate over a 30 s window and slept
+        # batch / (k * rate); right after start the window is empty, the rate
+        # reads ~0, and the first sleep was ~2048 / 5 = 410 s.)
+        writes0 = self.buffer.total_writes
+        trained0 = self.samples_processed
+        # Insertion rate over a sliding window, for the logs only.
         g_window_seconds = 30.0
-        g_history: deque = deque()  # (time, total_writes)
-        _t0 = time.time()
-        g_history.append((_t0, _live_total_writes()))
+        g_history: deque = deque()
+        g_history.append((time.time(), writes0))
+        step_times: deque = deque(maxlen=50)
+        waited = 0.0
 
         try:
             while True:
-                self.dataset.reload()
+                prefetch.refresh()  # stat + two tiny files; keeps total_writes current
+                produced = self.buffer.total_writes - writes0
+                if self.samples_processed - trained0 >= target_k * produced:
+                    time.sleep(0.2)
+                    waited += 0.2
+                    continue
+                self._maybe_grow()
+
                 t0 = time.time()
-                batch = self.dataset.sample_batch(self.config.batch_size)
-                metrics = self._train_step(batch)
+                batch = prefetch.get().to(self.device)
+                expensive = self.step % max(1, cfg.expensive_metrics_every) == 0
+                metrics = self._train_step(batch, expensive)
                 t1 = time.time()
-
-                # Update sliding window using the monotonic write counter.
-                cur_writes = _live_total_writes()
-                g_history.append((t1, cur_writes))
-                # Cap deque memory at ~5 minutes of snapshots; never pop down
-                # to a single entry (which collapses window_dt to ~0).
-                cutoff_age = max(g_window_seconds * 4, 300.0)
-                while len(g_history) > 2 and (t1 - g_history[0][0]) > cutoff_age:
-                    g_history.popleft()
-                # Anchor selection: walk from oldest, keep the freshest
-                # snapshot that is still >= g_window_seconds old. Falls back
-                # to the oldest available entry if all are younger.
-                anchor_t, anchor_w = g_history[0]
-                for ts, w in g_history:
-                    if t1 - ts < g_window_seconds:
-                        break
-                    anchor_t, anchor_w = ts, w
-                window_dt = max(1e-3, t1 - anchor_t)
-                g = max(0.0, (cur_writes - anchor_w) / window_dt)
-
-                # Pace: sleep so that s = batch_size / step_interval = target_k * g.
-                # Until the window is fully populated (first ~30s of training)
-                # we conservatively cap the inferred g at a small value so the
-                # trainer doesn't burst on a single 1s burst-flush reading.
-                if window_dt < g_window_seconds * 0.5:
-                    g_for_pacing = min(g, 50.0)
-                else:
-                    g_for_pacing = g
-                target_step_interval = self.config.batch_size / max(
-                    1e-3, target_k * max(g_for_pacing, 1.0)
-                )
                 step_dt = t1 - t0
-                sleep_for = max(0.0, target_step_interval - step_dt)
-                time.sleep(sleep_for)
+                step_times.append(step_dt)
+
+                cur_writes = self.buffer.total_writes
+                g_history.append((t1, cur_writes))
+                while len(g_history) > 2 and (t1 - g_history[0][0]) > g_window_seconds:
+                    g_history.popleft()
+                window_dt = max(1e-3, t1 - g_history[0][0])
+                g = max(0.0, (cur_writes - g_history[0][1]) / window_dt)
 
                 self.step += 1
-                self.samples_processed += self.config.batch_size
+                self.samples_processed += cfg.batch_size
 
-                # Effective sample rate after pacing.
-                effective_step_interval = max(step_dt, target_step_interval)
-                s_eff = self.config.batch_size / max(1e-6, effective_step_interval)
-                k_actual = s_eff / max(1e-6, g)
-                metrics["pacing/g_records_per_sec"] = float(g)
-                metrics["pacing/s_records_per_sec"] = float(s_eff)
-                metrics["pacing/k_actual"] = float(k_actual)
-                metrics["pacing/sleep_s"] = float(sleep_for)
-                metrics["pacing/step_time_s"] = float(step_dt)
-                metrics["pacing/g_window_s"] = float(window_dt)
+                if self.step % cfg.log_every == 0:
+                    row = {k: float(v) for k, v in metrics.items()}
+                    row.update(
+                        step=self.step,
+                        t=time.time(),
+                        samples=self.samples_processed,
+                        lr=self.lr_at(self.step),
+                        params=self.param_count(),
+                        **{f"model_{k}": v for k, v in self.model.spec().items() if k != "arch"},
+                        **{
+                            "pacing/g_records_per_sec": g,
+                            "pacing/k_actual": (self.samples_processed - trained0) / max(1, produced),
+                            "pacing/waited_s": waited,
+                            "pacing/step_time_s": float(np.mean(step_times)),
+                            "buffer/window": self.buffer.current_window(),
+                            "buffer/records": self.buffer.size,
+                            "buffer/total_writes": self.buffer.total_writes,
+                        },
+                    )
+                    self._write_metrics(row)
+                    if self.step % (cfg.log_every * 10) == 0:
+                        self.console.log(
+                            f"[step {self.step}] loss={row['loss/total']:.4f} "
+                            f"pol={row['loss/policy']:.3f} val={row['loss/value']:.3f} "
+                            f"acc={row['acc/policy']:.3f} g={g:.0f}/s k={row['pacing/k_actual']:.2f} "
+                            f"win={row['buffer/window']:,} lr={row['lr']:.2e}"
+                        )
 
-                if self.step % self.config.log_every == 0:
-                    self._log(metrics)
-
-                if self.step % self.config.checkpoint.every_steps == 0:
+                if self.step % cfg.checkpoint.every_steps == 0:
                     self._save_checkpoint()
         except KeyboardInterrupt:
             self.console.log("Training interrupted by user.")
         finally:
+            prefetch.close()
             if self._wandb_run:
+                import wandb
+
                 wandb.finish()
 
     # ------------------------------------------------------------------ #
-    def _train_step(self, batch: SelfPlayBatch) -> dict[str, float]:
+    def _train_step(self, batch: Batch, expensive: bool) -> dict[str, torch.Tensor | float]:
+        cfg = self.config
+        lr = self.lr_at(self.step)
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
         self.optimizer.zero_grad(set_to_none=True)
 
-        inputs = torch.from_numpy(batch.planes).to(self.device)
-        targets_policy = torch.from_numpy(batch.policy_indices).to(self.device)
-        target_value_outcome = torch.from_numpy(batch.value_outcomes).to(self.device)  # one-hot
-        target_value_mcts = torch.from_numpy(batch.value_mcts).to(self.device)  # dense
-        target_plies = torch.from_numpy(batch.plies_remaining).to(self.device)  # raw plies (true)
-        target_backed_plies = torch.from_numpy(batch.backed_plies).to(
-            self.device
-        )  # raw plies (MCTS-backed)
-        # Targets are raw `plies / 25`, clamped at 4 (= 100 plies = 50 moves)
-        # so long-horizon outliers don't dominate the MSE. The model output is
-        # also linear, so this is a clean regression with no saturation
-        # mismatch between the two sides of the loss.
-        target_mlh = (target_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        target_mlh_q = (target_backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        # -1 is the "no MLH target" sentinel set by the buffer-migration
-        # scripts to mark pre-MLH (resp. pre-mlh_q) rows. Each head has its
-        # own mask so the true-target head can keep training on legacy rows
-        # even before the mlh_q field is populated.
-        mlh_mask = (target_plies > -0.5).float()
-        mlh_q_mask = (target_backed_plies > -0.5).float()
-        value_labels = torch.argmax(target_value_outcome, dim=-1)
-        value_q_labels = torch.argmax(target_value_mcts, dim=-1)
+        inputs = decode_planes(batch)
+        full = (batch.flags & FLAG_FULL_SEARCH) > 0
+        target_mlh = (batch.plies_remaining.clamp_min(0.0) / 25.0).clamp_max(4.0)
+        target_mlh_q = (batch.backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
+        mlh_mask = (batch.plies_remaining > -0.5).float()
+        mlh_q_mask = (batch.backed_plies > -0.5).float()
+        has_visits = full & (batch.policy_prob.sum(dim=1) > 0)
 
         with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
-            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self.model(
-                [inputs, None], return_all=True
+            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self._forward(
+                inputs, return_all=True
             )
-            B = policy_logits.shape[0]
-            policy_logits = policy_logits.view(B, -1)
-            value_logits = value_logits.view(B, 3)
-            value_q_logits = value_q_logits.view(B, 3)
-            mlh_pred = mlh_pred.view(B)
-            mlh_q_pred = mlh_q_pred.view(B)
+        policy_logits = policy_logits.float()
+        value_logits = value_logits.float()
+        value_q_logits = value_q_logits.float()
+        mlh_pred = mlh_pred.float().view(-1)
+        mlh_q_pred = mlh_q_pred.float().view(-1)
 
-            policy_loss = F.cross_entropy(
-                policy_logits, targets_policy, ignore_index=NULL_POLICY_INDEX
-            )
+        log_probs = F.log_softmax(policy_logits, dim=-1)
+        visit_target = dense_policy_target(batch)
+        visit_ce = -(visit_target * log_probs).sum(dim=-1)
+        visit_loss = (visit_ce * has_visits).sum() / has_visits.sum().clamp_min(1)
+        played = torch.where(full, batch.played_idx, torch.full_like(batch.played_idx, IGNORE_INDEX))
+        played_loss = F.cross_entropy(policy_logits, played, ignore_index=IGNORE_INDEX)
+        policy_loss = visit_loss if cfg.policy_target == "visits" else played_loss
 
-            # value head ← sparse one-hot game-outcome WDL (cross-entropy on soft labels).
-            value_loss = F.cross_entropy(value_logits, target_value_outcome)
-            # value_q head ← dense MCTS-backed-up WDL (cross-entropy on soft labels).
-            value_q_loss = F.cross_entropy(value_q_logits, target_value_mcts)
+        value_loss = F.cross_entropy(value_logits, batch.value_outcome)
+        value_q_loss = F.cross_entropy(value_q_logits, batch.value_mcts)
+        mlh_loss = ((mlh_pred - target_mlh).pow(2) * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0)
+        mlh_q_loss = ((mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask).sum() / mlh_q_mask.sum().clamp_min(1.0)
 
-            # MLH losses: MSE on raw plies/25, masked. mlh learns the unbiased
-            # game-end target; mlh_q learns the MCTS-backed-up estimate at the
-            # search root. Both fall back to 0 cleanly when their respective
-            # mask is empty (e.g. early in a fresh run before backed_plies is
-            # populated).
-            mlh_sq = (mlh_pred - target_mlh).pow(2) * mlh_mask
-            mlh_q_sq = (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
-            mlh_loss = mlh_sq.sum() / mlh_mask.sum().clamp_min(1.0)
-            mlh_q_loss = mlh_q_sq.sum() / mlh_q_mask.sum().clamp_min(1.0)
-
-            value_accuracy = (value_logits.argmax(dim=-1) == value_labels).float().mean()
-            value_q_accuracy = (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean()
-
-            lw = self.config.loss_weights
-            total_loss = (
-                lw.policy * policy_loss
-                + lw.value_q * value_q_loss
-                + lw.value * value_loss
-                + lw.mlh * mlh_loss
-                + lw.mlh_q * mlh_q_loss
-            )
+        lw = cfg.loss_weights
+        total_loss = (
+            lw.policy * policy_loss
+            + lw.value * value_loss
+            + lw.value_q * value_q_loss
+            + lw.mlh * mlh_loss
+            + lw.mlh_q * mlh_q_loss
+        )
 
         self.scaler.scale(total_loss).backward()
+        if cfg.grad_clip > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # Keep teacher in sync every step using EMA
-        self._update_teacher()
-        policy_accuracy = (policy_logits.argmax(dim=-1) == targets_policy).float().mean().item()
-
-        # Calculate policy entropy: -sum(p * log(p + eps))
-        # Convert to float32 for accurate entropy calculation
-        policy_logits_f32 = policy_logits.float()
-        policy_probs = F.softmax(policy_logits_f32, dim=-1)
-        eps = 1e-8
-        policy_entropy = -(policy_probs * torch.log(policy_probs + eps)).sum(dim=-1).mean().item()
-
-        # Calculate probability mass on legal moves
-        # Compute softmax of logits, multiply with legal moves mask, then sum
-        legal_move_probs = self._compute_legal_move_probability(policy_probs, batch.fens)
-
-        # Buffer-target sharpness: what fraction of MCTS-WDL targets are
-        # confident (>=80% on a single class)? When this stays low the value_q
-        # head has nothing to learn from. Cheap — computed on the same batch.
-        vm = target_value_mcts.float()
-        frac_w_conf = float((vm[:, 0] >= 0.8).float().mean().item())
-        frac_l_conf = float((vm[:, 2] >= 0.8).float().mean().item())
-        frac_d_conf = float((vm[:, 1] >= 0.8).float().mean().item())
-        frac_uniform = float((vm.max(dim=-1).values < 0.40).float().mean().item())
-
-        # Castle rate in the batch (rare-action diagnostic). The UCI strings
-        # "e1g1", "e1c1", "e8g8", "e8c8" *can* also encode rook/queen moves
-        # to those squares, so we filter on candidate indices first (cheap
-        # vectorised np.isin, ~0.3% of records hit) and then verify the few
-        # candidates with python-chess `is_castling` to avoid counting
-        # rook/queen moves as castles. Castling historically appears in only
-        # ~0.007% of buffer records (vs ~0.8-1% in real chess), so we expect
-        # this metric to be near 0 and want to watch it climb after tuning.
-        pi_np = batch.policy_indices
-        sample_total = int((pi_np != NULL_POLICY_INDEX).sum())
-        castle_count = 0
-        if sample_total > 0:
-            cand_idx = np.where(np.isin(pi_np, _CASTLE_CAND_INDICES))[0]
-            for i in cand_idx:
-                idx_int = int(pi_np[i])
-                try:
-                    mv = chess.Move.from_uci(policy_index[idx_int])
-                    b = chess.Board(batch.fens[int(i)])
-                    if mv in b.legal_moves and b.is_castling(mv):
-                        castle_count += 1
-                except Exception:
-                    pass
-        castle_rate = castle_count / max(1, sample_total)
-
-        # Agreement between the two value targets — flagged because the buffer
-        # audit showed only ~67% agreement on a mature buffer (and ~18% on
-        # eventual-draw positions). Low agreement = the two value losses pull
-        # in opposite directions on a chunk of every batch.
-        agreement_mask = (value_labels == value_q_labels).float()
-        wdl_agreement = float(agreement_mask.mean().detach().item())
-
-        # MLH diagnostics: per-head mask coverage and (pred, target) means
-        # taken over the masked rows. Diagnostics report values in raw plies
-        # (multiply the predicted/target /25 fields by 25) for readability.
-        def _masked_mean(t: torch.Tensor, mask: torch.Tensor) -> float:
-            denom = mask.sum().detach().item()
-            if denom <= 0.0:
-                return 0.0
-            return float((t * mask).sum().detach().item() / denom)
-
-        mask_frac = float(mlh_mask.mean().detach().item())
-        mask_q_frac = float(mlh_q_mask.mean().detach().item())
-        mlh_pred_mean = _masked_mean(mlh_pred, mlh_mask) * 25.0  # plies
-        mlh_target_mean = _masked_mean(target_mlh, mlh_mask) * 25.0
-        mlh_q_pred_mean = _masked_mean(mlh_q_pred, mlh_q_mask) * 25.0
-        mlh_q_target_mean = _masked_mean(target_mlh_q, mlh_q_mask) * 25.0
-
-        # Agreement between the two MLH targets, computed only on rows where
-        # both masks are present. Two views:
-        #   - mean |target_mlh - target_mlh_q| in plies (concrete units)
-        #   - Pearson correlation (dimensionless, robust to mean drift)
-        # Useful because the audit showed MCTS-backed-up plies (mlh_q) and raw
-        # game-end plies (mlh) can disagree heavily on early-game positions.
-        both_mask = (mlh_mask * mlh_q_mask).float()
-        denom = both_mask.sum().detach()
-        if denom.item() > 0.0:
-            diff_plies = (target_mlh - target_mlh_q).abs() * 25.0
-            mlh_target_abs_diff_plies = float(
-                (diff_plies * both_mask).sum().detach().item() / denom.item()
-            )
-            # Masked Pearson correlation.
-            a = target_mlh * both_mask
-            b = target_mlh_q * both_mask
-            n = denom
-            mean_a = a.sum() / n
-            mean_b = b.sum() / n
-            da = (target_mlh - mean_a) * both_mask
-            db = (target_mlh_q - mean_b) * both_mask
-            cov = (da * db).sum()
-            var_a = (da * da).sum().clamp_min(1e-12)
-            var_b = (db * db).sum().clamp_min(1e-12)
-            mlh_target_corr = float((cov / (var_a.sqrt() * var_b.sqrt())).detach().item())
-        else:
-            mlh_target_abs_diff_plies = 0.0
-            mlh_target_corr = 0.0
-
-        metrics = {
-            "loss/total": float(total_loss.detach().item()),
-            "loss/policy": float(policy_loss.detach().item()),
-            "loss/value": float(value_loss.detach().item()),
-            "loss/value_q": float(value_q_loss.detach().item()),
-            "loss/mlh": float(mlh_loss.detach().item()),
-            "loss/mlh_q": float(mlh_q_loss.detach().item()),
-            "acc/policy": policy_accuracy,
-            "acc/value": float(value_accuracy.detach().item()),
-            "acc/value_q": float(value_q_accuracy.detach().item()),
-            "entropy/policy": policy_entropy,
-            "legal_move_prob": legal_move_probs,
-            "buffer/frac_W_geq_0.8": frac_w_conf,
-            "buffer/frac_L_geq_0.8": frac_l_conf,
-            "buffer/frac_D_geq_0.8": frac_d_conf,
-            "buffer/frac_near_uniform": frac_uniform,
-            "buffer/castle_rate": castle_rate,
-            "buffer/wdl_agreement": wdl_agreement,
-            "buffer/mlh_mask_frac": mask_frac,
-            "buffer/mlh_q_mask_frac": mask_q_frac,
-            "mlh/pred_plies": mlh_pred_mean,
-            "mlh/target_plies": mlh_target_mean,
-            "mlh_q/pred_plies": mlh_q_pred_mean,
-            "mlh_q/target_plies": mlh_q_target_mean,
-            "buffer/mlh_target_abs_diff_plies": mlh_target_abs_diff_plies,
-            "buffer/mlh_target_corr": mlh_target_corr,
-        }
+        with torch.no_grad():
+            probs = log_probs.exp()
+            value_labels = batch.value_outcome.argmax(dim=-1)
+            value_q_labels = batch.value_mcts.argmax(dim=-1)
+            played_ok = played != IGNORE_INDEX
+            top1 = policy_logits.argmax(dim=-1)
+            target_entropy = -(visit_target * visit_target.clamp_min(1e-12).log()).sum(-1)
+            vm = batch.value_mcts
+            castle_cand = torch.isin(batch.played_idx, _CASTLE_IDX.to(self.device))
+            kings_home = (((batch.cur_bb[:, 5] >> _E1) & 1) > 0) | (((batch.cur_bb[:, 11] >> _E8) & 1) > 0)
+            metrics: dict[str, torch.Tensor | float] = {
+                "loss/total": total_loss.detach(),
+                "loss/policy": policy_loss.detach(),
+                "loss/policy_visits": visit_loss.detach(),
+                "loss/policy_played": played_loss.detach(),
+                "loss/value": value_loss.detach(),
+                "loss/value_q": value_q_loss.detach(),
+                "loss/mlh": mlh_loss.detach(),
+                "loss/mlh_q": mlh_q_loss.detach(),
+                # KL(visits || policy) = CE - H(target): 0 when the net matches the search.
+                "policy/kl_to_visits": ((visit_ce - target_entropy) * has_visits).sum()
+                / has_visits.sum().clamp_min(1),
+                "acc/policy": ((top1 == played) & played_ok).float().sum() / played_ok.float().sum().clamp_min(1),
+                "acc/policy_top_visit": (
+                    (top1 == visit_target.argmax(dim=-1)) & has_visits
+                ).float().sum() / has_visits.float().sum().clamp_min(1),
+                "acc/value": (value_logits.argmax(dim=-1) == value_labels).float().mean(),
+                "acc/value_q": (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean(),
+                "entropy/policy": -(probs * log_probs).sum(dim=-1).mean(),
+                "entropy/visit_target": (target_entropy * has_visits).sum() / has_visits.sum().clamp_min(1),
+                "buffer/frac_W_geq_0.8": (vm[:, 0] >= 0.8).float().mean(),
+                "buffer/frac_D_geq_0.8": (vm[:, 1] >= 0.8).float().mean(),
+                "buffer/frac_L_geq_0.8": (vm[:, 2] >= 0.8).float().mean(),
+                "buffer/frac_near_uniform": (vm.max(dim=-1).values < 0.40).float().mean(),
+                "buffer/decisive_outcome": (value_labels != 1).float().mean(),
+                "buffer/wdl_agreement": (value_labels == value_q_labels).float().mean(),
+                "buffer/castle_rate": (castle_cand & kings_home).float().mean(),
+                "mlh/pred_plies": (mlh_pred * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
+                "mlh/target_plies": (target_mlh * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
+                "amp/scale": self.scaler.get_scale() if self.scaler.is_enabled() else 1.0,
+            }
+            if expensive:
+                rows = min(16, probs.shape[0])
+                metrics["legal_move_prob"] = legal_move_probability(probs[:rows].float().cpu(), batch.fens[:rows])
         return metrics
 
     # ------------------------------------------------------------------ #
-    def _log(self, metrics: dict[str, float]) -> None:
-        elapsed = time.time() - self.last_log_time
-        if elapsed <= 0:
-            elapsed = 1e-6
-        positions_per_sec = (self.config.batch_size * self.config.log_every) / elapsed
-        self.last_log_time = time.time()
-
-        g = metrics.get("pacing/g_records_per_sec", 0.0)
-        k = metrics.get("pacing/k_actual", 0.0)
-        log_line = (
-            f"[step {self.step}] "
-            f"loss={metrics['loss/total']:.4f} "
-            f"policy_acc={metrics['acc/policy']:.3f} "
-            f"value_acc={metrics['acc/value']:.3f} "
-            f"pps={positions_per_sec:,.0f} "
-            f"g={g:.1f}/s k={k:.2f}"
-        )
-        self.console.log(log_line)
-
-        if self._wandb_run:
-            wandb.log(
-                {
-                    **metrics,
-                    "speed/positions_per_sec": positions_per_sec,
-                    "global_step": self.step,
-                }
-            )
-
-    # ------------------------------------------------------------------ #
-    def _update_teacher(self) -> None:
-        """Update teacher model parameters using EMA.
-
-        Two pieces of state to keep in sync:
-
-        1. Parameters (conv weights, FC weights, BN gamma/beta, ...) get
-           EMA-blended:   teacher = decay * teacher + (1-decay) * student.
-        2. Buffers (BN running_mean / running_var / num_batches_tracked) get
-           hard-copied from the student. These are not learnable; they track
-           the *running statistics* of activations seen during the student's
-           training. If we leave them at init while EMA-updating gamma/beta,
-           the teacher's BN normalizes using stale stats and the network's
-           output is garbage at eval() time. (model.parameters() does NOT
-           iterate buffers, which was the original bug.)
-        """
-        with torch.no_grad():
-            for teacher_param, student_param in zip(
-                self.teacher_model.parameters(), self.model.parameters(), strict=True
-            ):
-                teacher_param.data.mul_(self.config.teacher_decay).add_(
-                    student_param.data, alpha=self.config.teacher_weight
-                )
-            for teacher_buf, student_buf in zip(
-                self.teacher_model.buffers(), self.model.buffers(), strict=True
-            ):
-                teacher_buf.data.copy_(student_buf.data)
-
     def _save_checkpoint(self) -> None:
-        # Save Student Checkpoint (for resuming training)
         ckpt = {
             "model": self.model.state_dict(),
+            "model_spec": self.model.spec(),
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
             "step": self.step,
+            "samples": self.samples_processed,
+            "last_growth_step": self.last_growth_step,
             "config": self.config.to_dict(),
         }
+        if self.lr_start_step is not None:
+            ckpt["lr_start_step"] = self.lr_start_step
         path = self.checkpoint_dir / f"step_{self.step:08d}.pt"
-        torch.save(ckpt, path)
-        self.console.log(f"Saved student checkpoint to {path}")
-
-        # Save Teacher Checkpoint (for self-play)
-        teacher_ckpt = {
-            "model": self.teacher_model.state_dict(),
-            "step": self.step,
-            "config": self.config.to_dict(),
-        }
-        teacher_path = self.checkpoint_dir / f"teacher_step_{self.step:08d}.pt"
-        torch.save(teacher_ckpt, teacher_path)
-        self.console.log(f"Saved teacher checkpoint to {teacher_path}")
-
-        # Build engine from STUDENT checkpoint
+        tmp = path.with_suffix(".pt.tmp")
+        torch.save(ckpt, tmp)
+        tmp.replace(path)
+        self.console.log(f"Saved checkpoint {path.name}")
         self._invoke_build_script(path)
-
-        # Evaluate STUDENT checkpoint (to see progress)
-        # self._evaluate_checkpoint(path)
-
         self._prune_checkpoints()
 
-    def _load_checkpoint(self, path: Path) -> None:
-        # weights_only=False because our checkpoints embed pathlib.Path objects
-        # in the saved config dict, and PyTorch 2.6+ defaults to a strict
-        # safe-globals list that rejects them.
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        # strict=False so a checkpoint from before the MLH head was added still
-        # loads — the new mlh_* params stay at their fresh init and warm up
-        # within a few hundred steps once the buffer has plies_remaining rows.
+    def _load_checkpoint(self, ckpt: dict, path: Path) -> None:
         missing, unexpected = self.model.load_state_dict(ckpt["model"], strict=False)
         if missing:
-            self.console.log(
-                f"[resume] new params not in checkpoint (initialized fresh): {missing}"
-            )
+            self.console.log(f"[resume] new params not in checkpoint (initialized fresh): {missing}")
         if unexpected:
             self.console.log(f"[resume] checkpoint has unused params: {unexpected}")
-        # Optimizer state is keyed by param-id, which depends on the param set.
-        # When the architecture grew (e.g. MLH head added), the saved state's
-        # param groups don't match the new optimizer; we fall back to a fresh
-        # optimizer rather than throwing.
         try:
             self.optimizer.load_state_dict(ckpt["optimizer"])
         except (ValueError, KeyError) as exc:
@@ -629,22 +480,15 @@ class Trainer:
         if "scaler" in ckpt:
             self.scaler.load_state_dict(ckpt["scaler"])
         self.step = int(ckpt.get("step", 0))
+        self.samples_processed = int(ckpt.get("samples", self.step * self.config.batch_size))
+        self.last_growth_step = int(ckpt.get("last_growth_step", self.last_growth_step))
         self.console.log(f"Resumed from checkpoint {path} at step {self.step}")
 
     def _prune_checkpoints(self) -> None:
         keep = self.config.checkpoint.keep_last
         if keep <= 0:
             return
-        files = sorted(self.checkpoint_dir.glob("step_*.pt"))
-        for old in files[:-keep]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-
-        # Prune teacher checkpoints
-        teacher_files = sorted(self.checkpoint_dir.glob("teacher_step_*.pt"))
-        for old in teacher_files[:-keep]:
+        for old in sorted(self.checkpoint_dir.glob("step_*.pt"))[:-keep]:
             try:
                 old.unlink()
             except OSError:
@@ -658,84 +502,29 @@ class Trainer:
         if not script_path.is_file():
             self.console.log(f"[WARN] build script {script_path} not found; skipping TRT export.")
             return
-
-        engine_dir = self.config.checkpoint.engine_dir
-        iteration_file = self.config.checkpoint.iteration_file
-
         cmd = [
             script_path.as_posix(),
             checkpoint_path.resolve().as_posix(),
             str(self.step),
-            engine_dir.as_posix(),
-            iteration_file.as_posix(),
+            self.config.checkpoint.engine_dir.as_posix(),
+            self.config.checkpoint.iteration_file.as_posix(),
         ]
-        try:
-            subprocess.run(cmd, check=True)
-            self.console.log(f"Updated TensorRT engine via {script_path}.")
-        except Exception as exc:
-            self.console.log(f"[WARN] build_trt.sh failed: {exc}")
-
-    def _evaluate_checkpoint(self, checkpoint_path: Path) -> None:
-        """Evaluate raw model against Stockfish and log ELO to wandb."""
-        self.console.log(
-            f"Evaluating checkpoint {checkpoint_path} against Stockfish (ELO {self._current_stockfish_elo})..."
-        )
-
-        try:
-            from src.eval.play_move import main_model_vs_stockfish
-        except ImportError as exc:
-            self.console.log(f"[WARN] Failed to import play_move: {exc}")
+        if not self.config.async_engine_build:
+            try:
+                subprocess.run(cmd, check=True)
+                self.console.log(f"Updated TensorRT engine via {script_path}.")
+            except Exception as exc:
+                self.console.log(f"[WARN] build_trt.sh failed: {exc}")
             return
-
-        # Load a fresh model instance from checkpoint
-        eval_model = SmallModel().to(self.device)
-        eval_model.eval()
-        try:
-            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            eval_model.load_state_dict(ckpt["model"], strict=False)
-        except Exception as exc:
-            self.console.log(f"[WARN] Failed to load checkpoint for evaluation: {exc}")
+        if self._build_proc is not None and self._build_proc.poll() is None:
+            self._log_event("build_skipped", checkpoint=checkpoint_path.name)
             return
+        if self._build_proc is not None and self._build_proc.returncode not in (0, None):
+            self.console.log(f"[WARN] previous engine build exited rc={self._build_proc.returncode}")
+        log_path = self.run_dir / "engine_builds.log"
+        self._build_log = log_path.open("a")
+        self._build_proc = subprocess.Popen(cmd, stdout=self._build_log, stderr=subprocess.STDOUT)
+        self.console.log(f"Engine build started for {checkpoint_path.name} (pid {self._build_proc.pid})")
 
-        # Run evaluation
-        try:
-            win_rate, estimated_elo = main_model_vs_stockfish(
-                model=eval_model,
-                model1_name="SelfPlay",
-                device=self.device.type,
-                num_games=100,
-                temp=0.1,
-                elo=self._current_stockfish_elo,
-            )
 
-            # Handle case where estimated_elo might be "N/A"
-            elo_value = estimated_elo if isinstance(estimated_elo, (int, float)) else None
-
-            # Log to wandb
-            if self._wandb_run:
-                log_dict = {
-                    "eval/win_rate": win_rate,
-                    "eval/stockfish_elo": self._current_stockfish_elo,
-                    "global_step": self.step,
-                }
-                if elo_value is not None:
-                    log_dict["eval/estimated_elo"] = elo_value
-                wandb.log(log_dict)
-
-            # Handle case where estimated_elo might be "N/A"
-            if isinstance(estimated_elo, str):
-                self.console.log(f"Evaluation complete: ELO=N/A, Win rate={win_rate:.3f}")
-                # Don't update Stockfish ELO if we can't estimate
-            else:
-                self.console.log(
-                    f"Evaluation complete: ELO={estimated_elo:.1f}, Win rate={win_rate:.3f}"
-                )
-
-                # Update Stockfish ELO for next evaluation
-                self._current_stockfish_elo = max(int(estimated_elo), 1400)
-                self.console.log(
-                    f"Next evaluation will use Stockfish ELO {self._current_stockfish_elo}"
-                )
-
-        except Exception as exc:
-            self.console.log(f"[WARN] Evaluation failed: {exc}")
+__all__ = ["Trainer", "legal_move_probability", "policy_index"]

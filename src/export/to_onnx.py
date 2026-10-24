@@ -6,8 +6,8 @@ from pathlib import Path
 import onnx
 import torch
 
+from src.models.factory import model_from_checkpoint
 from src.models.small.fen_encoder import INPUT_PLANES
-from src.models.small.small_model import SmallModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,30 +30,38 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
 
 
 class ExportWrapper(torch.nn.Module):
-    """Routes the `value_q` head (trained against MCTS-backed-up WDL) into the
-    engine's "value" output and exposes both moves-left heads:
-      - mlh:   raw plies/25 estimate, true target.
-      - mlh_q: raw plies/25 estimate, MCTS-backed target. Used by C++ MCTS for
-               both the depth-incremented backup (×25 ↦ raw plies) and the
-               tiebreaker (tanh applied at the call site)."""
+    """Picks which heads feed the engine's "value" and "mlh_q" outputs.
 
-    def __init__(self, model):
+    The C++ MCTS reads "value" as the leaf WDL and "mlh_q" as the leaf
+    plies-remaining estimate (depth-incremented backup + tiebreaker).
+      search_heads="search"  (main): value_q / mlh_q, trained on MCTS backups.
+      search_heads="outcome":        value / mlh, trained on game results and
+                                     true plies remaining (AlphaZero-style)."""
+
+    def __init__(self, model, search_heads: str = "search"):
         super().__init__()
         self.model = model
+        self.outcome = search_heads == "outcome"
 
     def forward(self, x):
-        p, _v, vq, mlh, mlh_q = self.model(x, return_all=True)
+        p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
+        if self.outcome:
+            return p, torch.softmax(v, dim=-1), mlh, mlh
         return p, torch.softmax(vq, dim=-1), mlh, mlh_q
 
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
-    base_model = SmallModel().to(device)
-    state_dict = load_state_dict(args.ckpt_path, args.device)
-    base_model.load_state_dict(state_dict, strict=False)
+    checkpoint = torch.load(args.ckpt_path, map_location=args.device, weights_only=False)
+    if not (isinstance(checkpoint, dict) and "model" in checkpoint):
+        checkpoint = {"model": checkpoint}
+    # The architecture travels in the checkpoint (grown / encoder nets).
+    base_model = model_from_checkpoint(checkpoint, device)
     base_model.eval()
 
-    model = ExportWrapper(base_model).to(device)
+    search_heads = (checkpoint.get("config") or {}).get("search_heads", "search")
+    print(f"[to_onnx] search_heads={search_heads}")
+    model = ExportWrapper(base_model, search_heads).to(device)
     model.eval()
 
     dummy_input = torch.randn(args.batch, 8, 8, INPUT_PLANES, device=device, dtype=torch.float32)

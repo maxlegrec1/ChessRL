@@ -31,6 +31,8 @@ sys.path.insert(0, str(ROOT))
 
 import _inference_cpp  # noqa: E402
 
+from src.rating.ladder import rules_end  # noqa: E402  (automatic threefold, as in self-play)
+
 
 def latest_engine_from_iteration_file(p: Path) -> Path | None:
     if not p.is_file():
@@ -160,7 +162,7 @@ def main():
     # ---- random-opening plies (uniform legal sampling) ----
     for g in range(args.num_games):
         for _ in range(args.random_opening_plies):
-            if boards[g].is_game_over(claim_draw=True):
+            if rules_end(boards[g])[0]:
                 break
             mv = rng.choice(list(boards[g].legal_moves))
             histories[g].append(mv.uci())
@@ -212,12 +214,12 @@ def main():
                 comments[g].append("")
             boards[g].push(mv)
 
-            if boards[g].is_game_over(claim_draw=True) or len(histories[g]) >= args.max_plies:
-                outcome = boards[g].outcome(claim_draw=True)
-                if outcome is None or outcome.winner is None:
+            over, winner = rules_end(boards[g])
+            if over or len(histories[g]) >= args.max_plies:
+                if winner is None:
                     results[g] = "1/2-1/2"
                 else:
-                    results[g] = "1-0" if outcome.winner == chess.WHITE else "0-1"
+                    results[g] = "1-0" if winner == chess.WHITE else "0-1"
                 finished[g] = True
                 print(
                     f"  game {g + 1} done  result={results[g]}  plies={len(histories[g])}  "

@@ -1,0 +1,10 @@
+# Continue the signal arm from its 24 h checkpoint with a cosine LR decay, to
+# test whether the ~1300 plateau of the constant-LR 4x64 run is an LR plateau.
+#   box.sh resume-with signal configs/signal_decay.yaml
+extends: signal.yaml
+lr_schedule:
+  kind: cosine
+  start_step: -1  # = the step this config is resumed at
+  warmup_steps: 0
+  total_steps: 20000
+  final_ratio: 0.05

@@ -28,29 +28,35 @@ class ResBlock(nn.Module):
 
 
 class SmallModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.input_conv = nn.Conv2d(INPUT_PLANES, 64, 3, padding=1, bias=False)
-        self.input_bn = nn.BatchNorm2d(64)
+    """AlphaZero-style ResNet with five heads. Default trunk = main's 4 blocks x 64.
 
-        # 4 Residual Blocks
-        self.blocks = nn.ModuleList([ResBlock(64) for _ in range(4)])
+    `blocks` / `channels` size the trunk; heads keep their fixed reduction widths
+    so checkpoints of any trunk size share head layouts (see src/models/growth.py)."""
+
+    def __init__(self, blocks: int = 4, channels: int = 64):
+        super().__init__()
+        self.num_blocks = blocks
+        self.channels = channels
+        self.input_conv = nn.Conv2d(INPUT_PLANES, channels, 3, padding=1, bias=False)
+        self.input_bn = nn.BatchNorm2d(channels)
+
+        self.blocks = nn.ModuleList([ResBlock(channels) for _ in range(blocks)])
 
         # Policy Head
         # Reduce channels to 16, then flatten to 1024
-        self.policy_conv = nn.Conv2d(64, 16, 1, bias=False)
+        self.policy_conv = nn.Conv2d(channels, 16, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(16)
         self.policy_fc1 = nn.Linear(16 * 8 * 8, 256)
         self.policy_fc2 = nn.Linear(256, 1929)
 
         # Value Head
-        self.value_conv = nn.Conv2d(64, 8, 1, bias=False)
+        self.value_conv = nn.Conv2d(channels, 8, 1, bias=False)
         self.value_bn = nn.BatchNorm2d(8)
         self.value_fc1 = nn.Linear(8 * 8 * 8, 128)
         self.value_fc2 = nn.Linear(128, 3)  # WDL
 
         # Value Head Q
-        self.value_conv_q = nn.Conv2d(64, 8, 1, bias=False)
+        self.value_conv_q = nn.Conv2d(channels, 8, 1, bias=False)
         self.value_bn_q = nn.BatchNorm2d(8)
         self.value_fc1_q = nn.Linear(8 * 8 * 8, 128)
         self.value_fc2_q = nn.Linear(128, 3)
@@ -63,15 +69,18 @@ class SmallModel(nn.Module):
         #   mlh_q ← search-backed target: MCTS-backed-up plies / 25 at root.
         # Mirrors the value/value_q split: one unbiased anchor, one search-aware
         # estimate. mlh_q is the one used for the tiebreaker.
-        self.mlh_conv = nn.Conv2d(64, 4, 1, bias=False)
+        self.mlh_conv = nn.Conv2d(channels, 4, 1, bias=False)
         self.mlh_bn = nn.BatchNorm2d(4)
         self.mlh_fc1 = nn.Linear(4 * 8 * 8, 64)
         self.mlh_fc2 = nn.Linear(64, 1)
 
-        self.mlh_q_conv = nn.Conv2d(64, 4, 1, bias=False)
+        self.mlh_q_conv = nn.Conv2d(channels, 4, 1, bias=False)
         self.mlh_q_bn = nn.BatchNorm2d(4)
         self.mlh_q_fc1 = nn.Linear(4 * 8 * 8, 64)
         self.mlh_q_fc2 = nn.Linear(64, 1)
+
+    def spec(self) -> dict:
+        return {"arch": "resnet", "blocks": self.num_blocks, "channels": self.channels}
 
     def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step=None):
         # inp is a list/tuple: [x, targets, ...] OR just x

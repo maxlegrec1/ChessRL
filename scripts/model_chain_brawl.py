@@ -19,6 +19,8 @@ import chess
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.rating.ladder import rules_end  # noqa: E402  (automatic threefold, as in self-play)
+
 NUM_GAMES = 50
 OPENING_PLIES = 8
 MAX_PLIES = 400
@@ -80,7 +82,7 @@ def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
     # 8 random opening plies, uniform legal sampling (per-game RNG decoupled)
     for _ in range(OPENING_PLIES):
         for i, b in enumerate(boards):
-            if b.is_game_over(claim_draw=True):
+            if rules_end(b)[0]:
                 continue
             mv = rng.choice(list(b.legal_moves))
             histories[i].append(mv.uci())
@@ -88,11 +90,11 @@ def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
 
     def _settle(i):
         b = boards[i]
-        outcome = b.outcome(claim_draw=True)
-        if outcome is None or outcome.winner is None:
+        winner = rules_end(b)[1]
+        if winner is None:
             a_score[i] = 0.5
         else:
-            a_won = (outcome.winner == chess.WHITE) == a_is_white[i]
+            a_won = (winner == chess.WHITE) == a_is_white[i]
             a_score[i] = 1.0 if a_won else 0.0
         finished[i] = True
 
@@ -105,7 +107,7 @@ def _brawl_one_pair(engine_a: str, engine_b: str, seed: int):
                 a_score[i] = 0.5
                 finished[i] = True
                 continue
-            if b.is_game_over(claim_draw=True):
+            if rules_end(b)[0]:
                 _settle(i)
                 continue
             stm_white = b.turn == chess.WHITE

@@ -13,11 +13,11 @@ ground truth for "what config did this run actually use".
 | Field | Default | Notes |
 |-------|---------|-------|
 | `device` | `cuda` | only `cuda` is tested. |
-| `batch_size` | 256 | per-step. With AMP fp16, fits in ~8 GB. |
-| `learning_rate` | 1e-5 | Adam. Tested 1e-6 → 5e-5; 1e-5 is the sweet spot for the current 1.29M model. |
+| `batch_size` | 2048 | per-step. With AMP fp16 this is far below GPU memory limits. |
+| `learning_rate` | 1e-3 | Adam. Constant on `main`; the next-round branch adds a schedule. |
 | `weight_decay` | 0 | the model is small; explicit regularization doesn't help. |
 | `beta1`, `beta2` | 0.9 / 0.999 | standard Adam. |
-| `log_every` | 50 | per-step W&B + console log cadence. |
+| `log_every` | 1 | per-step W&B + console log cadence. |
 | `amp_dtype` | `float16` | mixed-precision dtype; `bfloat16` works but slower on Hopper here. |
 | `resume_path` | `None` | populated automatically by `src.run --resume`. |
 | `teacher_decay` / `teacher_weight` | 0.8 / 0.2 | EMA teacher (currently vestigial, kept for future use). |
@@ -27,14 +27,14 @@ ground truth for "what config did this run actually use".
 | Field | Default | Notes |
 |-------|---------|-------|
 | `boards` | 1024 | concurrent games per self-play worker. More = larger batches but slower per-game wall. |
-| `threads` | 256 | C++ thread pool for tree descent. |
+| `threads` | 128 | C++ thread pool for tree descent (128 beat 256 on the 4090 sweep). |
 | `simulations` | 800 | MCTS sims per move. Halving doubles throughput, halves data quality. |
 | `cpuct` | 0.65 | PUCT exploration constant. Lower = more exploit. |
 | `temperature` | 1.3 | softmax temperature for internal MCTS visit-distribution sampling. |
 | `temperature_at_root` | 1.0 | final action-selection temperature. 0 = deterministic argmax. |
 | `virtual_loss_width` | 8 | leaves collected per inference round. 1 = legacy strict-sequential MCTS; 8 sits at the throughput knee. |
-| `use_dirichlet`, `dirichlet_alpha`, `dirichlet_epsilon` | true / 0.12 / 0.05 | root noise. AZ-canonical is 0.3 / 0.25; the smaller values are this run's tuned choice. |
-| `random_opening_plies` | 0 | uniform-random legal plies before MCTS takes over. Useful for measuring opening-agnostic play strength. |
+| `use_dirichlet`, `dirichlet_alpha`, `dirichlet_epsilon` | true / 0.3 / 0.25 | root noise, AZ-canonical values (0.12 / 0.05 starved castling). |
+| `random_opening_plies` | 8 | uniform-random legal plies before MCTS takes over, for opening diversity. |
 
 ## `mcts` (root noise & exploration)
 
@@ -46,8 +46,8 @@ MCTS without self-play.)
 | Field | Default | Notes |
 |-------|---------|-------|
 | `dataset_path` | `artifacts/buffers/buffer.bin` | shared mmap buffer between self-play and trainer. |
-| `reload_seconds` | 60 | trainer reloads the buffer view this often. |
-| `min_samples_to_start` | 8192 | trainer waits until the buffer has this many records before stepping. |
+| `reload_seconds` | 20 | trainer reloads the buffer view this often. |
+| `min_samples_to_start` | 200000 | trainer waits until the buffer has this many records before stepping. |
 | `target_k` | 5 | each self-play record is re-sampled this many times before being churned out. The trainer paces itself to hit this — AZ-conservative ≈ 3, LC0-typical ≈ 5, aggressive 10+. |
 
 ## `loss_weights`
@@ -71,7 +71,7 @@ the policy stops learning useful distinctions).
 | Field | Default | Notes |
 |-------|---------|-------|
 | `dir` | `artifacts/checkpoints` | `artifacts/runs/<id>/checkpoints` in practice. |
-| `every_steps` | 1000 | save cadence. The student `.pt` and a teacher snapshot are both written. |
+| `every_steps` | 500 | save cadence. The student `.pt` and a teacher snapshot are both written. |
 | `keep_last` | 5 | not enforced by the trainer; use `scripts/prune_artifacts.py`. |
 | `build_script` | `scripts/build_trt.sh` | called after each save to refresh the TRT engine. |
 | `engine_dir` / `iteration_file` | `artifacts/engines/...` | published TRT engines + the `.iteration` pointer self-play polls. |
