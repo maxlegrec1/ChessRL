@@ -19,3 +19,12 @@ def test_export_wrapper_head_selection():
     torch.testing.assert_close(out[1], torch.softmax(v, dim=-1))
     torch.testing.assert_close(out[2], mlh)
     torch.testing.assert_close(out[3], mlh)
+
+    # Value-only variants keep the outcome-trained moves-left head.
+    out = ExportWrapper(model, "q_value")(x)
+    torch.testing.assert_close(out[1], torch.softmax(vq, dim=-1))
+    torch.testing.assert_close(out[3], mlh)
+
+    out = ExportWrapper(model, "blend")(x)
+    torch.testing.assert_close(out[1], 0.5 * (torch.softmax(v, dim=-1) + torch.softmax(vq, dim=-1)))
+    torch.testing.assert_close(out[3], mlh)
