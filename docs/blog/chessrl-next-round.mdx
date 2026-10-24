@@ -99,16 +99,16 @@ So from ~40k steps a growing slice of positions was played by a different policy
 
 The network never got worse. Its deployed copy did. The lesson is the same one the first post ended on, one level up: **parity-test every boundary** — and the boundary between the model you train and the model you deploy is the one I'd stopped looking at. There's now a `trt_parity.py` script that compares any checkpoint with its exported engine in a few seconds.
 
-The norm fix treats the symptom. The cause is that nothing pulled the weights back: Adam with no weight decay, so their norm grew all run (105 → 192) and the activations with it. One last run added decoupled weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe, the violet line above: at 30k steps its largest activation is 46 instead of 171, growing slowly, at the same strength (1,818 vs ~1,820 at equal steps). It didn't run long enough to show whether it also lifts the plateau.
+The norm fix treats the symptom. The cause is that nothing pulled the weights back: Adam with no weight decay, so their norm grew all run (105 → 192) and the activations with it. One last run added decoupled weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe, the violet line above. Over 18 hours its weight norm settled around 105 instead of climbing past 220, and its largest activation crept to 80 at 70k steps instead of passing 440. It reached the same plateau: ~1,860–1,890, 20–50 Elo behind the run without decay all the way, same puzzle accuracy. That's useful for two reasons. It keeps the engine safe by construction. And it rules out a tempting explanation for the plateau: with normalisation everywhere, growing weights shrink the effective learning rate, so the network could have been slowly freezing. With the weight norm held flat it plateaus all the same.
 
 ## What it cost
 
-**$139.49** of the $200 budget, about 230 GPU-hours on rented RTX 4090s at $0.43–0.75/h, over two days. The biggest single lesson about the budget: once one arm clearly wins, move every box onto variants of it. I kept the ResNet arms running for hours after the encoder had won, and those are hours I'd rather have spent on the encoder.
+**$148.70** of the $200 budget, about 240 GPU-hours on rented RTX 4090s at $0.43–0.87/h, over three days. The biggest single lesson about the budget: once one arm clearly wins, move every box onto variants of it. I kept the ResNet arms running for hours after the encoder had won, and those are hours I'd rather have spent on the encoder.
 
 ## What I'd try next
 
-1. **Weight decay by default.** It keeps the network inside FP16 range by construction and cost nothing in strength over 8 hours; the open question is whether it also lifts the plateau over a longer run.
-2. **Find the plateau's cause.** At ~1,950, learning-rate decay, growth and cleaner resignation targets don't move it within a day. Candidates: the evaluation's 100 simulations compressing differences between strong networks, or a bigger encoder needing far longer than a day to pay for its slower self-play.
+1. **Weight decay by default**, as insurance: it keeps the network inside FP16 range by construction, for at most a small cost.
+2. **Find the plateau's cause.** At ~1,900–1,950, learning-rate decay, growth, cleaner resignation targets and weight decay all leave it in place for a day. What's left: the evaluation's 100 simulations compressing differences between strong networks, the training targets themselves (search depth, game diversity), or a bigger encoder that needs far longer than a day to pay for its slower self-play.
 3. **Keep the search at ~400 simulations**: half of that was too noisy.
 
 The code — the fixes, the encoder, growth, the ladder, the dashboard and the Vast tooling — is on the `worktree-next-round` branch of **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, with a full lab log in `docs/NEXT_ROUND.md`.

@@ -181,7 +181,7 @@ def chart_fp16() -> None:
     # entering the final RMSNorm. No decay: the encoder arm (E); decay: sims-400 + AdamW 0.05.
     VIOLET = "#6250d6"  # validated against ORANGE (all-pairs, light)
     series = [("no weight decay", ORANGE, [10_000, 20_000, 30_000, 40_000, 45_500], [46.0, 101.3, 194.0, 280.2, 349.3]),
-              ("weight decay 0.05", VIOLET, [10_000, 20_000, 30_000], [24.9, 35.7, 45.8])]
+              ("weight decay 0.05", VIOLET, [10_000, 20_000, 30_000, 50_000, 70_000], [24.9, 35.7, 45.8, 64.4, 79.9])]
     fig, ax = plt.subplots(figsize=(8, 4.4))
     for name, color, steps, vals in series:
         xs = [s / 1000 for s in steps]
@@ -192,7 +192,7 @@ def chart_fp16() -> None:
     ax.axhline(256, color=INK2, lw=1)
     ax.annotate("x² overflows FP16 above |x| = 256", (10.5, 256), xytext=(0, 6), textcoords="offset points",
                 color=INK2, fontsize=10)
-    ax.set_xlim(8, 50)
+    ax.set_xlim(8, 76)
     ax.set_ylim(0, 400)
     ax.set_xlabel("training step (thousands)")
     ax.set_ylabel("largest activation into the final norm")

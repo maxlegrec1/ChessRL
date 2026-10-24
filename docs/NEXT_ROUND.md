@@ -4,9 +4,9 @@ Started 2026-10-21. Budget: **$200 of rented GPU time** (Vast.ai), tracked by
 `scripts/vast/budget_guard.py`. This file is the plan and the lab notebook —
 results get appended to the log at the bottom as they land.
 
-## Results summary (final, 2026-10-23 16:51 UTC)
+## Results summary (final, 2026-10-24 08:30 UTC)
 
-Spent **$139.49** of $200: 14 rented RTX 4090 boxes, 233 box-hours. Ladder Elo
+Spent **$148.70** of $200: 15 rented RTX 4090 boxes, 243 box-hours. Ladder Elo
 is anchored on calibrated Stockfish/random/greedy players (random = 0), ±40
 per rating; hours are hours of training (downtime excluded).
 
@@ -38,11 +38,14 @@ What mattered and what didn't:
   (45.5k = 1,989). `scripts/trt_parity.py` checks engine vs PyTorch.
 - **Weight decay** (AdamW 0.05, matrices only) keeps the residual stream
   bounded at equal strength: max activation into the final norm 46 vs 171 at
-  30k steps (weight norm 99 vs 164); 1,818 vs ~1,820. Its effect on the
-  plateau is untested (run ended at 8.5 h). **Continued overnight**
-  (2026-10-23 22:00 UTC -> ~08:30 UTC): same box type (France 7950X),
-  resumed from its synced step-32k checkpoint with a fresh buffer, to reach
-  ~18 training hours, past the 11-17 h where seed 1 flattened.
+  30k steps (weight norm 99 vs 164); 1,818 vs ~1,820. **Continued overnight
+  to 18.6 h (step 73k): it does not break the plateau.** Mean Elo by hours,
+  decay vs no decay (sims-400 seed 1): 8-10 h 1,800 vs 1,835; 12-14 h 1,836
+  vs 1,877; 14-16 h 1,829 vs 1,876; 16-18 h 1,864 vs 1,890; 18-20 h 1,888
+  (puzzles equal, ~72%). Weight norm flat (104 at 50k, 107 at 70k) vs 206 ->
+  224 without; max activation 80 at 70k vs 441 at 60k. A flat weight norm
+  means a constant effective LR, so "the net slowly freezes" is ruled out as
+  the plateau's cause. Final spend **$148.70**, 15 boxes, 243 box-hours.
 
 Tooling added on the way: Vast launch/deadline/guard/sync CLI (`chessrl-vast`),
 per-run anchor ladder, combined dashboard with run toggles, keep-alive resume
