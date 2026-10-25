@@ -585,3 +585,57 @@ sims-400 run. `scripts/head_ab.py`; raw results in `~/chessrl-runs/headab/`.
   puzzle accuracy is identical (59%). The daemon's anchors trail the estimate,
   so ratings during fast rises are lower bounds; this applies to every run, most
   to the fastest risers.
+
+## Self-play move quality and the policy -> search gap (2026-10-25 18:00-19:40 UTC, on run C's box)
+
+Both judged by Stockfish (MultiPV over every legal move, 300k nodes, WDL as an expected
+score for the side to move); "loss" = expected score lost against Stockfish's best move.
+`scripts/move_quality.py`, `scripts/policy_gap.py`; positions: 600 from 100-game samples
+of runs A, B and C (300 from plies 0-29, 300 later); raw results in
+`~/chessrl-runs/runC-open0/gap.jsonl`.
+
+**Opening moves are mostly sampled from 50-sim searches, and those are worse than the raw
+policy.** In plies 0-29 every move is sampled in proportion to the visit counts, and 75%
+of moves get the quick 50-sim search, whose visits are far flatter than the policy
+(~11 effective moves vs ~6: prior temperature 1.3, virtual-loss width 8, few sims). Run C,
+step 49.5k, 300 opening positions:
+
+| quick-move choice | mean loss | loss > 0.10 | loss > 0.30 | effective moves |
+|---|---|---|---|---|
+| 50-sim visits, sampled (today) | 0.098 | 25.0% | 13.3% | 11.2 |
+| raw policy, T = 1.0 | 0.055 | 15.8% | 6.5% | 6.1 |
+| raw policy, top-p 0.90 | 0.044 | 13.4% | 4.7% | 4.2 |
+| raw policy, T = 0.7 | 0.038 | 11.9% | 4.0% | 3.7 |
+| raw policy, top-3 | 0.036 | 10.9% | 3.5% | 2.3 |
+| raw policy, T = 0.5 | 0.031 | 9.9% | 2.9% | 2.6 |
+| top move (policy or 50-sim) | ~0.024 | 8.0% | 1.7-2.7% | 1 |
+
+The moves actually played in C's games (0.086 mean loss, 12% > 0.30) match the 75/25 mix of
+50-sim and 400-sim sampling: ~3 moves losing > 0.30 per game in the first 30 plies, so most
+games are decided by an opening blunder (median 35 plies, 28/100 end within 30 plies).
+This also explains run B (sampling all game from the same visit counts).
+
+**Policy -> search gap along two runs** (600 positions, sampled-move loss):
+
+| run | step | ladder Elo | policy | 400-sim search | gap | value head MAE | search value MAE |
+|---|---|---|---|---|---|---|---|
+| C | 5k | ~600 | 0.147 | 0.106 | 0.041 | 0.315 | 0.291 |
+| C | 10k | ~1,420 | 0.086 | 0.056 | 0.030 | 0.223 | 0.187 |
+| C | 20k | 1,669 | 0.057 | 0.034 | 0.023 | 0.160 | 0.127 |
+| C | 30k | 1,754 | 0.052 | 0.034 | 0.019 | 0.140 | 0.117 |
+| C | 40k | 1,792 | 0.047 | 0.030 | 0.018 | 0.132 | 0.102 |
+| C | 49.5k | 1,825 | 0.046 | 0.030 | 0.017 | 0.123 | 0.104 |
+| base | 10k | (1,082, ladder lag) | 0.076 | 0.044 | 0.032 | 0.198 | 0.160 |
+| base | 37.5k | 1,857 | 0.050 | 0.028 | 0.021 | 0.128 | 0.102 |
+| base | 45k | 1,839 | 0.050 | 0.029 | 0.021 | 0.122 | 0.102 |
+| base | 52.5k | 1,890 | 0.047 | 0.031 | 0.016 | 0.125 | 0.109 |
+| base | 61.5k | 1,890 | 0.045 | 0.030 | 0.015 | 0.120 | 0.097 |
+
+- The search still removes a third of the policy's loss on the plateau (33-43% at every
+  checkpoint), so the targets keep teaching; the policy slowly closes on them.
+- **What flattens is the search itself**: its loss stops at ~0.03 from ~step 30-40k in both
+  runs, and so does the value head's error (~0.12 MAE against Stockfish). The plateau looks
+  like a value-quality ceiling: the search can only be as good as the values it backs up,
+  and the value head learns from game results that opening blunders make noisy.
+- As a run-health signal: watch the search's own loss and the value head's error; when both
+  are flat, more training only lets the policy catch up the remaining gap (~0.015).
