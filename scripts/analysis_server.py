@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from src.analysis.engine import Net, analyse, end_reason  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "analysis" / "index.html"
+GAMES_PAGE = Path(__file__).resolve().parent / "analysis" / "games.html"
 MAX_SIMS = 3200
 # Ladder ratings of the encoder arm's late checkpoints measured through the
 # FP16-overflowing engine; re-rated with fixed engines (docs/NEXT_ROUND.md).
@@ -133,6 +134,33 @@ def board_state(board: chess.Board) -> dict:
             "check": board.is_check(), "last": last, "history": len(board.move_stack)}
 
 
+def pgn_files(runs_root: Path) -> list[Path]:
+    """Self-play game samples fetched next to the synced runs (<runs_root>/<box>/*.pgn), newest first."""
+    return sorted(runs_root.glob("*/*.pgn"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def read_games(path: Path) -> list[dict]:
+    """Every game of a PGN file with the FEN after each ply, for a view-only board."""
+    import chess.pgn
+
+    games = []
+    with path.open() as fh:
+        while (game := chess.pgn.read_game(fh)) is not None:
+            board = game.board()
+            sans, fens, last, checks = [], [board.fen()], [None], [False]
+            for mv in game.mainline_moves():
+                sans.append(board.san(mv))
+                board.push(mv)
+                fens.append(board.fen())
+                last.append([chess.square_name(mv.from_square), chess.square_name(mv.to_square)])
+                checks.append(board.is_check())
+            result = game.headers.get("Result", "*")
+            end = "checkmate" if board.is_checkmate() else ("draw" if result == "1/2-1/2" else "resignation")
+            games.append({"n": len(games) + 1, "result": result, "end": end, "plies": len(sans), "san": sans,
+                          "fens": fens, "last": last, "checks": checks})
+    return games
+
+
 def make_handler(engines: Engines):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # quiet
@@ -152,6 +180,20 @@ def make_handler(engines: Engines):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self._send(200, STATIC.read_bytes(), "text/html; charset=utf-8")
+            elif self.path in ("/games", "/games.html"):
+                self._send(200, GAMES_PAGE.read_bytes(), "text/html; charset=utf-8")
+            elif self.path == "/api/pgns":
+                root = engines.runs_root
+                self._json(200, [{"id": str(p.relative_to(root)), "label": f"{p.parent.name} / {p.name}"}
+                                 for p in pgn_files(root)])
+            elif self.path.startswith("/api/pgn?id="):
+                from urllib.parse import unquote
+
+                wanted = unquote(self.path.split("=", 1)[1])
+                files = {str(p.relative_to(engines.runs_root)): p for p in pgn_files(engines.runs_root)}
+                if wanted not in files:  # only the listed samples, never an arbitrary path
+                    return self._json(404, {"error": f"unknown PGN {wanted}"})
+                self._json(200, {"id": wanted, "games": read_games(files[wanted])})
             elif self.path == "/api/models":
                 self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo", "default")} for m in engines.rescan()])
             else:
