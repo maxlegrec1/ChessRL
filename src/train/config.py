@@ -94,6 +94,9 @@ class SelfPlayConfig:
     max_plies: int = 600
     pcr_full_prob: float = 1.0  # playout-cap randomization; 1.0 = every move is a full search
     pcr_fast_simulations: int = 100
+    # > 0: while moves are sampled (temperature_plies), cheap moves sample the raw
+    # policy at this temperature instead of a pcr_fast_simulations search. 0 = off.
+    quick_policy_temperature: float = 0.0
     fifo_buffer: bool = False  # ring buffer instead of random replacement when full
     curriculum_prob: float = 0.0  # P(game starts from a random sparse legal position)
     curriculum_max_pieces: int = 4

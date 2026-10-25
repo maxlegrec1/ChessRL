@@ -49,6 +49,11 @@ struct SelfPlayConfig
     // root noise whose position is not written to the buffer. 1.0 = off.
     float pcr_full_prob = 1.0f;
     int pcr_fast_simulations = 100;
+    // > 0: while the played move is sampled (the first `temperature_plies`), a cheap
+    // move skips its search and samples the raw policy at this temperature (one
+    // network evaluation). Sampling the visit counts of a 50-sim search played far
+    // worse moves than the raw policy (its visits are much flatter). 0 = off.
+    float quick_policy_temperature = 0.0f;
     // true = ring buffer (overwrite oldest); false = random replacement when full.
     bool fifo_buffer = false;
     // Rules-only curriculum: with this probability a game starts from a random
@@ -78,6 +83,7 @@ struct SelfPlayStats
     int64_t curriculum_games = 0;
     int64_t full_searches = 0;
     int64_t fast_searches = 0;
+    int64_t policy_moves = 0;  // cheap moves sampled from the raw policy (no search)
     int64_t records_written = 0;
     int64_t engine_swaps = 0;
 };

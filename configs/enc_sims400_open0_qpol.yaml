@@ -1,0 +1,10 @@
+# Run C, continued: the same recipe (no random opening plies), with the cheap moves of
+# the sampling phase (first 30 plies) drawn from the raw policy at temperature 0.7
+# instead of from the visit counts of a 50-sim search. On C's opening positions at step
+# 49.5k (scripts/policy_gap.py, Stockfish as judge) that cuts moves losing > 0.30 of
+# expected score from 13.3% to 4.0% while keeping ~3.7 effective moves per position.
+# Resumed from C's plateau (~1,800-1,825): tests whether cleaner games, hence cleaner
+# game-result labels for the value head, lift the plateau.
+extends: enc_sims400_open0.yaml
+selfplay:
+  quick_policy_temperature: 0.7

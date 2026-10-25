@@ -320,6 +320,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readwrite("max_plies", &chessrl::SelfPlayConfig::max_plies)
         .def_readwrite("pcr_full_prob", &chessrl::SelfPlayConfig::pcr_full_prob)
         .def_readwrite("pcr_fast_simulations", &chessrl::SelfPlayConfig::pcr_fast_simulations)
+        .def_readwrite("quick_policy_temperature", &chessrl::SelfPlayConfig::quick_policy_temperature)
         .def_readwrite("fifo_buffer", &chessrl::SelfPlayConfig::fifo_buffer)
         .def_readwrite("curriculum_prob", &chessrl::SelfPlayConfig::curriculum_prob)
         .def_readwrite("curriculum_max_pieces", &chessrl::SelfPlayConfig::curriculum_max_pieces);
@@ -343,6 +344,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readonly("curriculum_games", &chessrl::SelfPlayStats::curriculum_games)
         .def_readonly("full_searches", &chessrl::SelfPlayStats::full_searches)
         .def_readonly("fast_searches", &chessrl::SelfPlayStats::fast_searches)
+        .def_readonly("policy_moves", &chessrl::SelfPlayStats::policy_moves)
         .def_readonly("records_written", &chessrl::SelfPlayStats::records_written)
         .def_readonly("engine_swaps", &chessrl::SelfPlayStats::engine_swaps);
 

@@ -484,6 +484,7 @@ struct SelfPlayWorker::Impl
            << ", \"curriculum_games\": " << stats.curriculum_games
            << ", \"full_searches\": " << stats.full_searches
            << ", \"fast_searches\": " << stats.fast_searches
+           << ", \"policy_moves\": " << stats.policy_moves
            << ", \"records_written\": " << stats.records_written
            << ", \"engine_swaps\": " << stats.engine_swaps
            << ", \"unix_time\": "
@@ -698,6 +699,7 @@ SelfPlayMetrics SelfPlayWorker::step()
     std::vector<char> full_search(n_slots, 1);
     std::vector<int> sims_used(n_slots, cfg.simulations);
     std::vector<char> sampled(n_slots, 0);
+    std::vector<char> policy_moves(n_slots, 0);
 
     for (size_t i = 0; i < n_slots; ++i)
     {
@@ -730,15 +732,21 @@ SelfPlayMetrics SelfPlayWorker::step()
         // produce no training record and no root noise.
         const bool full = cfg.pcr_full_prob >= 1.0f || impl_->uniform01() < cfg.pcr_full_prob;
         full_search[i] = full ? 1 : 0;
-        sims_used[i] = full ? cfg.simulations : cfg.pcr_fast_simulations;
         const bool early = cfg.temperature_plies < 0 || slot.ply_count < cfg.temperature_plies;
         const float root_temp = early ? cfg.temperature_at_root : cfg.temperature_late;
+        // A cheap move in the sampling phase can sample the raw policy instead: with
+        // no simulations the search only expands the root, and summarize() samples
+        // its priors; prior temperature 1 makes those softmax(logit), so the move is
+        // drawn from softmax(logit / quick_policy_temperature).
+        const bool policy_move = !full && early && root_temp > 1e-5F && cfg.quick_policy_temperature > 0.0f;
+        policy_moves[i] = policy_move ? 1 : 0;
+        sims_used[i] = full ? cfg.simulations : (policy_move ? 0 : cfg.pcr_fast_simulations);
         sampled[i] = root_temp > 1e-5F ? 1 : 0;
 
         opt.simulations = sims_used[i];
         opt.cpuct = cfg.cpuct;
-        opt.temperature = cfg.temperature;
-        opt.temperature_at_root = root_temp;
+        opt.temperature = policy_move ? 1.0f : cfg.temperature;
+        opt.temperature_at_root = policy_move ? cfg.quick_policy_temperature : root_temp;
         opt.virtual_loss_width = cfg.virtual_loss_width;
         opt.use_dirichlet = full && cfg.use_dirichlet;
         opt.dirichlet_alpha = cfg.dirichlet_alpha;
@@ -783,6 +791,7 @@ SelfPlayMetrics SelfPlayWorker::step()
         const bool full = full_search[i] != 0;
         if (full) impl_->stats.full_searches++;
         else impl_->stats.fast_searches++;
+        if (policy_moves[i]) impl_->stats.policy_moves++;
         if (full)
         {
             slot.pending_records.push_back(
@@ -792,9 +801,11 @@ SelfPlayMetrics SelfPlayWorker::step()
 
         // Resignation: the side to move gives up once its root expected score
         // has stayed below the threshold for resign_consecutive of its moves.
+        // Policy-sampled moves carry only the raw value head, not a search value,
+        // so they neither extend nor reset the streak.
         const chess::Color stm = slot.board.sideToMove();
         const size_t colour = stm == chess::Color::WHITE ? 0 : 1;
-        if (cfg.resign_threshold > 0.0f)
+        if (cfg.resign_threshold > 0.0f && !policy_moves[i])
         {
             const float expected = summary.value[0] + 0.5f * summary.value[1];
             slot.low_streak[colour] = expected < cfg.resign_threshold ? slot.low_streak[colour] + 1 : 0;
