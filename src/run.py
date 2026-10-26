@@ -125,6 +125,27 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
     return initial_trt
 
 
+def _has_engine(run_dir: Path) -> bool:
+    """Whether engines/.iteration names at least one engine."""
+    it = run_dir / "engines" / ".iteration"
+    if not it.is_file():
+        return False
+    return any(line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines())
+
+
+def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
+    """A branch run (another run's checkpoint copied in) has no engine yet: self-play would wait
+    for one forever while the trainer waits for self-play's games. Build it from the checkpoint."""
+    step = ckpt.stem.split("_")[1]
+    print(f"[launcher] no engine yet: building one from {ckpt.name}", flush=True)
+    subprocess.run(
+        ["bash", str(ROOT / "scripts" / "build_trt.sh"), str(ckpt), str(int(step)),
+         str(run_dir / "engines"), str(run_dir / "engines" / ".iteration")],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None) -> Path:
     """Load the base YAML, override every path field to point inside `run_dir`,
     write the result to <run_dir>/config.yaml, and return its path."""
@@ -195,6 +216,8 @@ def main() -> int:
         latest = _latest_step_checkpoint(run_dir)
         if latest is not None:
             print(f"[launcher] resuming run {run_dir.name} from {latest.name}", flush=True)
+            if not args.no_selfplay and not _has_engine(run_dir):
+                _build_resume_engine(run_dir, latest)
         else:
             print(f"[launcher] resuming run {run_dir.name} (no step checkpoints yet)", flush=True)
         resume_path = latest
