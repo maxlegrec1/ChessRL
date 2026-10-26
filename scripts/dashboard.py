@@ -256,6 +256,31 @@ def budget_panel() -> None:
     st.progress(min(1.0, b["spent"] / b["cap"]))
 
 
+def benchmarks_panel() -> None:
+    """Re-ratings on the Stockfish openings and the first post's Stockfish benchmark, wherever
+    they were written (any run's metrics/rerate_sf.jsonl and metrics/sf_benchmark.jsonl)."""
+    def gather(name: str) -> pd.DataFrame:
+        # <root>/<run>/metrics on a box, <root>/<box>/<run>/metrics in the synced copy at home.
+        files = [p for root in RUNS_ROOTS for pat in (f"*/metrics/{name}", f"*/*/metrics/{name}") for p in root.glob(pat)]
+        return pd.concat([read_jsonl(p) for p in files] or [pd.DataFrame()], ignore_index=True)
+
+    rerate, bench = gather("rerate_sf.jsonl"), gather("sf_benchmark.jsonl")
+    if rerate.empty and bench.empty:
+        return
+    with st.expander("Re-ratings on Stockfish openings · first-post Stockfish benchmark", expanded=True):
+        if not rerate.empty:
+            st.caption("Checkpoints re-rated on the balanced Stockfish openings (anchors recalibrated on them). "
+                       "'old Elo' is the run's rating on random openings: a different scale.")
+            cols = [c for c in ("run", "step", "elo", "elo_se", "old_elo") if c in rerate]
+            st.dataframe(rerate[cols].drop_duplicates(["run", "step"], keep="last").sort_values(["run", "step"]),
+                         hide_index=True, width="stretch")
+        if not bench.empty:
+            st.caption("The first post's protocol: Stockfish 16 with UCI_Elo, 100 ms per move; the network "
+                       "searches 800 simulations per move; games from the initial position.")
+            cols = [c for c in ("engine", "sf_elo", "games", "w", "d", "l", "score", "implied_elo") if c in bench]
+            st.dataframe(bench[cols].sort_values(["engine", "sf_elo"]), hide_index=True, width="stretch")
+
+
 def selfplay_derived(runs: dict) -> None:
     """Per-window rates from the cumulative self-play counters."""
     for data in runs.values():
@@ -298,20 +323,36 @@ def body() -> None:
     c = st.columns(2)
     with c[0]:
         fig = go.Figure()
+        any_sf = False
         for i, (name, data) in enumerate(runs.items()):
             lad = data["ladder"]
             if lad.empty or xkey not in lad:
                 continue
-            fig.add_trace(go.Scatter(x=lad[xkey], y=lad["elo"], mode="lines+markers", name=name,
-                                     error_y=dict(type="data", array=lad["elo_se"], visible=True, thickness=1),
-                                     line=dict(color=PALETTE[i % len(PALETTE)], width=2)))
+            # Two opening sets, two scales: rows without the field predate the switch (random).
+            sets = lad["openings"].fillna("random") if "openings" in lad else pd.Series("random", index=lad.index)
+            for oset, dash, suffix in (("random", "solid", ""), ("sf", "dash", " · Stockfish openings")):
+                part = lad[sets == oset]
+                if part.empty:
+                    continue
+                any_sf |= oset == "sf"
+                fig.add_trace(go.Scatter(
+                    x=part[xkey], y=part["elo"], mode="lines+markers", name=name + suffix,
+                    error_y=dict(type="data", array=part["elo_se"], visible=True, thickness=1),
+                    line=dict(color=PALETTE[i % len(PALETTE)], width=2, dash=dash)))
         fig.update_layout(title="Anchor-ladder Elo (random mover = 0)", height=340,
                           margin=dict(l=10, r=10, t=40, b=10), xaxis_title=XLABEL[xkey],
                           legend=dict(orientation="h", y=-0.25))
         st.plotly_chart(fig, width="stretch")
+        if any_sf:
+            st.warning("Two rating scales. Solid: games from 8 random plies (the original ladder). Dashed: "
+                       "Stockfish's balanced openings, with anchors recalibrated on them (from 2026-10-26). "
+                       "They are not comparable: the balanced-opening scale is stretched at the top "
+                       "(Stockfish skill 20 at 1k nodes: 2,068 on random openings, 2,517 on balanced ones).")
     with c[1]:
         line_chart("Puzzle accuracy (1k Lichess, strict line, MCTS-100)", runs, "ladder",
                    ["puzzles.line", "puzzles.first_move"], xkey, 1, yfmt=".0%", height=340)
+
+    benchmarks_panel()
 
     st.subheader("Learning")
     c = st.columns(3)
