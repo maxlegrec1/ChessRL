@@ -37,7 +37,7 @@ def latest_engine(run_dir: Path) -> tuple[int, str] | None:
 def rate_engine(engine: str, estimate: float | None, ratings: dict, args) -> dict:
     t0 = time.time()
     row: dict = {"puzzles": ladder.puzzle_accuracy(engine, ladder.load_puzzles(), args.sims)}
-    openings = ladder.make_openings(args.games // 2)
+    openings = ladder.load_openings(args.openings, args.games // 2)
 
     def play(name: str) -> list[float]:
         anchor = ladder.Anchor(name, seed=7)
@@ -52,7 +52,7 @@ def rate_engine(engine: str, estimate: float | None, ratings: dict, args) -> dic
     results = [(ratings.get(n, 0.0), x) for n, s in scores.items() for x in s]
     elo, se = ladder.fit_rating(results, prior=estimate if estimate is not None else 0.0)
     row.update(elo=round(elo, 1), elo_se=round(se, 1), anchors=per_anchor, extra_anchors=len(scores) - len(picked),
-               seconds=round(time.time() - t0, 1))
+               openings=args.openings, seconds=round(time.time() - t0, 1))
     return row
 
 
@@ -66,15 +66,19 @@ def main() -> None:
     p.add_argument("--sweep", type=float, default=0.85,
                    help="score that counts as a sweep and adds the next anchor up (or down)")
     p.add_argument("--max-extra", type=int, default=3, help="extra anchors per rating (0 = original ladder)")
+    p.add_argument("--openings", choices=("sf", "random"), default="sf",
+                   help="sf: balanced Stockfish-chosen openings (default); random: 8 random plies (original)")
     p.add_argument("--calibrate", action="store_true")
     p.add_argument("--once", action="store_true")
     args = p.parse_args()
 
     if args.calibrate:
-        print(json.dumps(ladder.calibrate(), indent=2))
+        print(json.dumps(ladder.calibrate(openings_source=args.openings), indent=2))
         return
 
-    ratings = ladder.load_anchor_ratings()
+    ratings = ladder.load_anchor_ratings(args.openings)
+    if not ratings:
+        sys.exit(f"no anchor calibration for the {args.openings!r} openings: run --calibrate --openings {args.openings}")
     out_dir = args.run_dir / "ladder"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "ladder.jsonl"

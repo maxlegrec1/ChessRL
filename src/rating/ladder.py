@@ -22,6 +22,11 @@ import chess.engine
 ROOT = Path(__file__).resolve().parents[2]
 ANCHOR_RATINGS = ROOT / "src" / "rating" / "anchors.json"
 PUZZLES = ROOT / "data" / "puzzles" / "lichess_1k.csv"
+# Two opening sets. "random": 8 uniformly random plies (the original ladder, which training
+# also used). "sf": balanced 6-ply openings chosen by Stockfish (scripts/make_sf_openings.py),
+# normal positions with no opening book; anchors are calibrated separately on each set.
+SF_OPENINGS = ROOT / "data" / "openings" / "sf_balanced_6ply.json"
+ANCHOR_RATINGS_FILES = {"random": ANCHOR_RATINGS, "sf": ROOT / "src" / "rating" / "anchors_sf.json"}
 
 _PIECE_VALUE = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
 
@@ -211,10 +216,23 @@ def fit_rating(results: list[tuple[float, float]], prior: float = 0.0) -> tuple[
     return r, (1.0 / math.sqrt(info)) if info > 0 else float("inf")
 
 
-def load_anchor_ratings() -> dict[str, float]:
-    if ANCHOR_RATINGS.exists():
-        return json.loads(ANCHOR_RATINGS.read_text())["ratings"]
+def load_anchor_ratings(openings: str = "random") -> dict[str, float]:
+    path = ANCHOR_RATINGS_FILES[openings]
+    if path.exists():
+        return json.loads(path.read_text())["ratings"]
     return {}
+
+
+def load_openings(source: str, n: int, seed: int = 1234) -> list[list[str]]:
+    """n openings (each played with both colours): "random" plies, or the stored Stockfish set."""
+    if source == "random":
+        return make_openings(n, seed=seed)
+    if source != "sf":
+        raise ValueError(f"unknown opening set {source!r}")
+    stored = [o["moves"] for o in json.loads(SF_OPENINGS.read_text())["openings"]]
+    if n > len(stored):
+        raise ValueError(f"asked for {n} openings, {SF_OPENINGS.name} has {len(stored)}")
+    return stored[:n]
 
 
 def pick_anchors(estimate: float | None, ratings: dict[str, float], k: int = 2) -> list[str]:
@@ -331,12 +349,13 @@ def _play_pair(a_name: str, b_name: str, openings: list[list[str]]) -> list[tupl
     return out
 
 
-def calibrate(games_per_pair: int = 100, out: Path = ANCHOR_RATINGS) -> dict[str, float]:
+def calibrate(games_per_pair: int = 100, openings_source: str = "random") -> dict[str, float]:
     """Round robin between neighbouring anchors (plus a skip-one pair) -> ratings, random = 0."""
     from concurrent.futures import ProcessPoolExecutor
 
     names = list(ANCHORS)
-    openings = make_openings(games_per_pair // 2, seed=99)
+    out = ANCHOR_RATINGS_FILES[openings_source]
+    openings = load_openings(openings_source, games_per_pair // 2, seed=99)
     pairs = [(names[i], names[i + 1]) for i in range(len(names) - 1)]
     pairs += [(names[i], names[i + 2]) for i in range(len(names) - 2)]
     results: list[tuple[str, str, float]] = []  # (a, b, score of a)
@@ -351,5 +370,6 @@ def calibrate(games_per_pair: int = 100, out: Path = ANCHOR_RATINGS) -> dict[str
                  [(ratings[a], 1 - s) for a, b, s in results if b == n]
             ratings[n] = fit_rating(vs, prior=ratings[n])[0]
     ratings = {n: round(r - ratings["random"], 1) for n, r in ratings.items()}
-    out.write_text(json.dumps({"ratings": ratings, "games_per_pair": games_per_pair}, indent=2))
+    out.write_text(json.dumps({"ratings": ratings, "games_per_pair": games_per_pair,
+                               "openings": openings_source}, indent=2))
     return ratings
