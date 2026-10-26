@@ -128,7 +128,8 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
 def rerated(box: str, suffix: str, max_step: int | None = None) -> dict:
     """The run's kept checkpoints re-rated on Stockfish's balanced openings (scripts/rerate.py,
     whose rows may have been written on another box), on the same axes as load(). A checkpoint's
-    time is that of the first trainer row at or after its step."""
+    time is that of the first trainer row at or after its step (the original code wrote no trainer
+    log: there, the first self-play row playing an engine at or after that step)."""
     d = run_dir(box, suffix)
     _, active_hours, records_at, tr = axes(d)
     rows = {}
@@ -137,7 +138,9 @@ def rerated(box: str, suffix: str, max_step: int | None = None) -> dict:
             if r.get("run") == d.name and r.get("openings") == "sf" and (max_step is None or r["step"] <= max_step):
                 rows[r["step"]] = r  # a step rated twice: the last row wins
     steps = [(r["step"], r["t"]) for r in tr if "step" in r and "t" in r and "event" not in r]
-    out = {"hours": [], "records_m": [], "steps_k": [], "elo": [], "se": []}
+    if not steps:
+        steps = [(r["engine_step"], r["t"]) for r in jl(d / "metrics/selfplay.jsonl") if "engine_step" in r]
+    out ={"hours": [], "records_m": [], "steps_k": [], "elo": [], "se": []}
     for step in sorted(rows):
         t = next((t for s, t in steps if s >= step), steps[-1][1])
         out["hours"].append(active_hours(t))
@@ -274,19 +277,23 @@ def export_json() -> None:
         return round(s["elo"][s["steps_k"].index(step_k)])
 
     data = {
-        "speedup": [
-            {"name": "Original code (first post)", "slot": 4, "dots": True, "points": pts(base, "hours")},
-            {"name": "+ better training targets", "slot": 3, "dots": True, "points": pts(sig, "hours")},
-            {"name": "+ small transformer", "slot": 2, "dots": True, "points": pts(enc, "hours")},
-            {"name": "+ half the search per move", "slot": 1, "dots": True, "points": pts(s400, "hours")},
-        ],
+        # Each chart on hours or positions also has its points by step, for its data table.
+        "speedup": {
+            key: [
+                {"name": "Original code (first post)", "slot": 4, "dots": True, "points": pts(base, key)},
+                {"name": "+ better training targets", "slot": 3, "dots": True, "points": pts(sig, key)},
+                {"name": "+ small transformer", "slot": 2, "dots": True, "points": pts(enc, key)},
+                {"name": "+ half the search per move", "slot": 1, "dots": True, "points": pts(s400, key)},
+            ]
+            for key in ("hours", "steps_k")
+        },
         "searchBudget": {
             key: [
                 {"name": "800 simulations, seed 1", "slot": 2, "dots": True, "points": pts(enc, key)},
                 {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "dots": True, "points": pts(s2, key)},
                 {"name": "400 simulations", "slot": 1, "dots": True, "points": pts(s400, key)},
             ]
-            for key in ("hours", "records_m")
+            for key in ("hours", "records_m", "steps_k")
         },
         # Same batch size and trainer pacing in all three, so a step is the same amount of
         # training data; only the search budget and the depth differ.

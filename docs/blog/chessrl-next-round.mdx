@@ -3,7 +3,7 @@ title: 'ChessRL, round two: 9× faster self-play learning on a single RTX 4090'
 date: '2026-10-24'
 tags: ['chess', 'machine-learning', 'reinforcement-learning']
 draft: true
-summary: 'Round two of my from-scratch AlphaZero, done largely by an AI agent. Better training targets, a small transformer and a cheaper search cut the time to reach ~900 Elo from 21 hours to 2.3 hours on one RTX 4090. Also: an FP16 bug that made a healthy network look like it was getting worse, and why Elo per training step matters when training gets longer.'
+summary: 'Round two of my from-scratch AlphaZero, done largely by an AI agent. Better training targets, a small transformer and a cheaper search cut the time to reach 1,000 Elo from 21 hours to under 2.5 hours on one RTX 4090. Also: an FP16 bug that made a healthy network look like it was getting worse, and why Elo per training step matters when training gets longer.'
 ---
 
 In the [first post](/blog/chessrl-alphazero-single-gpu) I trained a small chess network (1.29M parameters) from nothing but the rules of chess, on the RTX 4090 in my desktop. It reached roughly the level of Stockfish limited to 1400 Elo, but it took two weeks. I suspected that most of that time was wasted.
@@ -36,16 +36,16 @@ This scale is only comparable to itself: it is not a FIDE rating, not the rating
 
 <SpeedupChart />
 
-Time for each recipe to reach a given rating, each run on one RTX 4090 (each line adds one change to the line above):
+"Original code" is the first post's code, run again here on the same kind of GPU. The table gives the time for each recipe to reach a given rating (each line adds one change to the line above). Only the kept networks are rated, one every 10,000 training steps, so a time between two of them is read off a straight line, and "before" means that the first kept network was already above that level:
 
-| recipe | ~900 Elo | 1,500 Elo | 1,800 Elo | rating after 8 h |
-|---|---|---|---|---|
-| original code | ~20.5 h | not reached in 21 h | not reached | 233 |
-| + better training targets | 3 h | ~16 h | not reached | 1,234 |
-| + small transformer | 2.9 h | ~4 h | 8.0 h | 1,800 |
-| + half the search | **2.3 h** | **3.5 h** | **6.0 h** | **1,847** |
+| recipe | 1,000 Elo | 1,500 Elo | 2,000 Elo | rating after 8 h | rating after 16 h |
+|---|---|---|---|---|---|
+| original code | ~21 h | not reached in 22 h | not reached | 239 | 782 |
+| + better training targets | before 4.1 h | ~8.6 h | not reached in 22 h | 1,474 | 1,703 |
+| + small transformer | before 4.5 h | before 4.5 h | ~8.3 h | 1,982 | **2,257** |
+| + half the search | **before 2.4 h** | **~2.4 h** | **~4.6 h** | **2,064** | 2,154 |
 
-The last recipe reaches ~900 Elo about 9 times faster than the original code, and in 6 hours it reaches a level that the original code does not reach in 21 hours. The sections below explain each change.
+The last recipe was already past 1,000 Elo at its first kept network, 2.4 hours in. The original code needs about 21 hours to get there, so the new recipe is about 9 times faster, and probably more. It reaches 2,000 at about 4.6 hours. Later in the run, the transformer with the full search catches up and ends higher; the section on the cheaper search explains why. The sections below explain each change.
 
 ## Change 1: better training targets
 
@@ -59,7 +59,7 @@ To see which change mattered, we ran the new recipe with each one removed:
 
 <AblationChart />
 
-The policy target matters most: without it the agent is about 700 Elo behind after 6M positions, and the gap does not close. The value-output change speeds up the start (250 Elo behind at 2M positions without it), but the run without it catches up by about 10M positions. Limiting randomness to the opening made no measurable difference. Random moves throughout the game give more varied data early on, which seems to cancel out the noisier game results.
+The policy target matters most: without it the agent is 760 Elo behind after 10,000 training steps (4.1M positions) and still 540 behind after 20,000. The value-output change speeds up the start (360 Elo behind at 10,000 steps without it), but the run without it has caught up by 20,000. Limiting randomness to the opening made little difference: 120 Elo at 10,000 steps, and 50 at 20,000, which is about the uncertainty of one rating. Random moves throughout the game give more varied data early on, which seems to cancel out most of the cost of noisier game results.
 
 We also improved the infrastructure: new engines are loaded into the running self-play instead of restarting it (a restart threw away every game in progress), the trainer no longer waits 410 seconds before its first step, and engines are built in the background. A run with only these changes was faster in the first hours but ended at the same level as the original. Faster code produces more games, not better learning.
 
@@ -69,7 +69,7 @@ The original network is a ResNet: 4 blocks of 64-channel convolutions, the kind 
 
 <EncoderDiagram />
 
-The transformer is 32% slower per self-play position, because attention over 64 tokens costs more than small convolutions at this size. It still wins clearly. After the same number of positions it plays 450 to 580 Elo stronger than the ResNet, and at the same rating it solves far more puzzles (47% against 23 to 25% after 4,000 training steps). Chess has many long-range relations, like a rook and the far end of its file or a bishop and its diagonal, and attention handles them directly.
+The transformer is 32% slower per self-play position, because attention over 64 tokens costs more than small convolutions at this size. It still wins clearly. After the same number of positions it plays 370 to 590 Elo stronger than the ResNet, and at the same rating it solves far more puzzles (47% against 23 to 25% after 4,000 training steps). Chess has many long-range relations, like a rook and the far end of its file or a bishop and its diagonal, and attention handles them directly.
 
 ## Change 3: a cheaper search
 
@@ -77,15 +77,15 @@ With a stronger network, 800 simulations per saved move looked expensive. Halvin
 
 <SearchBudgetChart />
 
-Per saved position, the cheaper search learns less in the middle of training, because its visit counts are noisier targets, and catches up by about 8M positions. Per hour, it reaches every level first: above 1,000 Elo at 2.5 hours instead of 3.4, and 1,800 at 6 hours instead of 8. The lighter line is the 800-simulation recipe run a second time with a different random seed. The two runs stay within about 100 Elo of each other, which shows how much chance alone changes.
+Per saved position, the cheaper search learns less, because its visit counts are noisier targets: it is 240 Elo behind at 4M positions, level at 8M, and about 150 behind from 12M on. Per hour, it gets ahead first: 1,500 Elo at 2.4 hours and 2,000 at 4.6, where the 800-simulation run needs 8.3 hours for 2,000. It stays ahead until about 12 hours. The lighter line is the 800-simulation recipe run a second time with a different random seed. At its two kept networks it is 10 and 46 Elo from the first run, which shows how much chance alone changes.
 
 A second 400-simulation run with another seed landed almost on top of the first one (1,503 against 1,504 at 3.5 hours, 1,619 against 1,614 at 4 hours), so the gain is not luck. Halving the search again does not help: with 200 and 25 simulations, the run fell 100 to 250 Elo behind from hour 3 on and stopped improving at about 1,350 to 1,400. It was also far behind per position (1,343 against 1,822 at 10M positions). For a run of about a day, 400 is the right amount.
 
-The cheaper search reaches its plateau sooner, but the plateau is not higher. Continued to 17 hours, the 400-simulation run levelled off at about 1,860 to 1,900, roughly 60 Elo below the 800-simulation run. Noisier targets seem to cost a little at the top. This comes back in the section on scaling.
+The cheaper search reaches its plateau sooner, but the plateau is not higher. Continued to 16 hours, the 400-simulation run levelled off at about 2,050 to 2,210, while the 800-simulation run reached 2,272 at 17 hours. Noisier targets seem to cost at the top. This comes back in the section on Elo per step.
 
 ## The bug that looked like a collapse
 
-After about 17 hours, the transformer run started getting worse. Puzzles solved fell from 73% to 64%, there were more draws, games got longer, the training loss went up, and the rating dropped from about 1,900 to about 1,750. Self-play training has a known failure where the network gets stuck learning from its own bad games, and this looked exactly like it.
+After about 17 hours, the transformer run started getting worse. Puzzles solved fell from 73% to 64%, there were more draws, games got longer, the training loss went up, and the rating dropped from about 1,900 to about 1,750. (The ratings in this section were taken during the runs, with the old random openings, so they are lower than in the rest of the post.) Self-play training has a known failure where the network gets stuck learning from its own bad games, and this looked exactly like it.
 
 The first suspects were a learning rate too high for this stage of training, a network too small, and badly calibrated resignations. The agent tested them by starting three copies of the run from the same checkpoint, each with one change: a decaying learning rate, a bigger network, and recalibrated resignations. All three kept getting worse, so the cause had to be something the three copies shared. The main candidate was the TensorRT engine, the converted copy of the network that self-play uses.
 
@@ -111,7 +111,7 @@ So from about step 40,000, a growing share of positions was played by a differen
 
 The network itself never got worse; only the copy used to play did. The first post ended on the same advice: test every boundary between two versions of the same computation. Here the boundary was between the network we train and the engine that plays. A script, `trt_parity.py`, now compares a checkpoint with its TensorRT engine in a few seconds.
 
-The fix removes the overflow but not its cause. Nothing kept the weights small. The optimizer (Adam) had no weight decay, which is the usual term that pulls every weight slightly toward zero at each step. In the transformer run, the overall size of the weights (their norm) grew from 105 to 192, and the values inside the network grew with them. One last run added weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe. It is the violet line in the chart above. Over 18 hours its weight norm stayed around 105, while the same recipe without weight decay passed 220, and its largest value reached 80 at step 70,000 instead of passing 440. It ended at the same level: about 1,860 to 1,890, 20 to 50 Elo below the run without weight decay, with the same puzzle accuracy.
+The fix removes the overflow but not its cause. Nothing kept the weights small. The optimizer (Adam) had no weight decay, which is the usual term that pulls every weight slightly toward zero at each step. In the transformer run, the overall size of the weights (their norm) grew from 105 to 192, and the values inside the network grew with them. One last run added weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe. It is the violet line in the chart above. Over 18 hours its weight norm stayed around 105, while the same recipe without weight decay passed 220, and its largest value reached 80 at step 70,000 instead of passing 440. It ended at the same level, with the same puzzle accuracy: rated again on the balanced openings, 2,154 at step 73,000, against 2,149 to 2,212 for the run without weight decay.
 
 Weight decay is still worth keeping, because it keeps the engine within FP16 range. It also rules out one explanation for the plateau. With normalisation layers everywhere, growing weights make each training step change the network less, so the network could have been slowly freezing. With the weights held at a constant size, it plateaus at the same level anyway.
 
@@ -121,11 +121,11 @@ Everything above is measured per hour of training, because the task was the fast
 
 <StepChart />
 
-To reach about 1,400, an 8-layer transformer (1.47M parameters, 800 simulations) needed about 5,500 training steps. The 4-layer one needed about 8,000 with 800 simulations, and about 12,000 with 400. Per hour the order flips back, because the steps do not cost the same: with 400 simulations a run does about 4,000 steps per hour, with 800 about 2,100, and the 8-layer network about 640. Its self-play is about 40% slower on the same machine, and this run also ran on a slower machine.
+After 10,000 training steps, an 8-layer transformer (1.47M parameters, 400 simulations) was at 1,817 Elo. The 4-layer one was at 1,734 with 800 simulations, and at 1,497 with 400. The gaps shrink later. From 20,000 steps on, the 8-layer network is between 30 Elo behind and 130 ahead of the 4-layer one with the same search. The 800-simulation run stays 150 to 240 Elo ahead of the 400-simulation one, except at 20,000 steps. Per hour the order flips back, because the steps do not cost the same: with 400 simulations a run did about 3,700 steps per hour, with 800 about 2,300, and the 8-layer network about 1,700.
 
-This matters for longer runs because of the shape of these curves: they rise quickly, then level off. A recipe with cheap steps wins the early part by taking more of them. In a long enough run, what counts is the level where the curve flattens, and recipes that gain more per step tend to keep climbing for longer. So a steeper Elo-per-step curve usually pays off as training gets longer, even when each step is slower. The 400-simulation run already shows this on a small scale: it was ahead of the 800-simulation run for the first 8 hours, then levelled off about 60 Elo below it.
+This matters for longer runs because of the shape of these curves: they rise quickly, then level off. A recipe with cheap steps wins the early part by taking more of them. In a long enough run, what counts is the level where the curve flattens, and recipes that gain more per step tend to keep climbing for longer. So a steeper Elo-per-step curve usually pays off as training gets longer, even when each step is slower. The 400-simulation run already shows this on a small scale: it was ahead of the 800-simulation run for about the first 12 hours, then levelled off 60 to 120 Elo below it.
 
-The two changes that make steps slower but more useful are therefore the natural next steps: more simulations per move, and a bigger network. The plateau at about 1,900 to 1,950 also points that way. The changes that kept the 0.81M network and its search as they were (a decaying learning rate, cleaner resignation decisions, weight decay) all left it where it was.
+The two changes that make steps slower but more useful are therefore the natural next steps: more simulations per move, and a bigger network. The plateau of the 4-layer network, at about 2,150 to 2,270, also points that way. The changes that kept the 0.81M network and its search as they were (a decaying learning rate, cleaner resignation decisions, weight decay) all left it where it was.
 
 Growing the network during training is one way to get a bigger network without paying for its slow steps from the start: begin with a small, fast network and add layers when progress slows down. We tried it. The new layers start out passing their input through unchanged, so the grown network plays exactly like the old one at first and then learns to use the new layers. We grew the ResNet, a transformer starting from 2 layers, and a transformer that had reached its plateau (from 4 to 8 layers). It does not work yet: every grown run ended level with the network that was never grown, or at most about 90 Elo ahead, which is within the difference between two seeds. An 8-layer network trained from the start learns more per step, so the extra layers are useful. We don't know yet why adding them later does not give the same benefit.
 
