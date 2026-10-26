@@ -70,14 +70,11 @@ def run_dir(box: str, suffix: str) -> Path:
     return sorted((RUNS / box).glob(f"*_{suffix}"))[-1]
 
 
-def load(box: str, suffix: str, max_step: int | None = None) -> dict:
-    """Ladder curve on hours-since-start and cumulative self-play records."""
-    d = run_dir(box, suffix)
+def axes(d: Path):
+    """(t0, active_hours(t), records_at(t), trainer rows) for a run directory."""
     tr = jl(d / "metrics/train.jsonl")
     sp = jl(d / "metrics/selfplay.jsonl")
-    lad = jl(d / "ladder/ladder.jsonl")
     t0 = min(r["t"] for r in tr + sp)
-    lad = [r for r in lad if r["t"] >= t0 - 1800 and (max_step is None or r["step"] <= max_step)]
     # Records written, cumulative across self-play restarts (the counter restarts at 0).
     cum, off, prev, pts = 0.0, 0.0, 0.0, []
     for r in sp:
@@ -111,12 +108,44 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
                 down += t - prev - 30
         return max(0.0, (t - t0 - down) / 3600)
 
+    return t0, active_hours, records_at, tr
+
+
+def load(box: str, suffix: str, max_step: int | None = None) -> dict:
+    """Live ladder curve (random 8-ply openings) on hours-since-start and cumulative self-play records."""
+    d = run_dir(box, suffix)
+    t0, active_hours, records_at, _ = axes(d)
+    lad = jl(d / "ladder/ladder.jsonl")
+    lad = [r for r in lad if r["t"] >= t0 - 1800 and (max_step is None or r["step"] <= max_step)]
     return {
         "hours": [active_hours(r["t"]) for r in lad],
         "records_m": [records_at(r["t"]) / 1e6 for r in lad],
         "steps_k": [r["step"] / 1000 for r in lad],
         "elo": [r["elo"] for r in lad],
     }
+
+
+def rerated(box: str, suffix: str, max_step: int | None = None) -> dict:
+    """The run's kept checkpoints re-rated on Stockfish's balanced openings (scripts/rerate.py,
+    whose rows may have been written on another box), on the same axes as load(). A checkpoint's
+    time is that of the first trainer row at or after its step."""
+    d = run_dir(box, suffix)
+    _, active_hours, records_at, tr = axes(d)
+    rows = {}
+    for f in sorted(RUNS.glob("*/*/metrics/rerate_sf.jsonl")):
+        for r in jl(f):
+            if r.get("run") == d.name and r.get("openings") == "sf" and (max_step is None or r["step"] <= max_step):
+                rows[r["step"]] = r  # a step rated twice: the last row wins
+    steps = [(r["step"], r["t"]) for r in tr if "step" in r and "t" in r and "event" not in r]
+    out = {"hours": [], "records_m": [], "steps_k": [], "elo": [], "se": []}
+    for step in sorted(rows):
+        t = next((t for s, t in steps if s >= step), steps[-1][1])
+        out["hours"].append(active_hours(t))
+        out["records_m"].append(records_at(t) / 1e6)
+        out["steps_k"].append(step / 1000)
+        out["elo"].append(rows[step]["elo"])
+        out["se"].append(rows[step]["elo_se"])
+    return out
 
 
 def end_label(ax, x, y, text, leader=None):
@@ -229,36 +258,42 @@ CHART_JSON = Path(__file__).resolve().parent / "site" / "components" / "charts" 
 
 
 def export_json() -> None:
-    """The same data for the blog's native SVG charts (docs/blog/site/components/charts/)."""
-    pts = lambda xs, ys, dx=2: [[round(x, dx), round(y)] for x, y in zip(xs, ys)]  # noqa: E731
-    main_ = load("armA", "baseline")
-    sig = load("dev1", "signal")
-    enc = load("armE", "encoder", max_step=40000)
-    s400 = load("armA", "enc-sims400")
-    s2 = load("armF", "encoder-s2")
-    deep = load("armB", "enc-deep")
-    clip = lambda s, key, xmax: [[round(x, 2), round(y)] for x, y in zip(s[key], s["elo"]) if x <= xmax]  # noqa: E731
+    """The same data for the blog's native SVG charts (docs/blog/site/components/charts/).
+
+    Every rating is a kept checkpoint (one per 10k training steps) re-rated on Stockfish's balanced
+    openings; the live ladder curves (random openings, every 30 min) are a different scale."""
+    pts = lambda s, key: [[round(x, 2), round(y)] for x, y in zip(s[key], s["elo"])]  # noqa: E731
+    base = rerated("armA", "baseline")
+    sig = rerated("dev1", "signal")
+    enc = rerated("armE", "encoder", max_step=40000)  # its later steps ran on the broken FP16 engine
+    s400 = rerated("armA", "enc-sims400", max_step=60000)
+    s2 = rerated("armF", "encoder-s2")
+    deep = rerated("runA-deep", "enc-deep400")
+
+    def at(s: dict, step_k: float) -> int:
+        return round(s["elo"][s["steps_k"].index(step_k)])
+
     data = {
         "speedup": [
-            {"name": "Original code (main)", "slot": 4, "points": pts(main_["hours"], main_["elo"])},
-            {"name": "+ better training targets", "slot": 3, "points": pts(sig["hours"], sig["elo"])},
-            {"name": "+ small transformer", "slot": 2, "points": pts(enc["hours"], enc["elo"])},
-            {"name": "+ half the search per move", "slot": 1, "points": pts(s400["hours"], s400["elo"])},
+            {"name": "Original code (first post)", "slot": 4, "dots": True, "points": pts(base, "hours")},
+            {"name": "+ better training targets", "slot": 3, "dots": True, "points": pts(sig, "hours")},
+            {"name": "+ small transformer", "slot": 2, "dots": True, "points": pts(enc, "hours")},
+            {"name": "+ half the search per move", "slot": 1, "dots": True, "points": pts(s400, "hours")},
         ],
         "searchBudget": {
             key: [
-                {"name": "800 simulations, seed 1", "slot": 2, "points": clip(enc, key, xmax)},
-                {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "points": clip(s2, key, xmax)},
-                {"name": "400 simulations", "slot": 1, "points": clip(s400, key, xmax)},
+                {"name": "800 simulations, seed 1", "slot": 2, "dots": True, "points": pts(enc, key)},
+                {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "dots": True, "points": pts(s2, key)},
+                {"name": "400 simulations", "slot": 1, "dots": True, "points": pts(s400, key)},
             ]
-            for key, xmax in (("hours", 8.6), ("records_m", 12))
+            for key in ("hours", "records_m")
         },
         # Same batch size and trainer pacing in all three, so a step is the same amount of
         # training data; only the search budget and the depth differ.
         "perStep": [
-            {"name": "4 layers, 400 simulations", "slot": 1, "points": clip(s400, "steps_k", 16)},
-            {"name": "4 layers, 800 simulations", "slot": 2, "points": clip(enc, "steps_k", 16)},
-            {"name": "8 layers, 800 simulations", "slot": 3, "points": clip(deep, "steps_k", 16)},
+            {"name": "4 layers, 400 simulations", "slot": 1, "dots": True, "points": pts(s400, "steps_k")},
+            {"name": "4 layers, 800 simulations", "slot": 2, "dots": True, "points": pts(enc, "steps_k")},
+            {"name": "8 layers, 400 simulations", "slot": 3, "dots": True, "points": pts(deep, "steps_k")},
         ],
         # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions).
         "activation": [
@@ -267,11 +302,12 @@ def export_json() -> None:
             {"name": "weight decay 0.05", "slot": 7,
              "points": [[10, 24.9], [20, 35.7], [30, 45.8], [50, 64.4], [70, 79.9]]},
         ],
+        # After 20k training steps (the ablations kept checkpoints at 10k and 20k only).
         "ablations": [
-            {"label": "All three changes", "value": 1198},
-            {"label": "without the value-head change", "value": 1137},
-            {"label": "without limiting randomness to the opening", "value": 1130},
-            {"label": "without the visit-count policy target", "value": 466},
+            {"label": "All three changes", "value": at(sig, 20)},
+            {"label": "without the value-head change", "value": at(rerated("abl-value", "ablate-value"), 20)},
+            {"label": "without limiting randomness to the opening", "value": at(rerated("abl-temp", "ablate-temp"), 20)},
+            {"label": "without the visit-count policy target", "value": at(rerated("abl-policy", "ablate-policy"), 20)},
         ],
     }
     CHART_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -279,10 +315,13 @@ def export_json() -> None:
 
 
 if __name__ == "__main__":
-    OUT.mkdir(parents=True, exist_ok=True)
-    chart_speedup()
-    chart_search_budget()
-    chart_fp16()
-    chart_ablations()
+    # The post's charts are the native ones (export_json); the PNGs below are the first draft's,
+    # on the live ladder, kept for the record.
+    if "--png" in __import__("sys").argv:
+        OUT.mkdir(parents=True, exist_ok=True)
+        chart_speedup()
+        chart_search_budget()
+        chart_fp16()
+        chart_ablations()
     export_json()
-    print("wrote", sorted(p.name for p in OUT.glob("*.png")), "and", CHART_JSON.name)
+    print("wrote", CHART_JSON.name)
