@@ -639,3 +639,29 @@ This also explains run B (sampling all game from the same visit counts).
   and the value head learns from game results that opening blunders make noisy.
 - As a run-health signal: watch the search's own loss and the value head's error; when both
   are flat, more training only lets the policy catch up the remaining gap (~0.015).
+
+## Run C continued with policy-sampled quick moves (2026-10-25 19:30 -> 2026-10-26 05:30 UTC)
+
+C was resumed from step 54k (its plateau) with `quick_policy_temperature: 0.7`
+(`configs/enc_sims400_open0_qpol.yaml`): cheap moves in the first 30 plies sample the raw
+policy at T = 0.7 instead of the visit counts of a 50-sim search. B was stopped to pay for it.
+
+| | before (steps 40-54k) | after (steps 74-92k) |
+|---|---|---|
+| ladder Elo (mean of 8 / 10 ratings) | ~1,850 | ~1,940 |
+| plies per game | 55 | 80-86 |
+| resignations / draws | 76% / 6% | 66-68% / 14-16% |
+| self-play positions per second | 273 | 424-456 |
+
+On the cached Stockfish positions (all 600), the quantities that had stalled on the plateau
+moved: the 400-sim search's move loss 0.0295 (C @ 49.5k) / 0.030 (baseline @ 61.5k) ->
+**0.0245** (C @ 92.5k), the search's value error 0.104 / 0.097 -> **0.084**, the value head's
+error 0.123 / 0.120 -> **0.115**. The baseline did not move over its last 9k steps, so this is
+not just more training. Ladder: C @ 92.5k = 1,928 +- 40, puzzles 76.2%. The 2-hourly
+measurements written on C's box were lost with it (outside the synced run dir); the
+branch-point numbers above were re-measured on the next box.
+
+Next (2026-10-26 10:35 UTC, budget raised to $215): branch `enc-c800` = C @ 92.5k at
+800/100 sims (`configs/enc_sims800_open0_qpol.yaml`), fresh buffer, box runC800 until
+~20:30 UTC; its measurements now go to the run's metrics/ (synced home). `src/run.py` now
+builds an engine on resume when a branch has none (self-play otherwise waits forever).
