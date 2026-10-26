@@ -149,7 +149,7 @@ Three measurements, from the weakest claim to the strongest:
 
 <EloChainChart />
 
-**3. Automatic matches against Stockfish-1400 at the end of that run** (steps 160k to 255k): 50 games for each new checkpoint. From a low of 32% at step 175k, the score rises to **55% at best, above equal strength**:
+**3. Automatic matches against Stockfish-1400 at the end of that run** (steps 160k to 255k): 50 games for each new checkpoint, with the network searching 800 simulations per move. From a low of 32% at step 175k, the score rises to **55% at best, above equal strength**:
 
 <BrawlChart />
 
@@ -157,7 +157,7 @@ Finally, my favourite measurement, because it is the most about chess: mating wi
 
 <KqrkChart />
 
-A note on what these numbers mean. "Stockfish-1400" is Stockfish 16 with `UCI_Elo=1400` at 100 ms per move, a deliberately weakened setting. Full-strength Stockfish would crush this model, as it would anything short of a top engine. I am not claiming a strong engine. The claim is that **the AlphaZero recipe, run faithfully at a thousandth of the scale, works**: starting from nothing, the model learns openings, tactics, endgame technique and, eventually, castling.
+A note on what these numbers mean. "Stockfish-1400" is Stockfish 16 with `UCI_Elo=1400` at 100 ms per move, a deliberately weakened setting, and in the automatic matches our network searched 800 simulations per move: these numbers measure the network together with that search. Full-strength Stockfish would crush this model, as it would anything short of a top engine. I am not claiming a strong engine. The claim is that **the AlphaZero recipe, run faithfully at a thousandth of the scale, works**: starting from nothing, the model learns openings, tactics, endgame technique and, eventually, castling.
 
 ## Advice before you start
 
