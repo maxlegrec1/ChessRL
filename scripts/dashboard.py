@@ -100,7 +100,32 @@ def load_run(run_dir: str) -> dict:
     cfg = {}
     if (d / "config.yaml").exists():
         cfg = yaml.safe_load((d / "config.yaml").read_text()) or {}
-    return {"train": train, "selfplay": selfplay, "events": events, "ladder": lad, "config": cfg, "t0": t0}
+    return {"train": train, "selfplay": selfplay, "events": events, "ladder": lad, "config": cfg, "t0": t0,
+            "name": d.name}
+
+
+@st.cache_data(ttl=55)
+def gather(name: str) -> pd.DataFrame:
+    """Rows of every run's metrics/<name>: <root>/<run>/metrics on a box,
+    <root>/<box>/<run>/metrics in the synced copy at home."""
+    files = [p for root in RUNS_ROOTS for pat in (f"*/metrics/{name}", f"*/*/metrics/{name}") for p in root.glob(pat)]
+    return pd.concat([read_jsonl(p) for p in files] or [pd.DataFrame()], ignore_index=True)
+
+
+def rerated_points(data: dict, rerate: pd.DataFrame, xkey: str) -> pd.DataFrame:
+    """A run's checkpoints re-rated on the Stockfish openings (scripts/rerate.py, which may have
+    run on another box), placed on the run's x axis through its trainer rows (step -> hours, positions)."""
+    tr = data["train"]
+    if rerate.empty or "run" not in rerate or tr.empty or "step" not in tr or xkey not in tr:
+        return pd.DataFrame()
+    rr = rerate[rerate["run"] == data["name"]].drop_duplicates("step", keep="last").sort_values("step")
+    tr = tr.sort_values("step").drop_duplicates("step", keep="last")  # a resume repeats a few steps
+    steps = tr["step"].to_numpy(dtype=float)
+    # A branch's own rows start at its branch point; the last checkpoint may follow the last log row.
+    rr = rr[(rr["step"] >= steps.min() - 100) & (rr["step"] <= steps.max() + 1000)].copy()
+    if xkey != "step":
+        rr[xkey] = np.interp(rr["step"].to_numpy(dtype=float), steps, tr[xkey].to_numpy(dtype=float))
+    return rr
 
 
 def list_runs() -> list[Path]:
@@ -214,8 +239,10 @@ def select_runs(labels: dict[str, Path]) -> list[str]:
 
 def kpi_table(runs: dict) -> None:
     rows = []
+    rerate = gather("rerate_sf.jsonl")
     for name, data in runs.items():
         tr, sp, lad = data["train"], data["selfplay"], data["ladder"]
+        rr = rerated_points(data, rerate, "step")
         last_tr = tr.iloc[-1] if not tr.empty else {}
         last_sp = sp.iloc[-1] if not sp.empty else {}
         last_lad = lad.iloc[-1] if not lad.empty else {}
@@ -236,6 +263,7 @@ def kpi_table(runs: dict) -> None:
             "avg plies": round((last_sp.get("total_game_plies", 0) or 0) / games, 1) if games else None,
             "ladder Elo": f"{last_lad.get('elo', float('nan')):.0f} ± {last_lad.get('elo_se', float('nan')):.0f}"
             if len(lad) else "–",
+            "Elo · SF openings": f"{rr['elo'].iloc[-1]:.0f} @ {rr['step'].iloc[-1] / 1000:g}k" if len(rr) else "–",
             "puzzles": f"{last_lad.get('puzzles.line', float('nan')):.3f}" if len(lad) else "–",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -256,14 +284,38 @@ def budget_panel() -> None:
     st.progress(min(1.0, b["spent"] / b["cap"]))
 
 
+# The first post's best automatic match: 55% against Stockfish-1400 (800 simulations, 50 games).
+FIRST_POST_BEST = 1400 + 400 * np.log10(0.55 / 0.45)
+
+
+def network_label(engine: str) -> str:
+    # <date>_<time>_<hex>_<run name>_step_<NNNNNNNN> -> "<run name> @ <k steps>k"
+    parts = engine.split("_")
+    if len(parts) > 5 and parts[-2] == "step":
+        return f"{'_'.join(parts[3:-2])} @ {int(parts[-1]) / 1000:g}k"
+    return engine
+
+
+def stockfish_rating(rows: pd.DataFrame) -> tuple[float, float] | None:
+    """One rating on Stockfish's UCI_Elo scale from the scores against every level (maximum
+    likelihood, draws as half points, as in the ladder fit), with its standard error. None when
+    the scores do not pin it down (all won or all lost)."""
+    grid = np.arange(0.0, 4000.0)
+    ll, info = np.zeros_like(grid), np.zeros_like(grid)
+    for _, r in rows.iterrows():
+        p = np.clip(1 / (1 + 10 ** ((r["sf_elo"] - grid) / 400)), 1e-12, 1 - 1e-12)
+        s = r["w"] + 0.5 * r["d"]
+        ll += s * np.log(p) + (r["games"] - s) * np.log(1 - p)
+        info += r["games"] * p * (1 - p) * (np.log(10) / 400) ** 2
+    i = int(np.argmax(ll))
+    if i in (0, len(grid) - 1):
+        return None
+    return float(grid[i]), float(1 / np.sqrt(info[i]))
+
+
 def benchmarks_panel() -> None:
     """Re-ratings on the Stockfish openings and the first post's Stockfish benchmark, wherever
     they were written (any run's metrics/rerate_sf.jsonl and metrics/sf_benchmark.jsonl)."""
-    def gather(name: str) -> pd.DataFrame:
-        # <root>/<run>/metrics on a box, <root>/<box>/<run>/metrics in the synced copy at home.
-        files = [p for root in RUNS_ROOTS for pat in (f"*/metrics/{name}", f"*/*/metrics/{name}") for p in root.glob(pat)]
-        return pd.concat([read_jsonl(p) for p in files] or [pd.DataFrame()], ignore_index=True)
-
     rerate, bench = gather("rerate_sf.jsonl"), gather("sf_benchmark.jsonl")
     if rerate.empty and bench.empty:
         return
@@ -274,11 +326,42 @@ def benchmarks_panel() -> None:
             cols = [c for c in ("run", "step", "elo", "elo_se", "old_elo") if c in rerate]
             st.dataframe(rerate[cols].drop_duplicates(["run", "step"], keep="last").sort_values(["run", "step"]),
                          hide_index=True, width="stretch")
-        if not bench.empty:
+        ok = bench[bench["score"].notna()] if "score" in bench else pd.DataFrame()
+        if not ok.empty:
             st.caption("The first post's protocol: Stockfish 16 with UCI_Elo, 100 ms per move; the network "
-                       "searches 800 simulations per move; games from the initial position.")
-            cols = [c for c in ("engine", "sf_elo", "games", "w", "d", "l", "score", "implied_elo") if c in bench]
-            st.dataframe(bench[cols].sort_values(["engine", "sf_elo"]), hide_index=True, width="stretch")
+                       "searches 800 simulations per move; games from the initial position. 'Stockfish scale' "
+                       "is one rating fitted to the scores against every level, on Stockfish's UCI_Elo "
+                       "scale (not the ladder's).")
+            ok = ok.drop_duplicates(["engine", "sf_elo"], keep="last").assign(network=ok["engine"].map(network_label))
+            rows = []
+            for net, g in ok.groupby("network"):
+                row = {"network": net}
+                for _, r in g.sort_values("sf_elo").iterrows():
+                    row[f"vs SF-{int(r['sf_elo'])}"] = (f"{r['score']:.0%}  ({int(r['w'])}W {int(r['d'])}D "
+                                                        f"{int(r['l'])}L)")
+                fit = stockfish_rating(g)
+                row["rating"], row["se"] = fit if fit else (None, None)
+                rows.append(row)
+            table = pd.DataFrame(rows).sort_values("rating", na_position="first")
+            fitted = table[table["rating"].notna()]
+            if not fitted.empty:
+                fig = go.Figure(go.Scatter(
+                    x=fitted["rating"], y=fitted["network"], mode="markers",
+                    marker=dict(size=10, color=PALETTE[0]),
+                    error_x=dict(type="data", array=fitted["se"], visible=True, thickness=1.5),
+                    customdata=fitted["se"], hovertemplate="%{y}: %{x:,.0f} ± %{customdata:.0f}<extra></extra>"))
+                fig.add_vline(x=FIRST_POST_BEST, line=dict(color="#64748b", dash="dash", width=1.5),
+                              annotation_text=f"first post, best match (55% vs SF-1400): {FIRST_POST_BEST:,.0f}",
+                              annotation_position="top left")
+                fig.update_layout(title="Stockfish-scale Elo (first post's benchmark)", height=120 + 36 * len(fitted),
+                                  margin=dict(l=10, r=10, t=60, b=10), xaxis_title="Elo on Stockfish's UCI_Elo scale",
+                                  showlegend=False)
+                st.plotly_chart(fig, width="stretch")
+            table["Stockfish scale"] = [f"{r:,.0f} ± {s:.0f}" if r == r and r is not None else "–"
+                                        for r, s in zip(table["rating"], table["se"])]
+            st.dataframe(table.drop(columns=["rating", "se"]).iloc[::-1], hide_index=True, width="stretch")
+        if "error" in bench and bench["error"].notna().any():
+            st.caption(f"{int(bench['error'].notna().sum())} benchmark match(es) failed (see sf_benchmark.jsonl).")
 
 
 def selfplay_derived(runs: dict) -> None:
@@ -311,6 +394,8 @@ def body() -> None:
     if not chosen:
         st.info("No runs selected: tick some in the sidebar.")
     xkey = st.sidebar.radio("x axis", list(XLABEL), format_func=XLABEL.get)
+    scale = st.sidebar.radio("ladder scale", ("both", "random", "sf"), format_func={
+        "both": "both", "random": "random openings (original)", "sf": "Stockfish openings"}.get)
     k = st.sidebar.slider("smoothing (points)", 1, 200, 20)
     runs = {n: load_run(str(labels[n])) for n in chosen}
     selfplay_derived(runs)
@@ -324,15 +409,18 @@ def body() -> None:
     with c[0]:
         fig = go.Figure()
         any_sf = False
+        rerate = gather("rerate_sf.jsonl")
         for i, (name, data) in enumerate(runs.items()):
             lad = data["ladder"]
-            if lad.empty or xkey not in lad:
-                continue
+            lad = lad if not lad.empty and xkey in lad else pd.DataFrame()
             # Two opening sets, two scales: rows without the field predate the switch (random).
             sets = lad["openings"].fillna("random") if "openings" in lad else pd.Series("random", index=lad.index)
+            # The Stockfish-openings scale: live ladder rows plus checkpoints re-rated afterwards.
+            sf = pd.concat([lad[sets == "sf"], rerated_points(data, rerate, xkey)])
+            by_set = {"random": lad[sets == "random"], "sf": sf.sort_values(xkey) if not sf.empty else sf}
             for oset, dash, suffix in (("random", "solid", ""), ("sf", "dash", " · Stockfish openings")):
-                part = lad[sets == oset]
-                if part.empty:
+                part = by_set[oset]
+                if part.empty or scale not in ("both", oset):
                     continue
                 any_sf |= oset == "sf"
                 fig.add_trace(go.Scatter(
@@ -345,7 +433,8 @@ def body() -> None:
         st.plotly_chart(fig, width="stretch")
         if any_sf:
             st.warning("Two rating scales. Solid: games from 8 random plies (the original ladder). Dashed: "
-                       "Stockfish's balanced openings, with anchors recalibrated on them (from 2026-10-26). "
+                       "Stockfish's balanced openings, with anchors recalibrated on them (from 2026-10-26; "
+                       "earlier runs re-rated every 10k steps). "
                        "They are not comparable: the balanced-opening scale is stretched at the top "
                        "(Stockfish skill 20 at 1k nodes: 2,068 on random openings, 2,517 on balanced ones).")
     with c[1]:
