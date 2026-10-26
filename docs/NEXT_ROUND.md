@@ -665,3 +665,20 @@ Next (2026-10-26 10:35 UTC, budget raised to $215): branch `enc-c800` = C @ 92.5
 800/100 sims (`configs/enc_sims800_open0_qpol.yaml`), fresh buffer, box runC800 until
 ~20:30 UTC; its measurements now go to the run's metrics/ (synced home). `src/run.py` now
 builds an engine on resume when a branch has none (self-play otherwise waits forever).
+
+### Opening collapse and the 800 branch (2026-10-26)
+
+Self-play openings, latest 3,000 games (scripts/opening_diversity.py, measured on the boxes):
+C before the quick-move switch (54k): 1.e4 29%, Nf3 19%, d4 14%, 98% of games distinct by
+ply 8. C800 (~104k): **1.e4 96%**, d4 1.6%, Nf3 0.7%; distinct positions 9% at ply 4, 32% at
+ply 8, 56% at ply 12. The raw policy already gave 1.e4 ~0.81 at 92.5k (before 800 sims), so the
+quick-move policy sampling (T=0.7) did most of the narrowing and 800 sims added to it. The
+self-play PGNs of C and C800 were not synced (the sync takes metrics, logs, checkpoints) and
+were lost with the boxes; only `~/chessrl-runs/runC-open0/c_sample_100.pgn` remains.
+
+Re-rated on the balanced Stockfish openings (100 sims, `rerate_sf.jsonl` in runA-deep and
+runC800 metrics): C 54k 2,205 -> 92.5k 2,427; C800 95k-112k 2,228 / 2,432 / 2,337 / 2,479
+(100.5k) / 2,329 / 2,327, i.e. no gain over C at 400 sims on the 100-sim ladder. Against
+Stockfish-1400 at 800 sims (first post's test, 100 games from the start position) all six
+benchmarked networks score 99-100% (first post's best: 55%); the Stockfish-2000 round runs
+overnight (`sf_benchmark.jsonl`).
