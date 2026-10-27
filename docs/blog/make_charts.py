@@ -71,7 +71,7 @@ def run_dir(box: str, suffix: str) -> Path:
 
 
 def axes(d: Path):
-    """(t0, active_hours(t), records_at(t), trainer rows) for a run directory."""
+    """(t0, active_hours(t), records_at(t), trainer rows, self-play rows) for a run directory."""
     tr = jl(d / "metrics/train.jsonl")
     sp = jl(d / "metrics/selfplay.jsonl")
     t0 = min(r["t"] for r in tr + sp)
@@ -108,13 +108,14 @@ def axes(d: Path):
                 down += t - prev - 30
         return max(0.0, (t - t0 - down) / 3600)
 
-    return t0, active_hours, records_at, tr
+    return t0, active_hours, records_at, tr, sp
 
 
 def load(box: str, suffix: str, max_step: int | None = None) -> dict:
-    """Live ladder curve (random 8-ply openings) on hours-since-start and cumulative self-play records."""
+    """The ladder as it ran (every 30 min, random 8-ply openings): Elo and puzzle accuracy on
+    hours-since-start and cumulative self-play records."""
     d = run_dir(box, suffix)
-    t0, active_hours, records_at, _ = axes(d)
+    t0, active_hours, records_at, _, _ = axes(d)
     lad = jl(d / "ladder/ladder.jsonl")
     lad = [r for r in lad if r["t"] >= t0 - 1800 and (max_step is None or r["step"] <= max_step)]
     return {
@@ -122,16 +123,19 @@ def load(box: str, suffix: str, max_step: int | None = None) -> dict:
         "records_m": [records_at(r["t"]) / 1e6 for r in lad],
         "steps_k": [r["step"] / 1000 for r in lad],
         "elo": [r["elo"] for r in lad],
+        "puzzles": [(r.get("puzzles") or {}).get("line") for r in lad],
     }
 
 
 def rerated(box: str, suffix: str, max_step: int | None = None) -> dict:
-    """The run's kept checkpoints re-rated on Stockfish's balanced openings (scripts/rerate.py,
-    whose rows may have been written on another box), on the same axes as load(). A checkpoint's
-    time is that of the first trainer row at or after its step (the original code wrote no trainer
-    log: there, the first self-play row playing an engine at or after that step)."""
+    """The run's kept checkpoints (one per 10k steps) re-rated on Stockfish's balanced openings
+    (scripts/rerate.py; rows may come from another box), on the same axes as load(). The first
+    point is the untrained network, rated by the ladder before training: below ~800 Elo the two
+    opening sets give the same scale. A checkpoint's time is that of the first trainer row at or
+    after its step (the original code wrote no trainer log: its first self-play row with that
+    engine)."""
     d = run_dir(box, suffix)
-    _, active_hours, records_at, tr = axes(d)
+    _, active_hours, records_at, tr, sp = axes(d)
     rows = {}
     for f in sorted(RUNS.glob("*/*/metrics/rerate_sf.jsonl")):
         for r in jl(f):
@@ -139,15 +143,15 @@ def rerated(box: str, suffix: str, max_step: int | None = None) -> dict:
                 rows[r["step"]] = r  # a step rated twice: the last row wins
     steps = [(r["step"], r["t"]) for r in tr if "step" in r and "t" in r and "event" not in r]
     if not steps:
-        steps = [(r["engine_step"], r["t"]) for r in jl(d / "metrics/selfplay.jsonl") if "engine_step" in r]
-    out ={"hours": [], "records_m": [], "steps_k": [], "elo": [], "se": []}
+        steps = [(r["engine_step"], r["t"]) for r in sp if "engine_step" in r]
+    live = load(box, suffix)
+    out = {"hours": [0.0], "records_m": [0.0], "steps_k": [0.0], "elo": [live["elo"][0]]}
     for step in sorted(rows):
         t = next((t for s, t in steps if s >= step), steps[-1][1])
         out["hours"].append(active_hours(t))
         out["records_m"].append(records_at(t) / 1e6)
         out["steps_k"].append(step / 1000)
         out["elo"].append(rows[step]["elo"])
-        out["se"].append(rows[step]["elo_se"])
     return out
 
 
@@ -263,44 +267,29 @@ CHART_JSON = Path(__file__).resolve().parent / "site" / "components" / "charts" 
 def export_json() -> None:
     """The same data for the blog's native SVG charts (docs/blog/site/components/charts/).
 
-    Every rating is a kept checkpoint (one per 10k training steps) re-rated on Stockfish's balanced
-    openings; the live ladder curves (random openings, every 30 min) are a different scale."""
-    pts = lambda s, key: [[round(x, 2), round(y)] for x, y in zip(s[key], s["elo"])]  # noqa: E731
-    base = rerated("armA", "baseline")
-    sig = rerated("dev1", "signal")
-    enc = rerated("armE", "encoder", max_step=40000)  # its later steps ran on the broken FP16 engine
-    s400 = rerated("armA", "enc-sims400", max_step=60000)
-    s2 = rerated("armF", "encoder-s2")
-    deep = rerated("runA-deep", "enc-deep400")
+    Elo: the kept checkpoints re-rated on the balanced openings (rerated()). Puzzles: the ladder
+    as it ran (they do not depend on the ladder's openings)."""
+    pts = lambda s, key="hours", y="elo": [[round(x, 2), round(v, 3 if y == "puzzles" else None)]  # noqa: E731
+                                           for x, v in zip(s[key], s[y]) if v is not None]
+    recipes = [("Original code (first post)", 4, "armA", "baseline", None),
+               ("+ better training targets", 3, "dev1", "signal", None),
+               # Its later steps ran on the broken FP16 engine (see the FP16 section).
+               ("+ small transformer", 2, "armE", "encoder", 40000),
+               ("+ half the search per move", 1, "armA", "enc-sims400", 60000)]
+    enc, s400 = rerated("armE", "encoder", 40000), rerated("armA", "enc-sims400", 60000)
 
-    def at(s: dict, step_k: float) -> int:
+    def at(box: str, suffix: str, step_k: float) -> int:
+        s = rerated(box, suffix)
         return round(s["elo"][s["steps_k"].index(step_k)])
 
     data = {
-        # Each chart on hours or positions also has its points by step, for its data table.
-        "speedup": {
-            key: [
-                {"name": "Original code (first post)", "slot": 4, "dots": True, "points": pts(base, key)},
-                {"name": "+ better training targets", "slot": 3, "dots": True, "points": pts(sig, key)},
-                {"name": "+ small transformer", "slot": 2, "dots": True, "points": pts(enc, key)},
-                {"name": "+ half the search per move", "slot": 1, "dots": True, "points": pts(s400, key)},
-            ]
-            for key in ("hours", "steps_k")
-        },
-        "searchBudget": {
-            key: [
-                {"name": "800 simulations, seed 1", "slot": 2, "dots": True, "points": pts(enc, key)},
-                {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "dots": True, "points": pts(s2, key)},
-                {"name": "400 simulations", "slot": 1, "dots": True, "points": pts(s400, key)},
-            ]
-            for key in ("hours", "records_m", "steps_k")
-        },
-        # Same batch size and trainer pacing in all three, so a step is the same amount of
-        # training data; only the search budget and the depth differ.
-        "perStep": [
-            {"name": "4 layers, 400 simulations", "slot": 1, "dots": True, "points": pts(s400, "steps_k")},
-            {"name": "4 layers, 800 simulations", "slot": 2, "dots": True, "points": pts(enc, "steps_k")},
-            {"name": "8 layers, 400 simulations", "slot": 3, "dots": True, "points": pts(deep, "steps_k")},
+        "speedup": [{"name": n, "slot": k, "dots": True, "points": pts(rerated(b, s, m))} for n, k, b, s, m in recipes],
+        "puzzles": [{"name": n, "slot": k, "points": pts(load(b, s, m), y="puzzles")} for n, k, b, s, m in recipes],
+        "searchBudget": [
+            {"name": "800 simulations, seed 1", "slot": 2, "dots": True, "points": pts(enc)},
+            {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "dots": True,
+             "points": pts(rerated("armF", "encoder-s2"))},
+            {"name": "400 simulations", "slot": 1, "dots": True, "points": pts(s400)},
         ],
         # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions).
         "activation": [
@@ -309,12 +298,12 @@ def export_json() -> None:
             {"name": "weight decay 0.05", "slot": 7,
              "points": [[10, 24.9], [20, 35.7], [30, 45.8], [50, 64.4], [70, 79.9]]},
         ],
-        # After 20k training steps (the ablations kept checkpoints at 10k and 20k only).
+        # After 20k training steps (the ablation runs kept checkpoints at 10k and 20k only).
         "ablations": [
-            {"label": "All three changes", "value": at(sig, 20)},
-            {"label": "without the value-head change", "value": at(rerated("abl-value", "ablate-value"), 20)},
-            {"label": "without limiting randomness to the opening", "value": at(rerated("abl-temp", "ablate-temp"), 20)},
-            {"label": "without the visit-count policy target", "value": at(rerated("abl-policy", "ablate-policy"), 20)},
+            {"label": "All three changes", "value": at("dev1", "signal", 20)},
+            {"label": "without the value-head change", "value": at("abl-value", "ablate-value", 20)},
+            {"label": "without limiting randomness to the opening", "value": at("abl-temp", "ablate-temp", 20)},
+            {"label": "without the visit-count policy target", "value": at("abl-policy", "ablate-policy", 20)},
         ],
     }
     CHART_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -322,8 +311,8 @@ def export_json() -> None:
 
 
 if __name__ == "__main__":
-    # The post's charts are the native ones (export_json); the PNGs below are the first draft's,
-    # on the live ladder, kept for the record.
+    # The post's charts are the native ones (export_json); the PNGs (first draft, the ladder as it
+    # ran) are only written with --png.
     if "--png" in __import__("sys").argv:
         OUT.mkdir(parents=True, exist_ok=True)
         chart_speedup()

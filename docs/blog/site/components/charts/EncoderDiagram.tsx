@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import './charts.css'
 
-/** The encoder of the "ChessRL, round two" post (src/models/encoder.py in ChessRL): squares
+/** The encoder of the "ChessRL, continued" post (src/models/encoder.py in ChessRL): squares
  *  become tokens, four layers mix them, then the policy and value heads read them out. */
 
 const ACCENT = 'var(--cr-s1)'

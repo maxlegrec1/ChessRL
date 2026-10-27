@@ -8,7 +8,7 @@ summary: 'How I trained a 1.29M-parameter chess agent only by playing against it
 
 In 2017, DeepMind's AlphaZero learned chess from nothing but the rules, using around **5,000 TPUs** to generate its self-play games. I wanted to know how far the same recipe can go on hardware one person can own. The answer: further than I expected.
 
-> Since then, a [second round](/blog/chessrl-next-round) of this project made the training about 9 times faster on the same kind of GPU, with an AI agent doing most of the work.
+> Since then, [continued improvements](/blog/chessrl-next-round) made the training about 9 times faster on the same kind of GPU, with an AI agent doing most of the work.
 
 **ChessRL** is a 1.29M-parameter chess agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
 
@@ -175,6 +175,6 @@ If you want to try this yourself (I recommend it: it is the most instructive ML 
 
 Total cost: a 1.29M-parameter network, two weeks of one desktop RTX 4090, about ten days of a rented H200 for the instrumented run, and a 1.7 GB buffer file. Next to that, AlphaZero's 5,000 TPUs look less like a requirement of the algorithm and more like a statement about deadlines. The recipe itself (self-play, a search that improves the policy, and a few settings that matter) fits on a desk.
 
-In a [second round](/blog/chessrl-next-round), an AI agent and I made the training about 9 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
+In a [follow-up post](/blog/chessrl-next-round), an AI agent and I made the training about 9 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
 
 The code, the docs (`docs/ARCHITECTURE.md`, `docs/CONFIG.md`), the Streamlit dashboard and all the diagnostic tools are at **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, under the MIT license. If you build your own, I would love to hear how it goes: [maxime.vanderbeken@mvdbk.fr](mailto:maxime.vanderbeken@mvdbk.fr).

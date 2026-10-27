@@ -7,7 +7,7 @@ The charts show values on hover (and with the arrow keys) and each has a collaps
 | post | source | components | data |
 |---|---|---|---|
 | ChessRL: training an AlphaZero from scratch… | `docs/blog/chessrl-alphazero-single-gpu.mdx` | `ChessrlRoundOne.tsx` | `chessrl-round-one.json`, from `docs/blog/make_round1_charts.py` |
-| ChessRL, round two… | `docs/blog/chessrl-next-round.mdx` | `ChessrlNextRound.tsx`, `EncoderDiagram.tsx` | `chessrl-next-round.json`, from `docs/blog/make_charts.py` |
+| ChessRL, continued… | `docs/blog/chessrl-next-round.mdx` | `ChessrlNextRound.tsx`, `EncoderDiagram.tsx`, `ChessBoard.tsx` | `chessrl-next-round.json`, from `docs/blog/make_charts.py` |
 
 The first post's run data is partly gone (the experiment files stayed on the rented machine), so
 `make_round1_charts.py` holds the match results copied from the labels of the original PNG charts,

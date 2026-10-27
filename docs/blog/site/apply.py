@@ -1,7 +1,7 @@
 """Apply the two ChessRL posts and their native charts to a copy of mvdbk-site (idempotent).
 
-    python3 docs/blog/site/apply.py <site dir>             # preview: round two stays a draft
-    python3 docs/blog/site/apply.py <site dir> --publish   # round two goes live
+    python3 docs/blog/site/apply.py <site dir>             # preview: the follow-up post stays a draft
+    python3 docs/blog/site/apply.py <site dir> --publish   # the follow-up post goes live
 
 Copies components/charts/, registers the chart and diagram components in
 components/MDXComponents.tsx, copies both posts into data/blog/, and applies the mobile-menu
@@ -17,8 +17,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BLOG = HERE.parent
 GROUPS = {
-    "ChessrlNextRound": ["SpeedupChart", "SearchBudgetChart", "ActivationChart", "AblationChart", "StepChart",
-                         "EncoderDiagram"],
+    "ChessrlNextRound": ["SpeedupChart", "TacticsChart", "SearchBudgetChart", "ActivationChart", "AblationChart",
+                         "EncoderDiagram", "ShowcaseGame", "PuzzleBoard"],
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }
@@ -53,7 +53,7 @@ def main() -> None:
                       count=1, flags=re.M)
         (site / "data" / "blog" / name).write_text(text)
     subprocess.run([sys.executable, str(HERE / "fix_mobilenav.py"), str(site)], check=True)
-    print("applied to", site, "(published)" if publish else "(round two as a draft)")
+    print("applied to", site, "(published)" if publish else "(follow-up post as a draft)")
 
 
 if __name__ == "__main__":
