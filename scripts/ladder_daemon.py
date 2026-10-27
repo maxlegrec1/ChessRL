@@ -1,7 +1,8 @@
 """Live strength tracking for one run: every N minutes, rate the newest engine.
 
 Each rating point = puzzle accuracy (1k Lichess puzzles, MCTS) + games against
-the two calibrated anchors nearest the previous estimate. Results append to
+the two calibrated anchors nearest the previous estimate + the network's first-move
+preferences at the starting position (raw policy and a 400-sim search). Results append to
 <run>/ladder/ladder.jsonl. Every run gets the same cadence so the eval load is
 identical across A/B arms.
 
@@ -34,9 +35,27 @@ def latest_engine(run_dir: Path) -> tuple[int, str] | None:
     return int(rows[-1]["iteration"]), rows[-1]["engine_path"].strip()
 
 
+def opening_probe(engine: str, sims: int) -> dict:
+    """First-move preferences at the starting position: the raw policy (no search) and the
+    search's visit shares (no noise), over all 20 moves. One position: about a second."""
+    import _inference_cpp
+
+    out: dict = {"sims": sims}
+    for key, n in (("policy", 0), ("search", sims)):
+        res = _inference_cpp.small_mcts_search_batch_with_history(
+            histories=[[]], fens=[""], simulations=n, cpuct=0.65, temperature=1.0, engine_path=engine,
+            temperature_at_root=0.0, use_dirichlet=False, virtual_loss_width=1)
+        out[key] = {uci: round(float(p), 4) for uci, p in res[0]["policy"]}
+    return out
+
+
 def rate_engine(engine: str, estimate: float | None, ratings: dict, args) -> dict:
     t0 = time.time()
     row: dict = {"puzzles": ladder.puzzle_accuracy(engine, ladder.load_puzzles(), args.sims)}
+    try:
+        row["opening"] = opening_probe(engine, args.opening_sims)
+    except Exception as e:  # noqa: BLE001 - a probe failure must not cost the rating
+        row["opening_error"] = str(e)[:200]
     openings = ladder.load_openings(args.openings, args.games // 2)
 
     def play(name: str) -> list[float]:
@@ -68,6 +87,8 @@ def main() -> None:
     p.add_argument("--max-extra", type=int, default=3, help="extra anchors per rating (0 = original ladder)")
     p.add_argument("--openings", choices=("sf", "random"), default="sf",
                    help="sf: balanced Stockfish-chosen openings (default); random: 8 random plies (original)")
+    p.add_argument("--opening-sims", type=int, default=400,
+                   help="simulations of the first-move probe's search (fixed across runs)")
     p.add_argument("--calibrate", action="store_true")
     p.add_argument("--once", action="store_true")
     args = p.parse_args()

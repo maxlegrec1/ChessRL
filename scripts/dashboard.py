@@ -364,6 +364,48 @@ def benchmarks_panel() -> None:
             st.caption(f"{int(bench['error'].notna().sum())} benchmark match(es) failed (see sf_benchmark.jsonl).")
 
 
+FIRST_MOVE_COLORS = {"e4": PALETTE[0], "d4": PALETTE[1], "Nf3": PALETTE[2], "c4": PALETTE[3]}
+OTHER_COLORS = PALETTE[4:7]
+
+
+def first_move_san(uci: str) -> str:
+    # From the starting position the knights stand on b1 / g1; every other first move is a pawn's.
+    return ("N" if uci[:2] in ("b1", "g1") else "") + uci[2:]
+
+
+def opening_panel(runs: dict, xkey: str) -> None:
+    """First-move preferences at the starting position (ladder_daemon's opening probe): the raw
+    policy and a 400-sim search without noise, as stacked shares of the four main moves + the rest."""
+    shown = [(n, d["ladder"]) for n, d in runs.items() if not d["ladder"].empty and xkey in d["ladder"]
+             and any(c.startswith("opening.policy.") for c in d["ladder"])]
+    if not shown:
+        return
+    st.subheader("Opening: first move from the starting position")
+    st.caption("Measured at each rating: the network's raw policy, and a 400-simulation search without noise. "
+               "The four main moves of each chart, the rest grouped as 'other'.")
+    for name, lad in shown:
+        cols = st.columns(2)
+        for col, kind, label in ((cols[0], "policy", "network alone"), (cols[1], "search", "after 400 simulations")):
+            keys = [c for c in lad if c.startswith(f"opening.{kind}.")]
+            part = lad.dropna(subset=keys[:1]).sort_values(xkey)
+            shares = part[keys].fillna(0.0)
+            top = list(shares.max().sort_values(ascending=False).index[:4])
+            fig = go.Figure()
+            spare = iter(OTHER_COLORS)
+            for k in top:
+                san = first_move_san(k.split(".")[-1])
+                fig.add_trace(go.Scatter(x=part[xkey], y=shares[k], name=san, stackgroup="one", mode="lines",
+                                         line=dict(width=0.5, color=FIRST_MOVE_COLORS.get(san) or next(spare)),
+                                         hovertemplate=f"{san}: %{{y:.0%}}<extra></extra>"))
+            fig.add_trace(go.Scatter(x=part[xkey], y=(1 - shares[top].sum(axis=1)).clip(lower=0), name="other",
+                                     stackgroup="one", mode="lines", line=dict(width=0.5, color="#94a3b8"),
+                                     hovertemplate="other: %{y:.0%}<extra></extra>"))
+            fig.update_layout(title=f"{name} · {label}", height=280, margin=dict(l=10, r=10, t=40, b=10),
+                              xaxis_title=XLABEL[xkey], yaxis=dict(range=[0, 1], tickformat=".0%"),
+                              legend=dict(orientation="h", y=-0.3))
+            col.plotly_chart(fig, width="stretch")
+
+
 def selfplay_derived(runs: dict) -> None:
     """Per-window rates from the cumulative self-play counters."""
     for data in runs.values():
@@ -442,6 +484,7 @@ def body() -> None:
                    ["puzzles.line", "puzzles.first_move"], xkey, 1, yfmt=".0%", height=340)
 
     benchmarks_panel()
+    opening_panel(runs, xkey)
 
     st.subheader("Learning")
     c = st.columns(3)
