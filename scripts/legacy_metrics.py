@@ -42,6 +42,14 @@ def main() -> None:
     writes_file = a.run_dir / "buffer" / "buffer.bin.writes"
     log = a.run_dir / "training.log"
     last_writes, last_t, offset, last_step = None, None, 0, -1
+    # A restarted adapter (a resumed or moved run) re-reads training.log from the top: skip the
+    # steps it already recorded, or they would come back with the restart's timestamps.
+    if (metrics / "train.jsonl").exists():
+        for line in (metrics / "train.jsonl").read_text().splitlines():
+            try:
+                last_step = max(last_step, int(json.loads(line)["step"]))
+            except (ValueError, KeyError):
+                pass
     while True:
         now = time.time()
         try:
