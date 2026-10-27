@@ -682,3 +682,15 @@ runC800 metrics): C 54k 2,205 -> 92.5k 2,427; C800 95k-112k 2,228 / 2,432 / 2,33
 Stockfish-1400 at 800 sims (first post's test, 100 games from the start position) all six
 benchmarked networks score 99-100% (first post's best: 55%); the Stockfish-2000 round runs
 overnight (`sf_benchmark.jsonl`).
+
+### Stockfish level at 50% for C800 (2026-10-27, home machine)
+
+Stockfish 16 here = Ubuntu 24.04's package (stockfish_16-1build1, same as the boxes; bench
+2593605 nodes), in ~/.local/opt/stockfish16, linked as ~/.local/bin/stockfish. The network
+searches on the CPU (scripts/cpu_stockfish_match.py: src/analysis/engine.py, 800 sims, one at a
+time) because the home GPU was busy. Check against a box match: sims400 @ 60k vs UCI_Elo 2000,
+100 games: 83.5% here (81/5/14) vs 85% on the box (83/4/13). C800 @ 100.5k, 40 games per level,
+100 ms per move: 2400 70% (26/4/10), 2700 45% (10/16/14), 3000 5% (0/4/36). One logistic fit:
+2,596 +- 39 (2,613 +- 43 from 2400 and 2700 only): **C800 ~ Stockfish 16 UCI_Elo 2,600 at 100
+ms per move** on a Ryzen 9 9950X3D. The drop to 5% at 3000 is steeper than a logistic: near
+the top of the scale the weakening switches off. Results in artifacts/cpu_sf/.

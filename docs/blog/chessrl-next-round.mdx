@@ -100,7 +100,7 @@ Weight decay is still worth keeping, because it keeps the engine within FP16 ran
 
 We then kept training the 400-simulation recipe with two changes to how self-play games start. The 8 random opening moves were removed. And in the opening, the quick moves (the ones that only move the game forward) are now picked at random from the network's own move probabilities, instead of from a 50-simulation search, which blundered often. Its rating went from about 2,200 to about 2,400. We then continued the same run with 800 simulations per saved move. On the ladder, that continuation stayed about level so far.
 
-Against Stockfish, the network is now far past the first post. In the first post's test, it won all 100 games against Stockfish-1400, and 99 of 100 against Stockfish limited to 2000 Elo. The strongest opponents of the ladder are Stockfish at full strength, limited to a number of positions per move. In rating games, with 100 simulations per move, the network scores about 50% against the one limited to 1,000 positions. With 800 simulations, it won all 10 games we played against it:
+Against Stockfish, the network is now far past the first post. In the first post's test, it won all 100 games against Stockfish-1400, and 99 of 100 against Stockfish limited to 2000 Elo. Raising Stockfish's setting until the games are even, the network scores 50% at about 2,600. The strongest opponents of the ladder are Stockfish at full strength, limited to a number of positions per move. In rating games, with 100 simulations per move, the network scores about 50% against the one limited to 1,000 positions. With 800 simulations, it won all 10 games we played against it:
 
 <ShowcaseGame />
 
