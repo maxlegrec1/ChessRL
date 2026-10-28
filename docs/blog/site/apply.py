@@ -60,6 +60,9 @@ def main() -> None:
         (site / "data" / "blog" / name).write_text(text)
     for fix in ("fix_mobilenav.py", "fix_body.py"):
         subprocess.run([sys.executable, str(HERE / fix), str(site)], check=True)
+    # `next build` lints with the site's Prettier config: reformat the files patched above.
+    patched = ["components/MDXComponents.tsx", "components/MobileNav.tsx", "app/layout.tsx"]
+    subprocess.run([str(site / "node_modules" / ".bin" / "prettier"), "--write", *patched], cwd=site, check=True)
     print("applied to", site, "(published)" if publish else "(follow-up post as a draft)")
 
 
