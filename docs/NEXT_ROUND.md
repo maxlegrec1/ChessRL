@@ -694,3 +694,20 @@ time) because the home GPU was busy. Check against a box match: sims400 @ 60k vs
 2,596 +- 39 (2,613 +- 43 from 2400 and 2700 only): **C800 ~ Stockfish 16 UCI_Elo 2,600 at 100
 ms per move** on a Ryzen 9 9950X3D. The drop to 5% at 3000 is steeper than a logistic: near
 the top of the scale the weakening switches off. Results in artifacts/cpu_sf/.
+
+### The two 24 h baselines (2026-10-27/28)
+
+Side by side, rated live on the balanced-opening ladder (100 sims) with the opening probe; both
+moved once (~5.5 h in) with their buffers to Quebec boxes (wd-q EPYC 9554, main-q EPYC Zen 4 ES;
+main-q runs the original code on PyTorch 2.14.1+cu126). Training hours, downtime excluded:
+
+| | 1,000 Elo | 2,000 Elo | Elo at 24 h | puzzles at 24 h |
+|---|---|---|---|---|
+| base-wd (configs/enc_sims400_wd.yaml) | ~2.1 h | 5.6 h | 2,230 | 70% |
+| base-main (main@128893c) | 12.0 h | never | 1,170 | 27% |
+
+First post's Stockfish test (800 sims, 100 ms/move, start position, 40 games, network on the CPU):
+base-main 15% vs UCI_Elo 1400; base-wd 100% vs 1400 and 79% vs 2000 (31/1/8). With no search
+(0 sims) base-wd scores 42.5% vs 1400, 25% vs 1700, 7.5% vs 2000, and solves 58 of the 286
+puzzles rated 2,000+. An earlier main run needed 21 h to reach 1,000 on the same scale: the
+original code's speed varies a lot between runs.
