@@ -53,10 +53,23 @@ export function ActivationChart() {
 }
 
 export function ShowcaseGame() {
+  const game = boards.game as unknown as BoardLine
+  const n = game.plies.length
+  const est = [game.startMovesLeft ?? 0, ...game.plies.map((p) => p.movesLeft ?? 0)]
+  const movesLeft: Series[] = [
+    { name: "network's estimate", slot: 1, points: est.map((e, k) => [k / 2, e]) },
+    { name: 'actual', slot: 4, points: est.map((_, k) => [k / 2, (n - k) / 2]) },
+  ]
   return (
     <Figure title="No search at all: the network against Stockfish limited to 1400 Elo"
-      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. Pieces by Colin M. L. Burnett.">
-      <ChessBoard line={boards.game as unknown as BoardLine} />
+      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. The network also estimates how many moves the game has left (its moves-left output, read for every position): in the opening it guesses about 20 when 35 to 40 are left, and over the last 10 moves it follows the real count closely. Pieces by Colin M. L. Burnett.">
+      <ChessBoard line={game} />
+      <div className="mt-5">
+        <Legend series={movesLeft} />
+        <LineChart series={movesLeft} xLabel="moves played" yLabel="moves left" xDomain={[0, 41]}
+          yDomain={[0, 45]} xStep={5} yStep={10} height={220} snap={0.3}
+          xFormat={(x) => `after move ${Math.floor(x)}`} yFormat={(y) => y.toFixed(0)} />
+      </div>
     </Figure>
   )
 }

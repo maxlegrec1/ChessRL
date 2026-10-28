@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 import chess
@@ -72,15 +73,29 @@ def puzzle_line(row: dict) -> dict:
             "meta": {"id": row["id"], "rating": row["rating"], "themes": row["themes"]}}
 
 
-def game_line(pgn_path: Path, index: int) -> dict:
+def game_line(pgn_path: Path, index: int, ckpt: str | None = None) -> dict:
     with pgn_path.open() as fh:
         for _ in range(index):
             game = chess.pgn.read_game(fh)
     board = game.board()
-    plies = [ply(board, m) for m in game.mainline_moves()]
+    positions = [board.copy()]
+    plies = []
+    for m in game.mainline_moves():
+        plies.append(ply(board, m))
+        positions.append(board.copy())
     h = game.headers
-    return {"start": game.board().fen(), "plies": plies, "orientation": "white" if "ChessRL" in h["White"] else "black",
-            "white": player(h["White"]), "black": player(h["Black"]), "result": h["Result"]}
+    out = {"start": game.board().fen(), "plies": plies, "orientation": "white" if "ChessRL" in h["White"] else "black",
+           "white": player(h["White"]), "black": player(h["Black"]), "result": h["Result"]}
+    if ckpt:
+        # The network's moves-left estimate for every position (its outcome head, in plies -> moves).
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from src.analysis.engine import Net  # noqa: PLC0415
+
+        est = [round(e / 2, 1) for _, _, e in Net(ckpt, threads=4).evaluate(positions)]
+        out["startMovesLeft"] = est[0]
+        for p, e in zip(plies, est[1:]):
+            p["movesLeft"] = e
+    return out
 
 
 def write_pieces() -> None:
@@ -98,11 +113,12 @@ def main() -> None:
     p.add_argument("--puzzle", nargs="+", required=True, help="puzzle ids, in the order the post shows them")
     p.add_argument("--games", type=Path)
     p.add_argument("--game", type=int, default=1, help="1-based index in the PGN")
+    p.add_argument("--ckpt", help="checkpoint whose moves-left estimate is added to every position of the game")
     a = p.parse_args()
     rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
     data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle}}
     if a.games:
-        data["game"] = game_line(a.games, a.game)
+        data["game"] = game_line(a.games, a.game, a.ckpt)
     OUT.write_text(json.dumps(data, indent=1) + "\n")
     write_pieces()
     print("wrote", OUT.name, PIECES_TS.name, {pid: len(v["plies"]) for pid, v in data["puzzles"].items()},
