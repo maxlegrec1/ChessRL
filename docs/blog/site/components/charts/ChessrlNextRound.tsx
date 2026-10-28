@@ -52,8 +52,17 @@ export function ActivationChart() {
   )
 }
 
+export function SearchGame() {
+  return (
+    <Figure title="With search: the network against Stockfish limited to 2000 Elo"
+      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. Pieces by Colin M. L. Burnett.">
+      <ChessBoard line={boards.games.sf2000 as unknown as BoardLine} />
+    </Figure>
+  )
+}
+
 export function ShowcaseGame() {
-  const game = boards.game as unknown as BoardLine
+  const game = boards.games.sims0 as unknown as BoardLine
   const n = game.plies.length
   const est = [game.startMovesLeft ?? 0, ...game.plies.map((p) => p.movesLeft ?? 0)]
   const movesLeft: Series[] = [

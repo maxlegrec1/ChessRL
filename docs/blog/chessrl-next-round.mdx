@@ -42,7 +42,7 @@ The puzzles show the same gap, on a measure that does not depend on any rating s
 
 <TacticsChart />
 
-**Compared with the first post.** The first post's test is 100 games against Stockfish 16 limited to 1400 Elo, at 100 milliseconds per move, from the normal starting position, with the network searching 800 simulations per move. The first post's best network scored 55%, after about ten days of training.
+**Compared with the first post.** The first post's test: games against Stockfish 16 limited to 1400 Elo, at 100 milliseconds per move, from the normal starting position, with the network searching 800 simulations per move. The first post's best network scored 55% there, after about ten days of training. After 24 hours, the original code scores 15% (40 games), and the new recipe wins all 40. Against Stockfish limited to 2000 Elo, the new recipe still scores 79%.
 
 ## What changed
 
@@ -97,6 +97,10 @@ The hardest puzzle of the set it solves without search is a pawn endgame rated 2
 Without search, the network is about as strong as Stockfish limited to 1400 Elo, at 100 ms per move: it scored 42.5% over 20 games. The first post's best network needed 800 simulations per move to score 55% against the same opponent. Here is one of its wins, as Black: it wins material in the middlegame, promotes a pawn with check on move 29, and mates on move 41.
 
 <ShowcaseGame />
+
+With search, it is much stronger. With 800 simulations per move, it beat Stockfish limited to 2000 Elo in 31 of 40 games (1 draw, 8 losses). In this one it plays White: a knight fork on move 14 wins a rook, and a king hunt ends in mate on move 40.
+
+<SearchGame />
 
 ## What's next
 

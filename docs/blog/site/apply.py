@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 BLOG = HERE.parent
 GROUPS = {
     "ChessrlNextRound": ["SpeedupChart", "TacticsChart", "ActivationChart", "EncoderDiagram", "ShowcaseGame",
-                         "PuzzleBoard"],
+                         "PuzzleBoard", "SearchGame"],
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }

@@ -1,10 +1,10 @@
-"""Board data for the post's game and puzzle (site/components/charts/chessrl-boards.json), and the
+"""Board data for the post's games and puzzles (site/components/charts/chessrl-boards.json), and the
 piece drawings the board uses (site/components/charts/chessPieces.ts).
 
   .venv/bin/python docs/blog/make_boards.py --puzzles puzzles.jsonl --puzzle 02TvL \
-      --games showcase.pgn --game 1
+      --game sims0 sims0.pgn 6 --game sf2000 sf2000.pgn 52 --ckpt step.pt --moves-left sims0
 
---puzzles: rows from scripts/puzzle_scan.py; --games: a PGN from scripts/showcase_games.py.
+--puzzles: rows from scripts/puzzle_scan.py; games: PGNs from scripts/cpu_stockfish_match.py.
 Every position is computed here with python-chess, so the blog's board only draws FENs. The
 pieces are python-chess's SVG set (Colin M. L. Burnett's drawings).
 """
@@ -111,18 +111,19 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--puzzles", type=Path, required=True)
     p.add_argument("--puzzle", nargs="+", required=True, help="puzzle ids, in the order the post shows them")
-    p.add_argument("--games", type=Path)
-    p.add_argument("--game", type=int, default=1, help="1-based index in the PGN")
-    p.add_argument("--ckpt", help="checkpoint whose moves-left estimate is added to every position of the game")
+    p.add_argument("--game", nargs=3, action="append", default=[], metavar=("NAME", "PGN", "INDEX"),
+                   help="a game to show: its name in the post's data, the PGN, its 1-based index there")
+    p.add_argument("--ckpt", help="checkpoint whose moves-left estimate is added to the --moves-left games")
+    p.add_argument("--moves-left", nargs="*", default=[], help="names of the games that get the moves-left estimate")
     a = p.parse_args()
     rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
-    data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle}}
-    if a.games:
-        data["game"] = game_line(a.games, a.game, a.ckpt)
+    data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle},
+                  "games": {name: game_line(Path(pgn), int(idx), a.ckpt if name in a.moves_left else None)
+                            for name, pgn, idx in a.game}}
     OUT.write_text(json.dumps(data, indent=1) + "\n")
     write_pieces()
     print("wrote", OUT.name, PIECES_TS.name, {pid: len(v["plies"]) for pid, v in data["puzzles"].items()},
-          "game", len(data["game"]["plies"]) if "game" in data else None)
+          {name: len(v["plies"]) for name, v in data["games"].items()})
 
 
 if __name__ == "__main__":
