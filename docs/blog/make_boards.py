@@ -93,8 +93,32 @@ def search_scores(ckpt: str, positions: list[chess.Board], sims: int) -> list[fl
     return out
 
 
+def stockfish_scores(positions: list[chess.Board], depth: int) -> list[float]:
+    """White's expected score (win 1, draw 0.5) for each position, from full-strength Stockfish's
+    win/draw/loss estimate at a fixed depth."""
+    import shutil  # noqa: PLC0415
+
+    import chess.engine  # noqa: PLC0415
+
+    sf = chess.engine.SimpleEngine.popen_uci(shutil.which("stockfish") or "/usr/games/stockfish")
+    sf.configure({"Threads": 8, "Hash": 256, "UCI_ShowWDL": True})
+    out = []
+    try:
+        for b in positions:
+            if b.is_checkmate():
+                s = 0.0 if b.turn == chess.WHITE else 1.0
+            elif b.is_game_over(claim_draw=True):
+                s = 0.5
+            else:
+                s = sf.analyse(b, chess.engine.Limit(depth=depth))["wdl"].white().expectation()
+            out.append(round(s, 3))
+    finally:
+        sf.quit()
+    return out
+
+
 def game_line(pgn_path: Path, index: int, ckpt: str | None = None, moves_left: bool = False,
-              search_sims: int = 0) -> dict:
+              search_sims: int = 0, sf_depth: int = 0) -> dict:
     with pgn_path.open() as fh:
         for _ in range(index):
             game = chess.pgn.read_game(fh)
@@ -121,6 +145,11 @@ def game_line(pgn_path: Path, index: int, ckpt: str | None = None, moves_left: b
         out["searchSims"], out["startScore"] = search_sims, scores[0]
         for p, s in zip(plies, scores[1:]):
             p["whiteScore"] = s
+    if sf_depth:
+        scores = stockfish_scores(positions, sf_depth)
+        out["sfDepth"], out["startSfScore"] = sf_depth, scores[0]
+        for p, s in zip(plies, scores[1:]):
+            p["sfWhiteScore"] = s
     return out
 
 
@@ -144,11 +173,15 @@ def main() -> None:
     p.add_argument("--search-score", nargs="*", default=[],
                    help="games that get White's expected score from the network's search, at every position")
     p.add_argument("--search-sims", type=int, default=800)
+    p.add_argument("--stockfish-score", nargs="*", default=[],
+                   help="games that get White's expected score from full-strength Stockfish, at every position")
+    p.add_argument("--stockfish-depth", type=int, default=20)
     a = p.parse_args()
     rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
     data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle},
                   "games": {name: game_line(Path(pgn), int(idx), a.ckpt, name in a.moves_left,
-                                            a.search_sims if name in a.search_score else 0)
+                                            a.search_sims if name in a.search_score else 0,
+                                            a.stockfish_depth if name in a.stockfish_score else 0)
                             for name, pgn, idx in a.game}}
     OUT.write_text(json.dumps(data, indent=1) + "\n")
     write_pieces()

@@ -8,6 +8,7 @@ export type Series = {
   slot: number // categorical palette slot, see charts.css
   dim?: boolean // same entity, de-emphasised (e.g. a second seed)
   dots?: boolean // mark every point (sparse measurements)
+  dotted?: boolean // a dotted line (a reference to compare against)
   points: [number, number][]
 }
 
@@ -41,7 +42,7 @@ export function Legend({ series }: { series: Series[] }) {
         <span key={s.name} className="inline-flex items-center gap-2">
           <svg width="18" height="4" aria-hidden="true">
             <line x1="1" y1="2" x2="17" y2="2" stroke={`var(--cr-s${s.slot})`} strokeWidth="2.5"
-              strokeLinecap="round" opacity={s.dim ? 0.5 : 1} />
+              strokeLinecap="round" opacity={s.dim ? 0.5 : 1} strokeDasharray={s.dotted ? '0.5 4' : undefined} />
           </svg>
           {s.name}
         </span>
@@ -179,8 +180,8 @@ export default function LineChart({
         ))}
         {series.map((s) => (
           <g key={s.name} opacity={s.dim ? 0.5 : 1} clipPath={`url(#${clipId})`}>
-            <path fill="none" stroke={`var(--cr-s${s.slot})`} strokeWidth={2} strokeLinejoin="round"
-              strokeLinecap="round"
+            <path fill="none" stroke={`var(--cr-s${s.slot})`} strokeWidth={s.dotted ? 2.5 : 2} strokeLinejoin="round"
+              strokeLinecap="round" strokeDasharray={s.dotted ? '0.5 5' : undefined}
               d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join('')} />
             {s.dots && s.points.map((p) => (
               <circle key={p[0]} cx={sx(p[0])} cy={sy(p[1])} r={3} fill={`var(--cr-s${s.slot})`} />
@@ -226,7 +227,7 @@ export default function LineChart({
             <div key={s.name} className="flex items-center gap-2 whitespace-nowrap">
               <svg width="14" height="4" aria-hidden="true">
                 <line x1="1" y1="2" x2="13" y2="2" stroke={`var(--cr-s${s.slot})`} strokeWidth="2.5"
-                  strokeLinecap="round" opacity={s.dim ? 0.5 : 1} />
+                  strokeLinecap="round" opacity={s.dim ? 0.5 : 1} strokeDasharray={s.dotted ? '0.5 4' : undefined} />
               </svg>
               <b>{p ? yFormat(p[1]) : '–'}</b>
               <span>{s.name}</span>

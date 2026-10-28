@@ -736,553 +736,632 @@
      "fen": "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1",
      "from": "g1",
      "to": "f3",
-     "whiteScore": 0.612
+     "whiteScore": 0.612,
+     "sfWhiteScore": 0.519
     },
     {
      "san": "c5",
      "fen": "rnbqkbnr/pp1ppppp/8/2p5/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 2",
      "from": "c7",
      "to": "c5",
-     "whiteScore": 0.635
+     "whiteScore": 0.635,
+     "sfWhiteScore": 0.534
     },
     {
      "san": "e4",
      "fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 2",
      "from": "e2",
      "to": "e4",
-     "whiteScore": 0.617
+     "whiteScore": 0.617,
+     "sfWhiteScore": 0.52
     },
     {
      "san": "Nc6",
      "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 1 3",
      "from": "b8",
      "to": "c6",
-     "whiteScore": 0.661
+     "whiteScore": 0.661,
+     "sfWhiteScore": 0.518
     },
     {
      "san": "c3",
      "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/2P2N2/PP1P1PPP/RNBQKB1R b KQkq - 0 3",
      "from": "c2",
      "to": "c3",
-     "whiteScore": 0.65
+     "whiteScore": 0.65,
+     "sfWhiteScore": 0.508
     },
     {
      "san": "Nf6",
      "fen": "r1bqkb1r/pp1ppppp/2n2n2/2p5/4P3/2P2N2/PP1P1PPP/RNBQKB1R w KQkq - 1 4",
      "from": "g8",
      "to": "f6",
-     "whiteScore": 0.794
+     "whiteScore": 0.794,
+     "sfWhiteScore": 0.507
     },
     {
      "san": "e5",
      "fen": "r1bqkb1r/pp1ppppp/2n2n2/2p1P3/8/2P2N2/PP1P1PPP/RNBQKB1R b KQkq - 0 4",
      "from": "e4",
      "to": "e5",
-     "whiteScore": 0.786
+     "whiteScore": 0.786,
+     "sfWhiteScore": 0.508
     },
     {
      "san": "Ng4",
      "fen": "r1bqkb1r/pp1ppppp/2n5/2p1P3/6n1/2P2N2/PP1P1PPP/RNBQKB1R w KQkq - 1 5",
      "from": "f6",
      "to": "g4",
-     "whiteScore": 0.831
+     "whiteScore": 0.831,
+     "sfWhiteScore": 0.888
     },
     {
      "san": "d4",
      "fen": "r1bqkb1r/pp1ppppp/2n5/2p1P3/3P2n1/2P2N2/PP3PPP/RNBQKB1R b KQkq - 0 5",
      "from": "d2",
      "to": "d4",
-     "whiteScore": 0.832
+     "whiteScore": 0.832,
+     "sfWhiteScore": 0.932
     },
     {
      "san": "e6",
      "fen": "r1bqkb1r/pp1p1ppp/2n1p3/2p1P3/3P2n1/2P2N2/PP3PPP/RNBQKB1R w KQkq - 0 6",
      "from": "e7",
      "to": "e6",
-     "whiteScore": 0.861
+     "whiteScore": 0.861,
+     "sfWhiteScore": 0.941
     },
     {
      "san": "h3",
      "fen": "r1bqkb1r/pp1p1ppp/2n1p3/2p1P3/3P2n1/2P2N1P/PP3PP1/RNBQKB1R b KQkq - 0 6",
      "from": "h2",
      "to": "h3",
-     "whiteScore": 0.857
+     "whiteScore": 0.857,
+     "sfWhiteScore": 0.878
     },
     {
      "san": "Nh6",
      "fen": "r1bqkb1r/pp1p1ppp/2n1p2n/2p1P3/3P4/2P2N1P/PP3PP1/RNBQKB1R w KQkq - 1 7",
      "from": "g4",
      "to": "h6",
-     "whiteScore": 0.865
+     "whiteScore": 0.865,
+     "sfWhiteScore": 0.956
     },
     {
      "san": "dxc5",
      "fen": "r1bqkb1r/pp1p1ppp/2n1p2n/2P1P3/8/2P2N1P/PP3PP1/RNBQKB1R b KQkq - 0 7",
      "from": "d4",
      "to": "c5",
-     "whiteScore": 0.84
+     "whiteScore": 0.84,
+     "sfWhiteScore": 0.768
     },
     {
      "san": "Qc7",
      "fen": "r1b1kb1r/ppqp1ppp/2n1p2n/2P1P3/8/2P2N1P/PP3PP1/RNBQKB1R w KQkq - 1 8",
      "from": "d8",
      "to": "c7",
-     "whiteScore": 0.879
+     "whiteScore": 0.879,
+     "sfWhiteScore": 0.996
     },
     {
      "san": "Na3",
      "fen": "r1b1kb1r/ppqp1ppp/2n1p2n/2P1P3/8/N1P2N1P/PP3PP1/R1BQKB1R b KQkq - 2 8",
      "from": "b1",
      "to": "a3",
-     "whiteScore": 0.868
+     "whiteScore": 0.868,
+     "sfWhiteScore": 0.997
     },
     {
      "san": "Nxe5",
      "fen": "r1b1kb1r/ppqp1ppp/4p2n/2P1n3/8/N1P2N1P/PP3PP1/R1BQKB1R w KQkq - 0 9",
      "from": "c6",
      "to": "e5",
-     "whiteScore": 0.844
+     "whiteScore": 0.844,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nb5",
      "fen": "r1b1kb1r/ppqp1ppp/4p2n/1NP1n3/8/2P2N1P/PP3PP1/R1BQKB1R b KQkq - 1 9",
      "from": "a3",
      "to": "b5",
-     "whiteScore": 0.839
+     "whiteScore": 0.839,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qxc5",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1Nq1n3/8/2P2N1P/PP3PP1/R1BQKB1R w KQkq - 0 10",
      "from": "c7",
      "to": "c5",
-     "whiteScore": 0.882
+     "whiteScore": 0.882,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Be3",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1Nq1n3/8/2P1BN1P/PP3PP1/R2QKB1R b KQkq - 1 10",
      "from": "c1",
      "to": "e3",
-     "whiteScore": 0.877
+     "whiteScore": 0.877,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nxf3+",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1Nq5/8/2P1Bn1P/PP3PP1/R2QKB1R w KQkq - 0 11",
      "from": "e5",
      "to": "f3",
-     "whiteScore": 0.88
+     "whiteScore": 0.88,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qxf3",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1Nq5/8/2P1BQ1P/PP3PP1/R3KB1R b KQkq - 0 11",
      "from": "d1",
      "to": "f3",
-     "whiteScore": 0.874
+     "whiteScore": 0.874,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qe5",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1N2q3/8/2P1BQ1P/PP3PP1/R3KB1R w KQkq - 1 12",
      "from": "c5",
      "to": "e5",
-     "whiteScore": 0.91
+     "whiteScore": 0.91,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "O-O-O",
      "fen": "r1b1kb1r/pp1p1ppp/4p2n/1N2q3/8/2P1BQ1P/PP3PP1/2KR1B1R b kq - 2 12",
      "from": "e1",
      "to": "c1",
-     "whiteScore": 0.928
+     "whiteScore": 0.928,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bc5",
      "fen": "r1b1k2r/pp1p1ppp/4p2n/1Nb1q3/8/2P1BQ1P/PP3PP1/2KR1B1R w kq - 3 13",
      "from": "f8",
      "to": "c5",
-     "whiteScore": 0.916
+     "whiteScore": 0.916,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bf4",
      "fen": "r1b1k2r/pp1p1ppp/4p2n/1Nb1q3/5B2/2P2Q1P/PP3PP1/2KR1B1R b kq - 4 13",
      "from": "e3",
      "to": "f4",
-     "whiteScore": 0.915
+     "whiteScore": 0.915,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qf6",
      "fen": "r1b1k2r/pp1p1ppp/4pq1n/1Nb5/5B2/2P2Q1P/PP3PP1/2KR1B1R w kq - 5 14",
      "from": "e5",
      "to": "f6",
-     "whiteScore": 0.919
+     "whiteScore": 0.919,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nc7+",
      "fen": "r1b1k2r/ppNp1ppp/4pq1n/2b5/5B2/2P2Q1P/PP3PP1/2KR1B1R b kq - 6 14",
      "from": "b5",
      "to": "c7",
-     "whiteScore": 0.911
+     "whiteScore": 0.911,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kf8",
      "fen": "r1b2k1r/ppNp1ppp/4pq1n/2b5/5B2/2P2Q1P/PP3PP1/2KR1B1R w - - 7 15",
      "from": "e8",
      "to": "f8",
-     "whiteScore": 0.935
+     "whiteScore": 0.935,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nxa8",
      "fen": "N1b2k1r/pp1p1ppp/4pq1n/2b5/5B2/2P2Q1P/PP3PP1/2KR1B1R b - - 0 15",
      "from": "c7",
      "to": "a8",
-     "whiteScore": 0.923
+     "whiteScore": 0.923,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "d5",
      "fen": "N1b2k1r/pp3ppp/4pq1n/2bp4/5B2/2P2Q1P/PP3PP1/2KR1B1R w - - 0 16",
      "from": "d7",
      "to": "d5",
-     "whiteScore": 0.962
+     "whiteScore": 0.962,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "g4",
      "fen": "N1b2k1r/pp3ppp/4pq1n/2bp4/5BP1/2P2Q1P/PP3P2/2KR1B1R b - - 0 16",
      "from": "g2",
      "to": "g4",
-     "whiteScore": 0.945
+     "whiteScore": 0.945,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "e5",
      "fen": "N1b2k1r/pp3ppp/5q1n/2bpp3/5BP1/2P2Q1P/PP3P2/2KR1B1R w - - 0 17",
      "from": "e6",
      "to": "e5",
-     "whiteScore": 0.969
+     "whiteScore": 0.969,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rxd5",
      "fen": "N1b2k1r/pp3ppp/5q1n/2bRp3/5BP1/2P2Q1P/PP3P2/2K2B1R b - - 0 17",
      "from": "d1",
      "to": "d5",
-     "whiteScore": 0.985
+     "whiteScore": 0.985,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qxf4+",
      "fen": "N1b2k1r/pp3ppp/7n/2bRp3/5qP1/2P2Q1P/PP3P2/2K2B1R w - - 0 18",
      "from": "f6",
      "to": "f4",
-     "whiteScore": 0.979
+     "whiteScore": 0.979,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Qxf4",
      "fen": "N1b2k1r/pp3ppp/7n/2bRp3/5QP1/2P4P/PP3P2/2K2B1R b - - 0 18",
      "from": "f3",
      "to": "f4",
-     "whiteScore": 0.978
+     "whiteScore": 0.978,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "exf4",
      "fen": "N1b2k1r/pp3ppp/7n/2bR4/5pP1/2P4P/PP3P2/2K2B1R w - - 0 19",
      "from": "e5",
      "to": "f4",
-     "whiteScore": 0.983
+     "whiteScore": 0.983,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rd8+",
      "fen": "N1bR1k1r/pp3ppp/7n/2b5/5pP1/2P4P/PP3P2/2K2B1R b - - 1 19",
      "from": "d5",
      "to": "d8",
-     "whiteScore": 0.983
+     "whiteScore": 0.983,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ke7",
      "fen": "N1bR3r/pp2kppp/7n/2b5/5pP1/2P4P/PP3P2/2K2B1R w - - 2 20",
      "from": "f8",
      "to": "e7",
-     "whiteScore": 0.983
+     "whiteScore": 0.983,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rxh8",
      "fen": "N1b4R/pp2kppp/7n/2b5/5pP1/2P4P/PP3P2/2K2B1R b - - 0 20",
      "from": "d8",
      "to": "h8",
-     "whiteScore": 0.979
+     "whiteScore": 0.979,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bd7",
      "fen": "N6R/pp1bkppp/7n/2b5/5pP1/2P4P/PP3P2/2K2B1R w - - 1 21",
      "from": "c8",
      "to": "d7",
-     "whiteScore": 0.984
+     "whiteScore": 0.984,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bg2",
      "fen": "N6R/pp1bkppp/7n/2b5/5pP1/2P4P/PP3PB1/2K4R b - - 2 21",
      "from": "f1",
      "to": "g2",
-     "whiteScore": 0.976
+     "whiteScore": 0.976,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bxg4",
      "fen": "N6R/pp2kppp/7n/2b5/5pb1/2P4P/PP3PB1/2K4R w - - 0 22",
      "from": "d7",
      "to": "g4",
-     "whiteScore": 0.991
+     "whiteScore": 0.991,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "hxg4",
      "fen": "N6R/pp2kppp/7n/2b5/5pP1/2P5/PP3PB1/2K4R b - - 0 22",
      "from": "h3",
      "to": "g4",
-     "whiteScore": 0.987
+     "whiteScore": 0.987,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nxg4",
      "fen": "N6R/pp2kppp/8/2b5/5pn1/2P5/PP3PB1/2K4R w - - 0 23",
      "from": "h6",
      "to": "g4",
-     "whiteScore": 0.989
+     "whiteScore": 0.989,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rc8",
      "fen": "N1R5/pp2kppp/8/2b5/5pn1/2P5/PP3PB1/2K4R b - - 1 23",
      "from": "h8",
      "to": "c8",
-     "whiteScore": 0.982
+     "whiteScore": 0.982,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bd6",
      "fen": "N1R5/pp2kppp/3b4/8/5pn1/2P5/PP3PB1/2K4R w - - 2 24",
      "from": "c5",
      "to": "d6",
-     "whiteScore": 0.99
+     "whiteScore": 0.99,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bf3",
      "fen": "N1R5/pp2kppp/3b4/8/5pn1/2P2B2/PP3P2/2K4R b - - 3 24",
      "from": "g2",
      "to": "f3",
-     "whiteScore": 0.986
+     "whiteScore": 0.986,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ne5",
      "fen": "N1R5/pp2kppp/3b4/4n3/5p2/2P2B2/PP3P2/2K4R w - - 4 25",
      "from": "g4",
      "to": "e5",
-     "whiteScore": 0.986
+     "whiteScore": 0.986,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Be4",
      "fen": "N1R5/pp2kppp/3b4/4n3/4Bp2/2P5/PP3P2/2K4R b - - 5 25",
      "from": "f3",
      "to": "e4",
-     "whiteScore": 0.985
+     "whiteScore": 0.985,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "f3",
      "fen": "N1R5/pp2kppp/3b4/4n3/4B3/2P2p2/PP3P2/2K4R w - - 0 26",
      "from": "f4",
      "to": "f3",
-     "whiteScore": 0.988
+     "whiteScore": 0.988,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nc7",
      "fen": "2R5/ppN1kppp/3b4/4n3/4B3/2P2p2/PP3P2/2K4R b - - 1 26",
      "from": "a8",
      "to": "c7",
-     "whiteScore": 0.986
+     "whiteScore": 0.986,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "h6",
      "fen": "2R5/ppN1kpp1/3b3p/4n3/4B3/2P2p2/PP3P2/2K4R w - - 0 27",
      "from": "h7",
      "to": "h6",
-     "whiteScore": 0.993
+     "whiteScore": 0.993,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nd5+",
      "fen": "2R5/pp2kpp1/3b3p/3Nn3/4B3/2P2p2/PP3P2/2K4R b - - 1 27",
      "from": "c7",
      "to": "d5",
-     "whiteScore": 0.99
+     "whiteScore": 0.99,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ke6",
      "fen": "2R5/pp3pp1/3bk2p/3Nn3/4B3/2P2p2/PP3P2/2K4R w - - 2 28",
      "from": "e7",
      "to": "e6",
-     "whiteScore": 0.992
+     "whiteScore": 0.992,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nf4+",
      "fen": "2R5/pp3pp1/3bk2p/4n3/4BN2/2P2p2/PP3P2/2K4R b - - 3 28",
      "from": "d5",
      "to": "f4",
-     "whiteScore": 0.988
+     "whiteScore": 0.988,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kf6",
      "fen": "2R5/pp3pp1/3b1k1p/4n3/4BN2/2P2p2/PP3P2/2K4R w - - 4 29",
      "from": "e6",
      "to": "f6",
-     "whiteScore": 0.991
+     "whiteScore": 0.991,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Nd5+",
      "fen": "2R5/pp3pp1/3b1k1p/3Nn3/4B3/2P2p2/PP3P2/2K4R b - - 5 29",
      "from": "f4",
      "to": "d5",
-     "whiteScore": 0.988
+     "whiteScore": 0.988,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ke6",
      "fen": "2R5/pp3pp1/3bk2p/3Nn3/4B3/2P2p2/PP3P2/2K4R w - - 6 30",
      "from": "f6",
      "to": "e6",
-     "whiteScore": 0.989
+     "whiteScore": 0.989,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Re8+",
      "fen": "4R3/pp3pp1/3bk2p/3Nn3/4B3/2P2p2/PP3P2/2K4R b - - 7 30",
      "from": "c8",
      "to": "e8",
-     "whiteScore": 0.986
+     "whiteScore": 0.986,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kd7",
      "fen": "4R3/pp1k1pp1/3b3p/3Nn3/4B3/2P2p2/PP3P2/2K4R w - - 8 31",
      "from": "e6",
      "to": "d7",
-     "whiteScore": 0.989
+     "whiteScore": 0.989,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rxe5",
      "fen": "8/pp1k1pp1/3b3p/3NR3/4B3/2P2p2/PP3P2/2K4R b - - 0 31",
      "from": "e8",
      "to": "e5",
-     "whiteScore": 0.985
+     "whiteScore": 0.985,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kc8",
      "fen": "2k5/pp3pp1/3b3p/3NR3/4B3/2P2p2/PP3P2/2K4R w - - 1 32",
      "from": "d7",
      "to": "c8",
-     "whiteScore": 0.991
+     "whiteScore": 0.991,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Re8+",
      "fen": "2k1R3/pp3pp1/3b3p/3N4/4B3/2P2p2/PP3P2/2K4R b - - 2 32",
      "from": "e5",
      "to": "e8",
-     "whiteScore": 0.993
+     "whiteScore": 0.993,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kd7",
      "fen": "4R3/pp1k1pp1/3b3p/3N4/4B3/2P2p2/PP3P2/2K4R w - - 3 33",
      "from": "c8",
      "to": "d7",
-     "whiteScore": 0.995
+     "whiteScore": 0.995,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rg8",
      "fen": "6R1/pp1k1pp1/3b3p/3N4/4B3/2P2p2/PP3P2/2K4R b - - 4 33",
      "from": "e8",
      "to": "g8",
-     "whiteScore": 0.995
+     "whiteScore": 0.995,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kc6",
      "fen": "6R1/pp3pp1/2kb3p/3N4/4B3/2P2p2/PP3P2/2K4R w - - 5 34",
      "from": "d7",
      "to": "c6",
-     "whiteScore": 0.999
+     "whiteScore": 0.999,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rc8+",
      "fen": "2R5/pp3pp1/2kb3p/3N4/4B3/2P2p2/PP3P2/2K4R b - - 6 34",
      "from": "g8",
      "to": "c8",
-     "whiteScore": 0.997
+     "whiteScore": 0.997,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kb5",
      "fen": "2R5/pp3pp1/3b3p/1k1N4/4B3/2P2p2/PP3P2/2K4R w - - 7 35",
      "from": "c6",
      "to": "b5",
-     "whiteScore": 0.998
+     "whiteScore": 0.998,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bd3+",
      "fen": "2R5/pp3pp1/3b3p/1k1N4/8/2PB1p2/PP3P2/2K4R b - - 8 35",
      "from": "e4",
      "to": "d3",
-     "whiteScore": 0.998
+     "whiteScore": 0.998,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ka5",
      "fen": "2R5/pp3pp1/3b3p/k2N4/8/2PB1p2/PP3P2/2K4R w - - 9 36",
      "from": "b5",
      "to": "a5",
-     "whiteScore": 0.999
+     "whiteScore": 0.999,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "b4+",
      "fen": "2R5/pp3pp1/3b3p/k2N4/1P6/2PB1p2/P4P2/2K4R b - - 0 36",
      "from": "b2",
      "to": "b4",
-     "whiteScore": 0.998
+     "whiteScore": 0.998,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ka4",
      "fen": "2R5/pp3pp1/3b3p/3N4/kP6/2PB1p2/P4P2/2K4R w - - 1 37",
      "from": "a5",
      "to": "a4",
-     "whiteScore": 0.997
+     "whiteScore": 0.997,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ra8",
      "fen": "R7/pp3pp1/3b3p/3N4/kP6/2PB1p2/P4P2/2K4R b - - 2 37",
      "from": "c8",
      "to": "a8",
-     "whiteScore": 0.995
+     "whiteScore": 0.995,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bf4+",
      "fen": "R7/pp3pp1/7p/3N4/kP3b2/2PB1p2/P4P2/2K4R w - - 3 38",
      "from": "d6",
      "to": "f4",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Kb2",
      "fen": "R7/pp3pp1/7p/3N4/kP3b2/2PB1p2/PK3P2/7R b - - 4 38",
      "from": "c1",
      "to": "b2",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Bc7",
      "fen": "R7/ppb2pp1/7p/3N4/kP6/2PB1p2/PK3P2/7R w - - 5 39",
      "from": "f4",
      "to": "c7",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rxa7+",
      "fen": "8/Rpb2pp1/7p/3N4/kP6/2PB1p2/PK3P2/7R b - - 0 39",
      "from": "a8",
      "to": "a7",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Ba5",
      "fen": "8/Rp3pp1/7p/b2N4/kP6/2PB1p2/PK3P2/7R w - - 1 40",
      "from": "c7",
      "to": "a5",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     },
     {
      "san": "Rxa5#",
      "fen": "8/1p3pp1/7p/R2N4/kP6/2PB1p2/PK3P2/7R b - - 0 40",
      "from": "a7",
      "to": "a5",
-     "whiteScore": 1.0
+     "whiteScore": 1.0,
+     "sfWhiteScore": 1.0
     }
    ],
    "orientation": "white",
@@ -1290,7 +1369,9 @@
    "black": "Stockfish 16 limited to 2000 Elo, 100 ms per move",
    "result": "1-0",
    "searchSims": 800,
-   "startScore": 0.616
+   "startScore": 0.616,
+   "sfDepth": 20,
+   "startSfScore": 0.522
   }
  }
 }

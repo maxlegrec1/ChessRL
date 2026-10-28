@@ -59,13 +59,19 @@ const toPly = (x: number) => Math.round(x * 2)
 export function SearchGame() {
   const game = boards.games.sf2000 as unknown as BoardLine
   const [k, setK] = useState(0)
-  const score: Series[] = [{
-    name: "White's expected score, by the network's search", slot: 1,
-    points: [game.startScore ?? 0.5, ...game.plies.map((p) => p.whiteScore ?? 0.5)].map((s, j) => [j / 2, s]),
-  }]
+  const score: Series[] = [
+    {
+      name: "the network's search (800 simulations)", slot: 1,
+      points: [game.startScore ?? 0.5, ...game.plies.map((p) => p.whiteScore ?? 0.5)].map((s, j) => [j / 2, s]),
+    },
+    {
+      name: 'Stockfish 16 at full strength (depth 20)', slot: 2, dotted: true,
+      points: [game.startSfScore ?? 0.5, ...game.plies.map((p) => p.sfWhiteScore ?? 0.5)].map((s, j) => [j / 2, s]),
+    },
+  ]
   return (
     <Figure title="With search: the network against Stockfish limited to 2000 Elo"
-      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. For every position, the network's own 800-simulation search also gives White's expected score (a win counts 1, a draw half): 62% at the start, above 90% after the knight fork, and above 97% from move 18 on. Click the chart to see a position. Pieces by Colin M. L. Burnett.">
+      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. The chart shows White's expected score at every position (a win counts 1, a draw half), from the network's own search and, dotted, from Stockfish at full strength. Stockfish sees an even game until 4…Ng4, a weak move by the limited Stockfish, and a won game for White from move 7. The network's search is more optimistic at the start (62% against 52%), and slower to see the win: it passes 90% on move 11. Click the chart to see a position.">
       <ChessBoard line={game} ply={k} onPly={setK} />
       <div className="mt-5">
         <Legend series={score} />
@@ -89,7 +95,7 @@ export function ShowcaseGame() {
   ]
   return (
     <Figure title="No search at all: the network against Stockfish limited to 1400 Elo"
-      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. The network also estimates how many moves the game has left (its moves-left output, read for every position): in the opening it guesses about 20 when 35 to 40 are left, and over the last 10 moves it follows the real count closely. Click the chart to see a position. Pieces by Colin M. L. Burnett.">
+      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. The network also estimates how many moves the game has left (its moves-left output, read for every position): in the opening it guesses about 20 when 35 to 40 are left, and over the last 10 moves it follows the real count closely. Click the chart to see a position.">
       <ChessBoard line={game} ply={k} onPly={setK} />
       <div className="mt-5">
         <Legend series={movesLeft} />
@@ -106,7 +112,7 @@ export function PuzzleBoard({ id }: { id: keyof typeof boards.puzzles }) {
   const line = boards.puzzles[id] as unknown as BoardLine & { meta: { rating: number } }
   return (
     <Figure title={`A puzzle rated ${line.meta.rating.toLocaleString('en-US')}, solved without search`}
-      caption={`Lichess puzzle ${id}. Every move of the solution is the network's first choice, with no search. Pieces by Colin M. L. Burnett.`}>
+      caption={`Lichess puzzle ${id}. Every move of the solution is the network's first choice, with no search.`}>
       <ChessBoard line={line} />
     </Figure>
   )

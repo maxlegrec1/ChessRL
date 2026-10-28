@@ -16,6 +16,7 @@ export type Ply = {
   net?: { alone: number; search: number; favourite?: string; favouriteAlone?: number }
   movesLeft?: number // games: the network's estimate of the moves left after this ply
   whiteScore?: number // games: White's expected score after this ply, from the network's search
+  sfWhiteScore?: number // games: the same from full-strength Stockfish
 }
 export type BoardLine = {
   start: string
@@ -29,6 +30,8 @@ export type BoardLine = {
   startMovesLeft?: number // the network's moves-left estimate for the starting position
   startScore?: number // White's expected score at the starting position, from the network's search
   searchSims?: number
+  startSfScore?: number // the same from full-strength Stockfish
+  sfDepth?: number
 }
 
 const FILES = 'abcdefgh'
@@ -54,13 +57,13 @@ function mover(fen: string): { n: number; white: boolean } {
 
 const pct = (x: number) => `${Math.round(100 * x)}%`
 
-function Bar({ label, value, strong }: { label: string; value: number; strong?: boolean }) {
+function Bar({ label, value, strong, color }: { label: string; value: number; strong?: boolean; color?: string }) {
   return (
     <div className="flex items-center gap-3">
       <span className="w-32 shrink-0 text-gray-600 dark:text-gray-400">{label}</span>
       <span className="h-2.5 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
         <span className="block h-full rounded-full" style={{ width: pct(value),
-          background: strong ? 'var(--cr-s1)' : 'var(--cr-axis)' }} />
+          background: color ?? (strong ? 'var(--cr-s1)' : 'var(--cr-axis)') }} />
       </span>
       <span className="w-10 text-right tabular-nums text-gray-900 dark:text-gray-100">{pct(value)}</span>
     </div>
@@ -191,10 +194,11 @@ export default function ChessBoard({ line, ply, onPly }: { line: BoardLine; ply?
         )}
         {line.startScore !== undefined && (
           <div className="space-y-1 rounded-md bg-gray-50 p-3 dark:bg-gray-900">
-            <Bar label="White's score" value={i === 0 ? line.startScore : (last?.whiteScore ?? 0)} strong />
-            <p className="text-gray-600 dark:text-gray-400">
-              expected by the network&apos;s search ({line.searchSims} simulations); a draw counts half
-            </p>
+            <p className="text-gray-600 dark:text-gray-400">White&apos;s expected score (a draw counts half)</p>
+            <Bar label="network's search" value={i === 0 ? line.startScore : (last?.whiteScore ?? 0)} strong />
+            {line.startSfScore !== undefined && (
+              <Bar label="Stockfish" value={i === 0 ? line.startSfScore : (last?.sfWhiteScore ?? 0)} color="var(--cr-s2)" />
+            )}
           </div>
         )}
         {line.startMovesLeft !== undefined && (
