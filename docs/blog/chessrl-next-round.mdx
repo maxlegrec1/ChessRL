@@ -2,6 +2,7 @@
 title: 'ChessRL, continued: 6× faster self-play learning on a single RTX 4090'
 date: '2026-10-28'
 tags: ['chess', 'machine-learning', 'reinforcement-learning']
+authors: ['default', 'claude']
 draft: true
 summary: 'Continued improvements to my from-scratch AlphaZero, done largely by an AI agent. On the same GPU, in the same 24 hours, the original code reaches 1,170 Elo and the new recipe 2,230, and it gets to 1,000 Elo about 6 times faster. Also: an FP16 bug that made a healthy network look like it was getting worse.'
 ---
@@ -112,12 +113,14 @@ More improvements are coming. Here is what I'm thinking about:
 - **Further architecture optimisations.**
 - **Quantisation**: running the network with fewer bits, to make each search cheaper.
 
+## Code
+
+The code (the fixes, the transformer, the rating ladder and the dashboard) is on **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, with the agent's full lab log in `docs/NEXT_ROUND.md`.
+
 ## Credits and resources
 
-- **The code**: the fixes, the transformer, the rating ladder and the dashboard are on the `worktree-next-round` branch of **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, with the agent's full lab log in `docs/NEXT_ROUND.md`.
 - **[AlphaZero](https://www.science.org/doi/10.1126/science.aar6404)** (Silver et al., 2018), the method this project reproduces at a small scale, and **[Leela Chess Zero](https://lczero.org)**, for ideas such as the win/draw/loss and moves-left outputs.
 - **[Stockfish 16](https://stockfishchess.org)**: the reference opponents of the rating ladder, the balanced openings, the test games and the analysis of the games above.
 - **The [Lichess puzzle database](https://database.lichess.org/#puzzles)**: the 1,000 puzzles.
 - **[python-chess](https://python-chess.readthedocs.io)** by Niklas Fiekas: the chess rules in the Python tools, and the chess pieces drawn by Colin M. L. Burnett that the boards above use.
 - **PyTorch** for training, and **NVIDIA TensorRT** for running the network fast.
-- **[Claude Code](https://claude.com/claude-code)** (Anthropic): the AI agent that did most of this work.

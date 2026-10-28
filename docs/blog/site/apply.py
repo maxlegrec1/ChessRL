@@ -3,9 +3,9 @@
     python3 docs/blog/site/apply.py <site dir>             # preview: the follow-up post stays a draft
     python3 docs/blog/site/apply.py <site dir> --publish   # the follow-up post goes live
 
-Copies components/charts/, registers the chart and diagram components in
-components/MDXComponents.tsx, copies both posts into data/blog/, and applies the mobile-menu
-hydration fix (fix_mobilenav.py).
+Copies components/charts/ and the follow-up post's extra author (authors/, images/), registers the
+chart and diagram components in components/MDXComponents.tsx, copies both posts into data/blog/,
+and applies the mobile-menu hydration fix (fix_mobilenav.py).
 """
 
 import re
@@ -47,6 +47,11 @@ def main() -> None:
     for f in (HERE / "components" / "charts").iterdir():
         shutil.copy(f, charts / f.name)
     register(site / "components" / "MDXComponents.tsx")
+    # The extra author of the follow-up post (Claude) and its avatar.
+    for f in (HERE / "authors").glob("*.mdx"):
+        shutil.copy(f, site / "data" / "authors" / f.name)
+    for f in (HERE / "images").iterdir():
+        shutil.copy(f, site / "public" / "static" / "images" / f.name)
     for name, draft in POSTS.items():
         text = (BLOG / name).read_text()
         text = re.sub(r"^draft: (true|false)$", f"draft: {'true' if draft and not publish else 'false'}", text,
