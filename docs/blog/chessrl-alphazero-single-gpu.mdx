@@ -37,15 +37,15 @@ Files sound primitive, but they make the system robust. Either process can crash
 
 Each self-play move becomes one record of exactly 832 bytes:
 
-| offset | size | field |
-| ------ | ---- | ----- |
-| 0 | 777 | input planes (111 × 8 × 8, packed) |
-| 777 | 1 | side to move |
-| 778 | 4 | policy target (index of the move the search chose) |
-| 782 | 2 | value target: result of the game (win / draw / loss) |
-| 784 | 2 | value_q target: the search's estimate of the position |
-| 786 | 2 | moves-left target (plies until the end of the game) |
-| 788 | 44 | metadata (game id, ply, …) |
+| offset | size | field                                                 |
+| ------ | ---- | ----------------------------------------------------- |
+| 0      | 777  | input planes (111 × 8 × 8, packed)                    |
+| 777    | 1    | side to move                                          |
+| 778    | 4    | policy target (index of the move the search chose)    |
+| 782    | 2    | value target: result of the game (win / draw / loss)  |
+| 784    | 2    | value_q target: the search's estimate of the position |
+| 786    | 2    | moves-left target (plies until the end of the game)   |
+| 788    | 44   | metadata (game id, ply, …)                            |
 
 The buffer holds **2 million records (about 1.7 GB)**. Once it is full, each new record replaces a random old one. Because every record has the same size, the trainer can map the file into memory and index it like an array: no serialisation format, no database, no queue. A game's records are all written at once when the game ends, which matters later (see the pacing bugs).
 
@@ -71,12 +71,12 @@ Self-play is where the computation goes, so it is where the engineering went.
 
 **Batched search with virtual loss.** Classic MCTS is sequential: go down the tree, evaluate one position, update the tree, repeat. That leaves the GPU working on batches of about one position. The fix is to go down the tree **8 times before evaluating** (`virtual_loss_width=8`). Each path in progress gets a temporary penalty (a "virtual loss") so that the next descents explore other moves. Across the 1,024 games, the batches sent to the GPU average about 127 positions. On my benchmark:
 
-| metric | width = 1 | width = 8 | change |
-| ------ | --------: | --------: | -----: |
-| positions/sec | 168 | 356 | **+112%** |
-| nodes/sec | 134,619 | 285,117 | +112% |
-| mean batch size | 46.5 | 127.3 | +174% |
-| ms/batch | 0.88 | 0.99 | +12% |
+| metric          | width = 1 | width = 8 |    change |
+| --------------- | --------: | --------: | --------: |
+| positions/sec   |       168 |       356 | **+112%** |
+| nodes/sec       |   134,619 |   285,117 |     +112% |
+| mean batch size |      46.5 |     127.3 |     +174% |
+| ms/batch        |      0.88 |      0.99 |      +12% |
 
 The search gets slightly blurrier, because the 8 descents cannot see each other's results, so this is a real trade-off: width 48 gave no extra speed and lost a lot of Elo. Width 8 was the best setting.
 

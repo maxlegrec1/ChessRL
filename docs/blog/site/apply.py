@@ -1,7 +1,9 @@
 """Apply the two ChessRL posts and their native charts to a copy of mvdbk-site (idempotent).
 
-    python3 docs/blog/site/apply.py <site dir>             # preview: the follow-up post stays a draft
-    python3 docs/blog/site/apply.py <site dir> --publish   # the follow-up post goes live
+    python3 docs/blog/site/apply.py <site dir>             # posts marked True in POSTS stay drafts
+    python3 docs/blog/site/apply.py <site dir> --publish   # every post goes live
+
+Both posts are published (mvdbk.fr); a new post starts as a draft by adding it to POSTS with True.
 
 Copies components/charts/ and the follow-up post's extra author (authors/, images/), registers the
 chart and diagram components in components/MDXComponents.tsx, copies both posts into data/blog/,
@@ -23,7 +25,7 @@ GROUPS = {
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }
-POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "chessrl-next-round.mdx": True}  # name -> draft in preview
+POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "chessrl-next-round.mdx": False}  # name -> draft in preview
 
 
 def register(path: Path) -> None:
