@@ -1,0 +1,9 @@
+# Encoder, from scratch: the sims-400 recipe + decoupled weight decay (the only change).
+# Without decay the encoder's residual stream grew all run (max |x| into the final
+# norm 46 at 10k steps -> 349 at 45.5k), which overflowed the FP16 engine and may
+# also slow learning. AdamW, decay 0.05 on matrices only (norms, biases and gains
+# are exempt): at LR 1e-3 that shrinks weights by ~5e-5 per step.
+# Same box as enc_sims400 seed 1 (armA): compare in hours and in records.
+extends: enc_sims400.yaml
+optimizer: adamw
+weight_decay: 0.05

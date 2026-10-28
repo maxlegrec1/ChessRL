@@ -30,6 +30,62 @@ struct SelfPlayConfig
     bool save_pgn = false;
     std::string pgn_dir = "pgns";
     int random_opening_plies = 0; // 0 = always start from the standard startpos
+
+    // ---- Next-round signal fixes. Defaults reproduce the main-branch behaviour. ----
+    // Root temperature_at_root applies to the first `temperature_plies` MCTS plies
+    // of a game; afterwards `temperature_late` (0 = argmax). -1 = whole game.
+    int temperature_plies = -1;
+    float temperature_late = 0.0f;
+    // Resign when the side to move's root expected score (W + D/2) stays below
+    // `resign_threshold` for `resign_consecutive` of its own moves. 0 disables.
+    // A `resign_playthrough` fraction of games never resigns; they measure the
+    // false-positive rate (would-resign side that did not lose).
+    float resign_threshold = 0.0f;
+    int resign_consecutive = 2;
+    float resign_playthrough = 0.1f;
+    int max_plies = 600;
+    // Playout-cap randomization (KataGo): each move gets a full search with
+    // probability `pcr_full_prob`, else a `pcr_fast_simulations` search with no
+    // root noise whose position is not written to the buffer. 1.0 = off.
+    float pcr_full_prob = 1.0f;
+    int pcr_fast_simulations = 100;
+    // > 0: while the played move is sampled (the first `temperature_plies`), a cheap
+    // move skips its search and samples the raw policy at this temperature (one
+    // network evaluation). Sampling the visit counts of a 50-sim search played far
+    // worse moves than the raw policy (its visits are much flatter). 0 = off.
+    float quick_policy_temperature = 0.0f;
+    // true = ring buffer (overwrite oldest); false = random replacement when full.
+    bool fifo_buffer = false;
+    // Rules-only curriculum: with this probability a game starts from a random
+    // legal position with two kings and 1..curriculum_max_pieces other pieces.
+    float curriculum_prob = 0.0f;
+    int curriculum_max_pieces = 4;
+};
+
+// Cumulative self-play statistics, also persisted to `<output_path>.stats.json`.
+struct SelfPlayStats
+{
+    int64_t games = 0;
+    int64_t white_wins = 0;
+    int64_t black_wins = 0;
+    int64_t draws = 0;
+    int64_t game_plies = 0;          // sum of MCTS plies over finished games
+    int64_t end_checkmate = 0;
+    int64_t end_stalemate = 0;
+    int64_t end_insufficient = 0;
+    int64_t end_fifty = 0;
+    int64_t end_repetition = 0;
+    int64_t end_max_plies = 0;
+    int64_t end_resign = 0;
+    int64_t playthrough_games = 0;
+    int64_t playthrough_would_resign = 0;   // sides that would have resigned
+    int64_t playthrough_false_resign = 0;   // ... and then did not lose
+    int64_t curriculum_games = 0;
+    int64_t full_searches = 0;
+    int64_t fast_searches = 0;
+    int64_t policy_moves = 0;  // cheap moves sampled from the raw policy (no search)
+    int64_t records_written = 0;
+    int64_t engine_swaps = 0;
 };
 
 struct SelfPlayMetrics
@@ -67,6 +123,17 @@ public:
 
     // Get approximate number of positions in buffer
     size_t get_buffer_size() const;
+
+    // Swap the TensorRT engine between steps. Games in progress keep going
+    // (rebuilding the worker would discard them and their pending records).
+    void set_engine(const std::string& engine_path);
+
+    // Update search / game-policy settings between steps (schedules driven by
+    // the Python side). Paths, board count, threads, hash and buffer layout
+    // keep their construction-time values.
+    void set_config(const SelfPlayConfig& config);
+
+    SelfPlayStats stats() const;
 
 private:
     struct Impl;

@@ -42,8 +42,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_BASE_CONFIG,
-        help="Base YAML config (paths inside it are overridden per-run).",
+        default=None,
+        help="Base YAML config (paths inside it are overridden per-run). Default: "
+        "src/train/config.yaml for a new run, the run's own config.yaml on --resume.",
     )
     p.add_argument(
         "--name", type=str, default=None, help="Optional human-readable suffix for the run id."
@@ -86,16 +87,25 @@ def _latest_step_checkpoint(run_dir: Path) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def _build_initial_engine(run_dir: Path) -> Path:
-    """Save a random-init SmallModel checkpoint, build the TRT engine via
-    scripts/build_trt.sh, and seed the run's .iteration file with its path."""
+def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
+    """Save a random-init checkpoint of the configured model, build the TRT
+    engine via scripts/build_trt.sh, and seed the run's .iteration file."""
     import torch  # local import; pulls torch only when launching a fresh run.
 
-    from src.models.small.small_model import SmallModel
+    from src.models.factory import build_model
+    from src.train.config import load_config
 
     init_pt = run_dir / "checkpoints" / "model_dynamic_initial.pt"
-    model = SmallModel().eval()
-    torch.save({"model": model.state_dict()}, init_pt)
+    cfg = load_config(base_config)
+    model = build_model(cfg.model).eval()
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "model_spec": model.spec(),
+            "config": {"search_heads": cfg.search_heads},
+        },
+        init_pt,
+    )
 
     engine_dir = run_dir / "engines"
     iter_file = engine_dir / ".iteration"
@@ -119,10 +129,41 @@ def _build_initial_engine(run_dir: Path) -> Path:
     return initial_trt
 
 
+def _has_engine(run_dir: Path) -> bool:
+    """Whether engines/.iteration names at least one engine."""
+    it = run_dir / "engines" / ".iteration"
+    if not it.is_file():
+        return False
+    return any(
+        line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines()
+    )
+
+
+def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
+    """A branch run (another run's checkpoint copied in) has no engine yet: self-play would wait
+    for one forever while the trainer waits for self-play's games. Build it from the checkpoint."""
+    step = ckpt.stem.split("_")[1]
+    print(f"[launcher] no engine yet: building one from {ckpt.name}", flush=True)
+    subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ckpt),
+            str(int(step)),
+            str(run_dir / "engines"),
+            str(run_dir / "engines" / ".iteration"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None) -> Path:
     """Load the base YAML, override every path field to point inside `run_dir`,
     write the result to <run_dir>/config.yaml, and return its path."""
-    cfg = yaml.safe_load(base_config.read_text()) or {}
+    from src.train.config import load_yaml
+
+    cfg = load_yaml(base_config)  # `extends:` chains resolved; the snapshot is self-contained
     cfg.setdefault("data", {})["dataset_path"] = str((run_dir / "buffer" / "buffer.bin").resolve())
     ckpt = cfg.setdefault("checkpoint", {})
     ckpt["dir"] = str((run_dir / "checkpoints").resolve())
@@ -187,6 +228,8 @@ def main() -> int:
         latest = _latest_step_checkpoint(run_dir)
         if latest is not None:
             print(f"[launcher] resuming run {run_dir.name} from {latest.name}", flush=True)
+            if not args.no_selfplay and not _has_engine(run_dir):
+                _build_resume_engine(run_dir, latest)
         else:
             print(f"[launcher] resuming run {run_dir.name} (no step checkpoints yet)", flush=True)
         resume_path = latest
@@ -194,13 +237,18 @@ def main() -> int:
         run_dir = _make_run_dir(args.name)
         print(f"[launcher] new run -> {run_dir}", flush=True)
         if not args.no_selfplay:
-            _build_initial_engine(run_dir)
+            _build_initial_engine(run_dir, args.config or DEFAULT_BASE_CONFIG)
         else:
             # Trainer-only fresh run: still need an iteration file so the
             # trainer's later build_trt invocations append cleanly.
             (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
         resume_path = None
 
+    # On --resume without --config, keep the run's own settings (main fell back
+    # to src/train/config.yaml here, silently replacing an arm's config).
+    if args.config is None:
+        own = run_dir / "config.yaml"
+        args.config = own if (args.resume and own.is_file()) else DEFAULT_BASE_CONFIG
     cfg_path = _write_run_config(args.config, run_dir, resume_path)
     selfplay_log = run_dir / "selfplay.log"
     trainer_log = run_dir / "training.log"

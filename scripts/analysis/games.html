@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChessRL self-play games</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.base.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.brown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.cburnett.css">
+<style>
+  /* Same tokens as the analysis board (index.html). */
+  :root {
+    --surface: #fcfcfb; --page: #f4f3f0; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --accent: #2a78d6; --row: #eef4fc; --mate: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --page: #0d0d0d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --accent: #3987e5; --row: #1f2a38; --mate: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; }
+  header h1 { font-size: 17px; margin: 0 12px 0 0; font-weight: 600; }
+  a { color: var(--accent); }
+  select, button { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  main { display: grid; grid-template-columns: minmax(280px, 560px) minmax(300px, 440px); gap: 16px; padding: 0 16px 16px;
+    align-items: start; justify-content: start; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  #board { width: 100%; aspect-ratio: 1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  .note { color: var(--muted); font-size: 12px; }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 6px; }
+  #status b { font-size: 15px; }
+  .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink2); margin-left: 6px; }
+  .pill.mate { color: var(--mate); border-color: var(--mate); }
+  #moves { font: 13px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 330px; overflow: auto;
+    display: grid; grid-template-columns: 3em 7em 7em; }
+  #moves .num { color: var(--muted); }
+  .mv { cursor: pointer; padding: 0 4px; border-radius: 3px; }
+  .mv:hover { background: var(--row); }
+  .mv.sampled { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+  .mv.cur { background: var(--accent); color: #fff; }
+  #chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  #chips button { font-size: 12px; padding: 3px 9px; }
+  #list { max-height: 420px; overflow: auto; margin-top: 8px; border-top: 1px solid var(--line); }
+  .game { display: grid; grid-template-columns: 3.2em 9em 4.4em minmax(0, 1fr); gap: 8px; padding: 5px 6px;
+    border-bottom: 1px solid var(--line); cursor: pointer; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums; }
+  .game:hover { background: var(--row); }
+  .game.cur { background: var(--row); box-shadow: inset 3px 0 0 var(--accent); }
+  .game .op { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); }
+  .wide { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>♟ ChessRL self-play games</h1>
+  <label>Games <select id="pgn"></select></label>
+  <a class="note" href="/">← Analysis board</a>
+</header>
+<main>
+  <section class="card">
+    <div id="board" class="cg-wrap"></div>
+    <div class="row">
+      <button id="first" title="Home">⏮</button>
+      <button id="prev" title="←">◀</button>
+      <button id="next" title="→">▶</button>
+      <button id="last" title="End">⏭</button>
+      <button id="play" title="Space">Play</button>
+      <button id="flip" title="F">Flip board</button>
+      <button id="pgame" title="↑">↑ Game</button>
+      <button id="ngame" title="↓">↓ Game</button>
+    </div>
+    <p class="note">Keys: ← → moves, ↑ ↓ games, Home / End, Space plays, F flips.</p>
+  </section>
+  <section class="card">
+    <div id="status"></div>
+    <div class="label" style="margin-top:10px">Moves</div>
+    <div id="moves"></div>
+    <p class="note">Dotted moves are in the first 30 plies, where the played move is sampled in proportion to the
+      search's visit counts.</p>
+  </section>
+  <section class="card wide">
+    <div class="label">Games · filter by first move</div>
+    <div id="chips"></div>
+    <div id="list"></div>
+  </section>
+</main>
+<script type="module">
+import { Chessground } from "https://cdn.jsdelivr.net/npm/chessground@9.1.1/+esm";
+
+const SAMPLED_PLIES = 30;
+const $ = (id) => document.getElementById(id);
+let games = [], gi = 0, ply = 0, orientation = "white", timer = null, filter = null;
+const cg = Chessground($("board"), { viewOnly: true, coordinates: true, animation: { duration: 120 },
+  highlight: { lastMove: true, check: true } });
+
+const game = () => games[gi];
+const resultText = (g) => (g.result === "1/2-1/2" ? "½-½" : g.result);
+const endMark = (g) => (g.end === "checkmate" ? "mate" : g.end === "draw" ? "draw" : "resigned");
+const visible = () => games.filter((g) => !filter || g.san[0] === filter);
+
+function show() {
+  const g = game();
+  const fen = g.fens[ply];
+  cg.set({ fen, orientation, lastMove: g.last[ply] || undefined,
+    turnColor: fen.split(" ")[1] === "w" ? "white" : "black", check: g.checks[ply] });
+  $("status").innerHTML = `<b>Game ${g.n}</b><span class="pill ${g.end === "checkmate" ? "mate" : ""}">` +
+    `${resultText(g)} · ${endMark(g)}</span> <span class="note">ply ${ply} of ${g.plies}` +
+    `${ply > 0 && ply <= SAMPLED_PLIES ? " · sampled phase" : ""}</span>`;
+  let html = "";
+  for (let i = 0; i < g.san.length; i += 2) {
+    html += `<span class="num">${i / 2 + 1}.</span>`;
+    for (const k of [i, i + 1]) {
+      if (k >= g.san.length) { html += "<span></span>"; continue; }
+      html += `<span class="mv${k + 1 === ply ? " cur" : ""}${k < SAMPLED_PLIES ? " sampled" : ""}" data-ply="${k + 1}">${g.san[k]}</span>`;
+    }
+  }
+  const box = $("moves");
+  box.innerHTML = html;
+  const cur = box.querySelector(".cur");
+  if (cur) cur.scrollIntoView({ block: "nearest" }); else box.scrollTop = 0;
+}
+
+function listGames() {
+  $("list").innerHTML = visible().map((g) => {
+    const op = g.san.slice(0, 12).map((s, i) => (i % 2 === 0 ? `${i / 2 + 1}.` : "") + s).join(" ");
+    return `<div class="game${g.n - 1 === gi ? " cur" : ""}" data-g="${g.n - 1}"><span>#${g.n}</span>` +
+      `<span>${resultText(g)} ${endMark(g)}</span><span>${g.plies}p</span><span class="op">${op}</span></div>`;
+  }).join("");
+  const cur = $("list").querySelector(".cur");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+function chips() {
+  const counts = new Map();
+  for (const g of games) if (g.san[0]) counts.set(g.san[0], (counts.get(g.san[0]) || 0) + 1);
+  const all = [[null, games.length], ...[...counts].sort((a, b) => b[1] - a[1])];
+  $("chips").innerHTML = all.map(([m, c]) =>
+    `<button class="${filter === m ? "on" : ""}" data-f="${m ?? ""}">${m ? "1." + m : "All"} ${c}</button>`).join("");
+}
+
+const setPly = (p) => { ply = Math.max(0, Math.min(game().plies, p)); show(); };
+function setGame(i) { stop(); gi = i; ply = Math.min(10, games[i].plies); show(); listGames(); }
+function stepGame(d) {
+  const rows = visible();
+  if (!rows.length) return;
+  let k = rows.findIndex((g) => g.n - 1 === gi);
+  k = k < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, k + d));
+  setGame(rows[k].n - 1);
+}
+function stop() { clearInterval(timer); timer = null; $("play").textContent = "Play"; $("play").classList.remove("on"); }
+function play() {
+  if (timer) return stop();
+  if (ply >= game().plies) ply = 0;
+  $("play").textContent = "Pause"; $("play").classList.add("on");
+  timer = setInterval(() => (ply >= game().plies ? stop() : setPly(ply + 1)), 600);
+}
+const flip = () => { orientation = orientation === "white" ? "black" : "white"; show(); };
+
+$("first").onclick = () => setPly(0);
+$("prev").onclick = () => { stop(); setPly(ply - 1); };
+$("next").onclick = () => { stop(); setPly(ply + 1); };
+$("last").onclick = () => setPly(game().plies);
+$("play").onclick = play;
+$("flip").onclick = flip;
+$("pgame").onclick = () => stepGame(-1);
+$("ngame").onclick = () => stepGame(1);
+$("moves").onclick = (e) => { const t = e.target.closest(".mv"); if (t) { stop(); setPly(+t.dataset.ply); } };
+$("list").onclick = (e) => { const t = e.target.closest(".game"); if (t) setGame(+t.dataset.g); };
+$("chips").onclick = (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  filter = t.dataset.f || null;
+  chips();
+  const rows = visible();
+  if (rows.length && !rows.some((g) => g.n - 1 === gi)) setGame(rows[0].n - 1); else listGames();
+};
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("select, input")) return;
+  const k = e.key;
+  if (k === "ArrowRight") { stop(); setPly(ply + 1); }
+  else if (k === "ArrowLeft") { stop(); setPly(ply - 1); }
+  else if (k === "ArrowDown") stepGame(1);
+  else if (k === "ArrowUp") stepGame(-1);
+  else if (k === "Home") setPly(0);
+  else if (k === "End") setPly(game().plies);
+  else if (k === " ") play();
+  else if (k === "f" || k === "F") flip();
+  else return;
+  e.preventDefault();
+});
+
+async function load(id) {
+  const res = await fetch(`/api/pgn?id=${encodeURIComponent(id)}`);
+  const data = await res.json();
+  if (!res.ok) { $("status").textContent = data.error || "could not load the games"; return; }
+  games = data.games; filter = null;
+  chips(); setGame(0);
+}
+const files = await (await fetch("/api/pgns")).json();
+$("pgn").innerHTML = files.map((f) => `<option value="${f.id}">${f.label}</option>`).join("");
+$("pgn").onchange = () => load($("pgn").value);
+if (files.length) await load(files[0].id);
+else $("status").textContent = "No game samples found: fetch a run's games into ~/chessrl-runs/<box>/*.pgn.";
+</script>
+</body>
+</html>

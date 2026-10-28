@@ -6,8 +6,8 @@ from pathlib import Path
 import onnx
 import torch
 
+from src.models.factory import model_from_checkpoint
 from src.models.small.fen_encoder import INPUT_PLANES
-from src.models.small.small_model import SmallModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,6 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda", help="Device for export (default: cuda).")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
     parser.add_argument("--batch", type=int, default=1, help="Dummy batch size.")
+    parser.add_argument(
+        "--search_heads",
+        default=None,
+        choices=sorted(ExportWrapper.MODES),
+        help="Override the checkpoint's search_heads (see ExportWrapper).",
+    )
     return parser.parse_args()
 
 
@@ -30,30 +36,52 @@ def load_state_dict(ckpt_path: Path, device: str) -> dict:
 
 
 class ExportWrapper(torch.nn.Module):
-    """Routes the `value_q` head (trained against MCTS-backed-up WDL) into the
-    engine's "value" output and exposes both moves-left heads:
-      - mlh:   raw plies/25 estimate, true target.
-      - mlh_q: raw plies/25 estimate, MCTS-backed target. Used by C++ MCTS for
-               both the depth-incremented backup (×25 ↦ raw plies) and the
-               tiebreaker (tanh applied at the call site)."""
+    """Picks which heads feed the engine's "value" and "mlh_q" outputs.
 
-    def __init__(self, model):
+    The C++ MCTS reads "value" as the leaf WDL and "mlh_q" as the leaf
+    plies-remaining estimate (depth-incremented backup + tiebreaker).
+      search_heads="search"  (main): value_q / mlh_q, trained on MCTS backups.
+      search_heads="outcome":        value / mlh, trained on game results and
+                                     true plies remaining (AlphaZero-style).
+    Value-only variants (moves-left stays on the outcome-trained mlh, so only the
+    value the search reads changes; used by scripts/head_ab.py):
+      search_heads="q_value":        value_q / mlh.
+      search_heads="blend":          the average of the two WDLs / mlh."""
+
+    MODES = ("search", "outcome", "q_value", "blend")
+
+    def __init__(self, model, search_heads: str = "search"):
         super().__init__()
+        if search_heads not in self.MODES:
+            raise ValueError(f"search_heads={search_heads!r}, expected one of {self.MODES}")
         self.model = model
+        self.mode = search_heads
 
     def forward(self, x):
-        p, _v, vq, mlh, mlh_q = self.model(x, return_all=True)
-        return p, torch.softmax(vq, dim=-1), mlh, mlh_q
+        p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
+        if self.mode == "search":
+            return p, torch.softmax(vq, dim=-1), mlh, mlh_q
+        if self.mode == "q_value":
+            return p, torch.softmax(vq, dim=-1), mlh, mlh
+        if self.mode == "blend":
+            return p, 0.5 * (torch.softmax(v, dim=-1) + torch.softmax(vq, dim=-1)), mlh, mlh
+        return p, torch.softmax(v, dim=-1), mlh, mlh
 
 
 def export_model(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
-    base_model = SmallModel().to(device)
-    state_dict = load_state_dict(args.ckpt_path, args.device)
-    base_model.load_state_dict(state_dict, strict=False)
+    checkpoint = torch.load(args.ckpt_path, map_location=args.device, weights_only=False)
+    if not (isinstance(checkpoint, dict) and "model" in checkpoint):
+        checkpoint = {"model": checkpoint}
+    # The architecture travels in the checkpoint (grown / encoder nets).
+    base_model = model_from_checkpoint(checkpoint, device)
     base_model.eval()
 
-    model = ExportWrapper(base_model).to(device)
+    search_heads = args.search_heads or (checkpoint.get("config") or {}).get(
+        "search_heads", "search"
+    )
+    print(f"[to_onnx] search_heads={search_heads}")
+    model = ExportWrapper(base_model, search_heads).to(device)
     model.eval()
 
     dummy_input = torch.randn(args.batch, 8, 8, INPUT_PLANES, device=device, dtype=torch.float32)

@@ -1,0 +1,10 @@
+# Run A: does a bigger network plateau higher? The sims-400 recipe with 8 layers
+# (1.47M params) instead of 4, the only change. The 8-layer net at 800 sims was
+# steeper per training step (1,400 at step 5.5k vs ~8k for 4 layers) but was never
+# run to its plateau. Compare with enc_sims400 (seeds 1 and 2: plateau ~1,860-1,900).
+extends: enc_sims400.yaml
+model:
+  layers: 8
+# Self-play games are saved (artifacts/pgns) for the opening-diversity metrics.
+selfplay:
+  save_pgn: true

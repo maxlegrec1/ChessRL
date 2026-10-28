@@ -14,6 +14,7 @@ class EngineWatcher:
         self._last_check = 0.0
         self._last_mtime = 0.0
         self._engine_path: str = ""  # empty until .iteration provides one
+        self._engine_step: int = 0  # trainer step of the current engine (iteration column)
 
         # Load initial state if possible.
         self._refresh(force=True)
@@ -21,6 +22,10 @@ class EngineWatcher:
     @property
     def engine_path(self) -> str:
         return self._engine_path
+
+    @property
+    def engine_step(self) -> int:
+        return self._engine_step
 
     def maybe_refresh(self) -> str | None:
         """Refresh if poll interval elapsed; returns new engine path if changed."""
@@ -45,7 +50,9 @@ class EngineWatcher:
 
         self._last_mtime = stat.st_mtime
         self._last_check = time.monotonic()
-        new_engine = self._read_latest_engine()
+        new_engine, step = self._read_latest_engine()
+        if new_engine:
+            self._engine_step = step
         if new_engine and new_engine != self._engine_path:
             self._engine_path = new_engine
             return True
@@ -53,7 +60,7 @@ class EngineWatcher:
             self._engine_path = new_engine
         return False
 
-    def _read_latest_engine(self) -> str | None:
+    def _read_latest_engine(self) -> tuple[str | None, int]:
         try:
             with self.iteration_file.open("r", encoding="utf-8") as fh:
                 reader = csv.DictReader(fh, skipinitialspace=True)
@@ -63,11 +70,15 @@ class EngineWatcher:
                         k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()
                     }
         except FileNotFoundError:
-            return None
+            return None, 0
 
         if not last_row:
-            return None
-        return (last_row.get("engine_path") or "").strip() or None
+            return None, 0
+        try:
+            step = int(last_row.get("iteration") or 0)
+        except ValueError:
+            step = 0
+        return (last_row.get("engine_path") or "").strip() or None, step
 
 
 __all__ = ["EngineWatcher"]

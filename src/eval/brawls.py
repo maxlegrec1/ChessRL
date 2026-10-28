@@ -213,13 +213,13 @@ def main_model_vs_model(
 
 
 def _load_small_model(device: str, ckpt_path: str | None = None):
-    from src.models.small.small_model import SmallModel
+    from src.models.factory import build_model, model_from_checkpoint
 
-    model = SmallModel().to(device)
+    model = build_model().to(device)
     if ckpt_path and os.path.exists(ckpt_path):
         state = torch.load(ckpt_path, weights_only=False, map_location=device)
         if isinstance(state, dict) and "model" in state:
-            model.load_state_dict(state["model"], strict=False)
+            model = model_from_checkpoint(state, device)
         elif isinstance(state, dict) and "model_state_dict" in state:
             model.load_state_dict(state["model_state_dict"], strict=False)
         else:

@@ -1,0 +1,66 @@
+[
+ {
+  "spec": "4x64",
+  "params": 1285921,
+  "selfplay_positions_per_sec": 633.4,
+  "selfplay_nodes_per_sec": 506751,
+  "trainer_samples_per_sec": 193370,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "6x96",
+  "params": 2020929,
+  "selfplay_positions_per_sec": 563.6,
+  "selfplay_nodes_per_sec": 450893,
+  "trainer_samples_per_sec": 120676,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "8x128",
+  "params": 3420001,
+  "selfplay_positions_per_sec": 470.7,
+  "selfplay_nodes_per_sec": 376531,
+  "trainer_samples_per_sec": 55645,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "10x128",
+  "params": 4010849,
+  "selfplay_positions_per_sec": 456.2,
+  "selfplay_nodes_per_sec": 364997,
+  "trainer_samples_per_sec": 45435,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "12x160",
+  "params": 6627201,
+  "selfplay_positions_per_sec": 231.8,
+  "selfplay_nodes_per_sec": 185465,
+  "trainer_samples_per_sec": 35618,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "16x192",
+  "params": 11752353,
+  "selfplay_positions_per_sec": 180.9,
+  "selfplay_nodes_per_sec": 144691,
+  "trainer_samples_per_sec": 18585,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota"
+ },
+ {
+  "spec": "enc128x4",
+  "params": 812557,
+  "selfplay_positions_per_sec": 347.0,
+  "selfplay_nodes_per_sec": 277566,
+  "trainer_samples_per_sec": 16260,
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "settings": "800 sims, vl width 8, 128 threads, 1024 boards, 32-core EPYC 7702P quota",
+  "note": "measured with the first (per-entry gather) policy head, superseded by 17d83fc"
+ }
+]

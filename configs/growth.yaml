@@ -1,0 +1,13 @@
+# Arm "growth": the signal arm with a progressively grown ResNet trunk.
+# Sizes follow scripts/bench_sizes.py on a 4090 (800 sims, 32 cores):
+#   4x64 633 pos/s, 6x96 564 (-11%), 8x128 471 (-26%), 10x128 456 (-28%),
+#   12x160 232 (-63%: compute-bound) -> stop at 10x128.
+# The signal arm makes ~4k trainer steps per hour; each stage is
+# function-preserving (src/models/growth.py) with a short LR re-warmup.
+extends: signal.yaml
+growth:
+  schedule:
+    - [8000, 6, 96]
+    - [24000, 8, 128]
+    - [48000, 10, 128]
+  lr_rewarmup_steps: 300

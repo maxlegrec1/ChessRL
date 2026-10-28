@@ -1,0 +1,14 @@
+[Unit]
+Description=ChessRL: analysis board (CPU search on synced checkpoints) on http://localhost:8510
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/ChessRL/.claude/worktrees/next-round
+Environment=CHESSRL_RUNS_ROOT=%h/chessrl-runs
+ExecStart=%h/ChessRL/.claude/worktrees/next-round/.venv/bin/python scripts/analysis_server.py --port 8510 --threads 8
+Restart=always
+RestartSec=10
+Nice=5
+
+[Install]
+WantedBy=default.target

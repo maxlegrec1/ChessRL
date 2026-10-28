@@ -1,0 +1,14 @@
+[Unit]
+Description=ChessRL: combined dashboard of all synced arms on http://localhost:8500
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/ChessRL/.claude/worktrees/next-round
+Environment=CHESSRL_RUNS_ROOT=%h/chessrl-runs
+Environment=CHESSRL_BUDGET=%h/.chessrl-vast/budget.json
+ExecStart=%h/ChessRL/.claude/worktrees/next-round/.venv/bin/streamlit run scripts/dashboard.py --server.port 8500 --server.headless true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

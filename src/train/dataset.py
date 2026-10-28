@@ -1,359 +1,366 @@
+"""Replay buffer reader for v2 self-play records (see cpp/selfplay.cpp).
+
+The buffer is a flat file of fixed 1280-byte records written by the C++
+self-play worker. The trainer memory-maps it, samples rows (optionally from a
+window of the newest records when the buffer is a FIFO ring), and decodes
+input planes from the stored bitboards with tensor ops — no FEN parsing, no
+python-chess, and the decode can run on the GPU.
+"""
+
 from __future__ import annotations
 
+import json
 import random
-import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import chess
 import numpy as np
-import pyarrow.parquet as pq
+import torch
 
-from src.models.small.fen_encoder import (
-    INPUT_PLANES,
-    encode_record_planes,
-)
+from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index, policy_to_idx
 
-# Fallback index when a move is not present in the vocabulary.
-NULL_POLICY_INDEX = len(policy_index) - 1
+RECORD_SIZE = 1280
+RECORD_VERSION = 2
+MAX_POLICY_ENTRIES = 84
+VOCAB_SIZE = len(policy_index)
+NO_MOVE = 0xFFFF  # played_idx sentinel in the record
+IGNORE_INDEX = -100  # cross_entropy ignore_index for rows without a policy target
 
-# On-disk record size (bytes). Mirrors cpp/selfplay.cpp's kRecordSize.
-# Layout (832 bytes total):
-#   [0..100)    FEN
-#   [100..116)  policy UCI
-#   [116..128)  value_outcome (3xf32)
-#   [128..140)  value_mcts    (3xf32)
-#   [140..144)  plies_remaining (f32)
-#   [144..148)  backed_plies   (f32)
-#   [148..155)  past_repetition_flags (7 x u8)
-#   [155..156)  current_repetition_flag (u8)
-#   [156..160)  padding
-#   [160..832)  past_bitboards (7 slots * 12 u64 = 672 bytes)
-RECORD_SIZE = 832
-PAST_REPETITION_OFFSET = 148
-CURRENT_REPETITION_OFFSET = 155
-PAST_BITBOARDS_OFFSET = 160
-_PAST_SLOTS = 7
-_BITBOARDS_PER_SLOT = 12
-_BITBOARD_SLOT_BYTES = _BITBOARDS_PER_SLOT * 8  # 96
-assert PAST_BITBOARDS_OFFSET + _PAST_SLOTS * _BITBOARD_SLOT_BYTES == RECORD_SIZE
+FLAG_FULL_SEARCH = 1
+FLAG_SAMPLED_MOVE = 2
+FLAG_RESIGNED = 4
+FLAG_PLAYTHROUGH = 8
+FLAG_CURRICULUM = 16
+FLAG_MAX_PLIES = 32
+
+RECORD_DTYPE = np.dtype(
+    [
+        ("fen", "S100"),
+        ("played", "S16"),
+        ("value_outcome", "<f4", (3,)),
+        ("value_mcts", "<f4", (3,)),
+        ("plies_remaining", "<f4"),
+        ("backed_plies", "<f4"),
+        ("past_rep", "u1", (7,)),
+        ("cur_rep", "u1"),
+        ("_pad", "V4"),
+        ("past_bb", "<u8", (7, 12)),
+        ("cur_bb", "<u8", (12,)),
+        ("version", "u1"),
+        ("flags", "u1"),
+        ("castling", "u1"),
+        ("ep", "u1"),
+        ("halfmove", "<u2"),
+        ("fullmove", "<u2"),
+        ("ply", "<u2"),
+        ("sims", "<u2"),
+        ("n_policy", "<u2"),
+        ("played_idx", "<u2"),
+        ("policy", "<u2", (MAX_POLICY_ENTRIES, 2)),
+    ]
+)
+assert RECORD_DTYPE.itemsize == RECORD_SIZE
 
 
-def _policy_str_to_idx(move: str) -> int:
-    if not move:
-        return NULL_POLICY_INDEX
-    move = move.strip()
-    # Normalize knight promotion suffixes (e.g., e7e8n) to align with vocab
-    if move.endswith("n"):
-        move = move[:-1]
-    return policy_to_idx.get(move, NULL_POLICY_INDEX)
+def _mirror_move(move: str) -> str:
+    # Vertical flip: ranks 1<->8, files unchanged (python-chess Board.mirror()).
+    if len(move) < 4 or not move[1].isdigit() or not move[3].isdigit():
+        return move
+    return f"{move[0]}{9 - int(move[1])}{move[2]}{9 - int(move[3])}{move[4:]}"
+
+
+# MIRROR_INDEX[i] = vocab index of move i after a colour flip (an involution).
+MIRROR_INDEX = np.array(
+    [policy_to_idx.get(_mirror_move(m), i) for i, m in enumerate(policy_index)], dtype=np.int64
+)
+_CASTLE_MOVES = {"e1g1": 0, "e1c1": 0, "e8g8": 1, "e8c8": 1}  # move -> colour of the king
+CASTLE_INDEX = {policy_to_idx[m]: c for m, c in _CASTLE_MOVES.items()}
+
+
+def window_size(total_writes: int, c: int, alpha: float, beta: float) -> int:
+    """KataGo's growing replay window over the newest records."""
+    if c <= 0:
+        return 0
+    n = max(total_writes, 1)
+    if n <= c:
+        return n
+    return int(c * (1.0 + beta * ((n / c) ** alpha - 1.0) / alpha))
 
 
 @dataclass
-class SelfPlayBatch:
-    planes: np.ndarray  # [B, 8, 8, INPUT_PLANES]
-    policy_indices: np.ndarray  # [B]
-    value_outcomes: np.ndarray  # [B, 3] sparse one-hot (game outcome from side to move)
-    value_mcts: np.ndarray  # [B, 3] dense WDL backed up from MCTS root
-    plies_remaining: np.ndarray  # [B] float32 plies until game end; -1 = no target
-    backed_plies: np.ndarray  # [B] float32 MCTS-backed plies-remaining at root; -1 = no target
+class Batch:
+    """Raw fields of sampled records, as torch tensors (CPU until `.to()`)."""
+
+    cur_bb: torch.Tensor  # [B, 12] int64 (uint64 bit patterns)
+    past_bb: torch.Tensor  # [B, 7, 12] int64
+    cur_rep: torch.Tensor  # [B] uint8
+    past_rep: torch.Tensor  # [B, 7] uint8
+    white_to_move: torch.Tensor  # [B] bool
+    castling: torch.Tensor  # [B] uint8
+    ep: torch.Tensor  # [B] int64, 255 = none
+    halfmove: torch.Tensor  # [B] float32
+    flags: torch.Tensor  # [B] uint8
+    played_idx: torch.Tensor  # [B] int64, IGNORE_INDEX if none
+    policy_idx: torch.Tensor  # [B, K] int64
+    policy_prob: torch.Tensor  # [B, K] float32, zero for unused entries
+    value_outcome: torch.Tensor  # [B, 3]
+    value_mcts: torch.Tensor  # [B, 3]
+    plies_remaining: torch.Tensor  # [B]
+    backed_plies: torch.Tensor  # [B]
+    mirror: torch.Tensor  # [B] bool, colour-flip augmentation applied at decode
     fens: list[str]
 
+    def to(self, device: torch.device | str, non_blocking: bool = True) -> Batch:
+        moved = {}
+        for name, value in self.__dict__.items():
+            moved[name] = (
+                value.to(device, non_blocking=non_blocking) if torch.is_tensor(value) else value
+            )
+        return Batch(**moved)
 
-class SelfPlayDataset:
-    """Random sampler over the Parquet buffer produced by self-play."""
 
-    def __init__(self, path: Path, *, reload_seconds: float = 60.0) -> None:
-        self.path = path
-        self.reload_seconds = reload_seconds
-        self._fens: list[str] = []
-        self._value_outcomes: list[tuple[float, float, float]] = []
-        self._value_mcts: list[tuple[float, float, float]] = []
-        self._plies_remaining: list[float] = []
-        self._backed_plies: list[float] = []
-        self._policies: list[str] = []
-        # AlphaZero-style 8-board history fields, populated from binary records.
-        # Each entry is (7, 12) uint64 piece bitboards (newest first) and (7,)
-        # uint8 repetition flags. _current_reps is a (N,) uint8 array.
-        self._past_bitboards: list[np.ndarray] = []
-        self._past_repetitions: list[np.ndarray] = []
-        self._current_repetitions: list[int] = []
-        self._size = 0
-        self._last_load = 0.0
-        self._last_mtime = 0.0
-        self._rng = np.random.default_rng()
+def records_to_batch(
+    rows: np.ndarray, mirror_prob: float = 0.0, rng: random.Random | None = None
+) -> Batch:
+    """Pack structured record rows into a Batch (no plane decoding yet)."""
+    rng = rng or random
+    b = len(rows)
+    n_policy = np.minimum(rows["n_policy"].astype(np.int64), MAX_POLICY_ENTRIES)
+    entry_ok = np.arange(MAX_POLICY_ENTRIES)[None, :] < n_policy[:, None]
+    pol_idx = rows["policy"][:, :, 0].astype(np.int64)
+    pol_prob = rows["policy"][:, :, 1].astype(np.float32) * entry_ok
+    pol_idx = np.where(entry_ok, pol_idx, 0)
+    played = rows["played_idx"].astype(np.int64)
+    played = np.where(played == NO_MOVE, IGNORE_INDEX, played)
+    mirror = np.array([rng.random() < mirror_prob for _ in range(b)], dtype=bool)
 
-        self.reload(force=True)
+    # Colour flip of the targets happens here (index remap); planes flip at decode.
+    if mirror.any():
+        pol_idx = np.where(mirror[:, None], MIRROR_INDEX[pol_idx], pol_idx)
+        ok = played >= 0
+        played = np.where(mirror & ok, MIRROR_INDEX[np.where(ok, played, 0)], played)
 
-    # ------------------------------------------------------------------ #
-    def reload(self, *, force: bool = False) -> None:
-        if not force:
-            now = time.monotonic()
-            if now - self._last_load < self.reload_seconds:
-                return
-            try:
-                mtime = self.path.stat().st_mtime
-            except FileNotFoundError:
-                return
-            if mtime <= self._last_mtime:
-                self._last_load = now
-                return
+    def t(a, dtype=None):
+        out = torch.from_numpy(np.ascontiguousarray(a))
+        return out if dtype is None else out.to(dtype)
 
-        # Retry loop for reading the file to handle race conditions
-        max_retries = 50
-        for attempt in range(max_retries):
-            try:
-                if self.path.suffix == ".parquet":
-                    table = pq.read_table(self.path)
-                    if "fen" not in table.column_names or "value" not in table.column_names:
-                        raise RuntimeError(f"Parquet file {self.path} missing required columns.")
+    return Batch(
+        cur_bb=t(rows["cur_bb"].view(np.int64)),
+        past_bb=t(rows["past_bb"].view(np.int64)),
+        cur_rep=t(rows["cur_rep"]),
+        past_rep=t(rows["past_rep"]),
+        white_to_move=t(np.char.find(rows["fen"], b" w ") >= 0),
+        castling=t(rows["castling"]),
+        ep=t(rows["ep"].astype(np.int64)),
+        halfmove=t(rows["halfmove"].astype(np.float32)),
+        flags=t(rows["flags"]),
+        played_idx=t(played),
+        policy_idx=t(pol_idx),
+        policy_prob=t(pol_prob),
+        value_outcome=t(rows["value_outcome"]),
+        value_mcts=t(rows["value_mcts"]),
+        plies_remaining=t(rows["plies_remaining"]),
+        backed_plies=t(rows["backed_plies"]),
+        mirror=t(mirror),
+        fens=[f.decode("ascii", "replace") for f in rows["fen"]],
+    )
 
-                    self._fens = table.column("fen").to_pylist()
-                    raw_values = table.column("value").to_pylist()
-                    self._value_outcomes = [_ensure_tuple(row) for row in raw_values]
-                    # Parquet path predates the dual-target schema; supply zero
-                    # value_mcts so the value_q head sees a no-op target.
-                    self._value_mcts = [(0.0, 0.0, 0.0)] * len(self._fens)
-                    self._plies_remaining = [-1.0] * len(self._fens)
-                    self._backed_plies = [-1.0] * len(self._fens)
-                    self._policies = table.column("policy").to_pylist()
-                    # Parquet has no history information; treat every record
-                    # as no-history (slots 1..7 zero).
-                    n = len(self._fens)
-                    zero_bb = np.zeros((_PAST_SLOTS, _BITBOARDS_PER_SLOT), dtype=np.uint64)
-                    zero_rep = np.zeros(_PAST_SLOTS, dtype=np.uint8)
-                    self._past_bitboards = [zero_bb] * n
-                    self._past_repetitions = [zero_rep] * n
-                    self._current_repetitions = [0] * n
-                else:
-                    # Assume binary format
-                    (
-                        self._fens,
-                        self._policies,
-                        self._value_outcomes,
-                        self._value_mcts,
-                        self._plies_remaining,
-                        self._backed_plies,
-                        self._past_bitboards,
-                        self._past_repetitions,
-                        self._current_repetitions,
-                    ) = self._read_binary_file()
 
-                self._size = len(self._fens)
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"Failed to reload dataset after {max_retries} attempts: {e}")
-                    raise e
-                time.sleep(0.1)
+_SHIFTS = torch.arange(64, dtype=torch.int64)
+_SWAP_COLOURS = torch.tensor([6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5])
 
-        self._last_load = time.monotonic()
-        try:
-            self._last_mtime = self.path.stat().st_mtime
-        except FileNotFoundError:
-            self._last_mtime = self._last_load
 
-    def _read_binary_file(self):
-        # On-disk record layout (832 bytes, fixed). Mirrors cpp/selfplay.cpp.
-        FEN_OFFSET = 0
-        POLICY_OFFSET = 100
-        VALUE_OUTCOME_OFFSET = 116
-        VALUE_MCTS_OFFSET = 128
-        PLIES_REMAINING_OFFSET = 140
-        BACKED_PLIES_OFFSET = 144
+def decode_planes(batch: Batch, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Build the [B, 8, 8, 111] input (same layout as fen_encoder.py) on batch's device."""
+    device = batch.cur_bb.device
+    bsz = batch.cur_bb.shape[0]
+    shifts = _SHIFTS.to(device)
 
-        fens: list[str] = []
-        policies: list[str] = []
-        value_outcomes: list[tuple[float, float, float]] = []
-        value_mcts: list[tuple[float, float, float]] = []
-        plies_remaining: list[float] = []
-        backed_plies: list[float] = []
-        past_bitboards: list[np.ndarray] = []
-        past_repetitions: list[np.ndarray] = []
-        current_repetitions: list[int] = []
-        try:
-            with self.path.open("rb") as f:
-                content = f.read()
+    bb = torch.cat([batch.cur_bb[:, None, :], batch.past_bb], dim=1)  # [B, 8, 12]
+    # bit k of each bitboard = square k = rank * 8 + file. Arithmetic shifts are
+    # fine: & 1 keeps only the shifted bit even when bit 63 sign-extends.
+    bits = (bb[..., None] >> shifts) & 1  # [B, 8, 12, 64]
+    bits = bits.view(bsz, 8, 12, 8, 8)  # [..., rank, file]
 
-            size = len(content)
-            offset = 0
-            while offset + RECORD_SIZE <= size:
-                fen_bytes = content[offset + FEN_OFFSET : offset + POLICY_OFFSET]
-                pol_bytes = content[offset + POLICY_OFFSET : offset + VALUE_OUTCOME_OFFSET]
-                try:
-                    fen = fen_bytes.split(b"\0", 1)[0].decode("utf-8")
-                    policy = pol_bytes.split(b"\0", 1)[0].decode("utf-8")
-                except Exception:
-                    fen = policy = ""
+    mirror = batch.mirror
+    if bool(mirror.any()):
+        flipped = bits[:, :, _SWAP_COLOURS.to(device)].flip(-2)  # swap colours + rank flip
+        bits = torch.where(mirror[:, None, None, None, None], flipped, bits)
+    bits = bits.flip(-2)  # tensor row = 7 - rank (rank 1 at the bottom)
 
-                val_out = struct.unpack_from("fff", content, offset + VALUE_OUTCOME_OFFSET)
-                val_mcts = struct.unpack_from("fff", content, offset + VALUE_MCTS_OFFSET)
-                (plies,) = struct.unpack_from("f", content, offset + PLIES_REMAINING_OFFSET)
-                (b_plies,) = struct.unpack_from("f", content, offset + BACKED_PLIES_OFFSET)
+    reps = torch.cat([batch.cur_rep[:, None], batch.past_rep], dim=1).to(bits.dtype)  # [B, 8]
+    hist = torch.cat(
+        [bits, reps[:, :, None, None, None].expand(bsz, 8, 1, 8, 8)], dim=2
+    )  # [B, 8 slots, 13, 8, 8]; channel = 13 * slot + k
+    planes = torch.zeros(bsz, INPUT_PLANES, 8, 8, dtype=dtype, device=device)
+    planes[:, :104] = hist.reshape(bsz, 104, 8, 8).to(dtype)
 
-                # History payload.
-                rep_bytes = content[
-                    offset + PAST_REPETITION_OFFSET : offset + PAST_REPETITION_OFFSET + _PAST_SLOTS
-                ]
-                rep_arr = np.frombuffer(rep_bytes, dtype=np.uint8).copy()
-                cur_rep = int(content[offset + CURRENT_REPETITION_OFFSET])
-                bb_bytes = content[
-                    offset + PAST_BITBOARDS_OFFSET : offset
-                    + PAST_BITBOARDS_OFFSET
-                    + _PAST_SLOTS * _BITBOARD_SLOT_BYTES
-                ]
-                bb_arr = (
-                    np.frombuffer(bb_bytes, dtype=np.uint64)
-                    .reshape(_PAST_SLOTS, _BITBOARDS_PER_SLOT)
-                    .copy()
-                )
+    wtm = batch.white_to_move ^ mirror
+    planes[:, 104] = wtm.to(dtype)[:, None, None]
 
-                offset += RECORD_SIZE
+    ep = batch.ep
+    has_ep = ep < 64
+    ep_sq = torch.where(has_ep, ep, torch.zeros_like(ep))
+    ep_rank = ep_sq // 8
+    ep_rank = torch.where(mirror, 7 - ep_rank, ep_rank)
+    ep_file = ep_sq % 8
+    rows_idx = torch.arange(bsz, device=device)[has_ep]
+    planes[rows_idx, 105, (7 - ep_rank)[has_ep], ep_file[has_ep]] = 1.0
 
-                if fen and policy:
-                    fens.append(fen)
-                    policies.append(policy)
-                    value_outcomes.append(val_out)
-                    value_mcts.append(val_mcts)
-                    plies_remaining.append(float(plies))
-                    backed_plies.append(float(b_plies))
-                    past_bitboards.append(bb_arr)
-                    past_repetitions.append(rep_arr)
-                    current_repetitions.append(cur_rep)
-        except Exception as e:
-            print(f"Error reading binary file: {e}")
-            return [], [], [], [], [], [], [], [], []
+    cr = batch.castling.to(torch.int64)
+    wk, wq, bk, bq = (cr & 1) > 0, (cr & 2) > 0, (cr & 4) > 0, (cr & 8) > 0
+    wk, bk = torch.where(mirror, bk, wk), torch.where(mirror, wk, bk)
+    wq, bq = torch.where(mirror, bq, wq), torch.where(mirror, wq, bq)
+    for ch, flag in ((106, wk), (107, wq), (108, bk), (109, bq)):
+        planes[:, ch] = flag.to(dtype)[:, None, None]
+    planes[:, 110] = (batch.halfmove / 100.0).clamp(max=1.0).to(dtype)[:, None, None]
+    return planes.permute(0, 2, 3, 1).contiguous()
 
-        return (
-            fens,
-            policies,
-            value_outcomes,
-            value_mcts,
-            plies_remaining,
-            backed_plies,
-            past_bitboards,
-            past_repetitions,
-            current_repetitions,
-        )
 
-    # ------------------------------------------------------------------ #
+def dense_policy_target(batch: Batch, vocab_size: int = VOCAB_SIZE) -> torch.Tensor:
+    """[B, vocab] visit distribution (renormalized; rows without entries are all zero)."""
+    target = torch.zeros(batch.policy_idx.shape[0], vocab_size, device=batch.policy_idx.device)
+    target.scatter_add_(1, batch.policy_idx, batch.policy_prob)
+    total = target.sum(dim=1, keepdim=True)
+    return target / total.clamp_min(1e-9)
+
+
+class ReplayBuffer:
+    """Memory-mapped view of the self-play buffer with optional recent-window sampling."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        window_c: int = 0,
+        window_alpha: float = 0.75,
+        window_beta: float = 0.4,
+        seed: int | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.writes_path = self.path.parent / (self.path.name + ".writes")
+        self.stats_path = self.path.parent / (self.path.name + ".stats.json")
+        self.window_c = window_c
+        self.window_alpha = window_alpha
+        self.window_beta = window_beta
+        self._mm: np.ndarray | None = None
+        self._mapped_records = 0
+        self.total_writes = 0
+        self.capacity = 0
+        self.fifo = False
+        self._rng = np.random.default_rng(seed)
+        self.refresh()
+
     @property
     def size(self) -> int:
-        return self._size
+        return self._mapped_records
 
-    def sample_batch(self, batch_size: int) -> SelfPlayBatch:
-        if self._size == 0:
-            raise RuntimeError("Self-play dataset is empty. Run self-play generator first.")
+    def refresh(self) -> None:
+        """Re-read the write counter and remap if the file grew."""
+        try:
+            n = self.path.stat().st_size // RECORD_SIZE
+        except FileNotFoundError:
+            n = 0
+        if n != self._mapped_records:
+            self._mm = np.memmap(self.path, dtype=RECORD_DTYPE, mode="r", shape=(n,)) if n else None
+            self._mapped_records = n
+        try:
+            self.total_writes = int(self.writes_path.read_text().strip() or 0)
+        except (FileNotFoundError, ValueError):
+            self.total_writes = n
+        try:
+            meta = json.loads(self.stats_path.read_text())
+            self.capacity = int(meta.get("capacity", n))
+            self.fifo = bool(meta.get("fifo", False))
+        except (FileNotFoundError, ValueError):
+            self.capacity = max(self.capacity, n)
 
-        indices = self._rng.integers(0, self._size, size=batch_size, endpoint=False)
-        planes = np.zeros((batch_size, 8, 8, INPUT_PLANES), dtype=np.float32)
-        value_outcomes = np.zeros((batch_size, 3), dtype=np.float32)
-        value_mcts = np.zeros((batch_size, 3), dtype=np.float32)
-        plies_remaining = np.full((batch_size,), -1.0, dtype=np.float32)
-        backed_plies = np.full((batch_size,), -1.0, dtype=np.float32)
-        policy_indices = np.full((batch_size,), NULL_POLICY_INDEX, dtype=np.int64)
-        fens: list[str] = []
+    def read_stats(self) -> dict:
+        try:
+            return json.loads(self.stats_path.read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
 
-        for row, idx in enumerate(indices):
-            fen = self._fens[idx]
-            wdl_outcome = list(self._value_outcomes[idx])
-            wdl_mcts = list(self._value_mcts[idx])
-            plies = self._plies_remaining[idx] if idx < len(self._plies_remaining) else -1.0
-            b_plies = self._backed_plies[idx] if idx < len(self._backed_plies) else -1.0
-            policy_str = self._policies[idx]
-            pb = (
-                self._past_bitboards[idx]
-                if idx < len(self._past_bitboards)
-                else np.zeros((_PAST_SLOTS, _BITBOARDS_PER_SLOT), dtype=np.uint64)
+    def current_window(self) -> int:
+        n = self._mapped_records
+        if not self.fifo or self.window_c <= 0:
+            return n
+        w = window_size(self.total_writes, self.window_c, self.window_alpha, self.window_beta)
+        return max(1, min(w, n, self.total_writes))
+
+    def sample_indices(self, batch_size: int) -> np.ndarray:
+        n = self._mapped_records
+        if n == 0:
+            raise RuntimeError("Replay buffer is empty. Run self-play first.")
+        w = self.current_window()
+        if w >= n:
+            return self._rng.integers(0, n, size=batch_size)
+        # Newest record is at (total_writes - 1) % capacity; walk back r < w.
+        r = self._rng.integers(0, w, size=batch_size)
+        cap = max(self.capacity, n)
+        idx = (self.total_writes - 1 - r) % cap
+        return np.minimum(idx, n - 1)
+
+    def sample_rows(self, batch_size: int) -> np.ndarray:
+        assert self._mm is not None
+        idx = np.sort(self.sample_indices(batch_size))  # sorted = friendlier page access
+        rows = np.asarray(self._mm[idx])
+        ok = rows["version"] == RECORD_VERSION
+        if not ok.all():
+            # Torn or foreign rows (a write racing the read): resample them.
+            bad = int((~ok).sum())
+            rows = (
+                np.concatenate([rows[ok], self.sample_rows(bad)])
+                if ok.any()
+                else self.sample_rows(batch_size)
             )
-            pr = (
-                self._past_repetitions[idx]
-                if idx < len(self._past_repetitions)
-                else np.zeros(_PAST_SLOTS, dtype=np.uint8)
-            )
-            cur_rep = self._current_repetitions[idx] if idx < len(self._current_repetitions) else 0
+        return rows
 
-            do_mirror = random.random() < 0.5
-            if do_mirror:
-                fen = mirror_fen(fen)
-                policy_str = mirror_policy_str(policy_str)
-                pb = mirror_past_bitboards(pb)
-                # Repetition flags are invariant under mirror.
-            fens.append(fen)
-            planes[row] = encode_record_planes(
-                fen,
-                past_bitboards=pb,
-                past_repetitions=pr,
-                current_repetition=bool(cur_rep),
-            )
-            value_outcomes[row] = wdl_outcome
-            value_mcts[row] = wdl_mcts
-            plies_remaining[row] = plies
-            backed_plies[row] = b_plies
-            policy_indices[row] = _policy_str_to_idx(policy_str)
-
-        return SelfPlayBatch(
-            planes=planes,
-            policy_indices=policy_indices,
-            value_outcomes=value_outcomes,
-            value_mcts=value_mcts,
-            plies_remaining=plies_remaining,
-            backed_plies=backed_plies,
-            fens=fens,
-        )
+    def sample_batch(self, batch_size: int, mirror_prob: float = 0.5) -> Batch:
+        return records_to_batch(self.sample_rows(batch_size), mirror_prob=mirror_prob)
 
 
-def _ensure_tuple(row) -> tuple[float, float, float]:
-    if row is None:
-        return (0.0, 0.0, 0.0)
-    if isinstance(row, (list, tuple)):
-        vals = list(row)
-        vals += [0.0] * max(0, 3 - len(vals))
-        return (float(vals[0]), float(vals[1]), float(vals[2]))
-    try:
-        scalar = float(row)
-    except (TypeError, ValueError):
-        return (0.0, 0.0, 0.0)
-    return (scalar, 0.0, 0.0)
+class Prefetcher:
+    """Background thread that keeps a few pinned CPU batches ready."""
 
+    def __init__(self, buffer: ReplayBuffer, batch_size: int, mirror_prob: float, depth: int = 3):
+        import queue
+        import threading
 
-def mirror_fen(fen: str) -> str:
-    board = chess.Board(fen)
-    mirrored = board.mirror()  # mirror() returns a NEW board, does not modify in place
-    return mirrored.fen()
+        self.buffer = buffer
+        self.batch_size = batch_size
+        self.mirror_prob = mirror_prob
+        self._queue: queue.Queue = queue.Queue(maxsize=depth)
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                with self._lock:
+                    batch = self.buffer.sample_batch(self.batch_size, self.mirror_prob)
+                pinned = {
+                    k: (v.pin_memory() if torch.is_tensor(v) and torch.cuda.is_available() else v)
+                    for k, v in batch.__dict__.items()
+                }
+                self._queue.put(Batch(**pinned))
+            except Exception as exc:  # keep the trainer alive; surface on next get()
+                self._queue.put(exc)
+                time.sleep(1.0)
 
-def mirror_policy_str(policy_str: str) -> str:
-    # python-chess board.mirror() is a VERTICAL flip only (ranks 1<->8, files
-    # unchanged). So flip each square's rank in place: from-rank stays with the
-    # from-square, to-rank with the to-square. The previous code transposed the
-    # from/to rank pairing (9-j on the from-square, 9-i on the to-square),
-    # making ~63% of mirrored labels illegal for their mirrored FEN — and since
-    # sample_batch mirrors 50% of samples, ~32% of ALL policy labels were
-    # illegal-for-position garbage, capping policy legal-prob at ~0.58.
-    return f"{policy_str[0]}{9 - int(policy_str[1])}{policy_str[2]}{9 - int(policy_str[3])}{policy_str[4:]}"
+    def refresh(self) -> None:
+        with self._lock:
+            self.buffer.refresh()
 
+    def get(self) -> Batch:
+        item = self._queue.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
 
-def _byte_reverse_u64(arr: np.ndarray) -> np.ndarray:
-    """Reverse the byte order of each uint64 in `arr` (rank-flip on bitboards)."""
-    view = arr.view(np.uint8).reshape(arr.shape + (8,))
-    flipped = view[..., ::-1].copy()
-    return flipped.view(np.uint64).reshape(arr.shape)
-
-
-def mirror_past_bitboards(pb: np.ndarray) -> np.ndarray:
-    """Mirror a (7, 12) uint64 array of historical piece bitboards.
-
-    Mirroring = rank-flip each bitboard (byte-reverse the uint64) + swap the
-    white/black halves (indices 0..5 ↔ 6..11), so the result describes the
-    same positions from the opposite-color perspective.
-    """
-    arr = np.asarray(pb, dtype=np.uint64).copy()
-    if arr.size == 0:
-        return arr
-    flipped = _byte_reverse_u64(arr)
-    # Swap W:PNBRQK (indices 0..5) ↔ B:PNBRQK (indices 6..11) within each slot.
-    swapped = np.concatenate([flipped[:, 6:12], flipped[:, 0:6]], axis=1)
-    return swapped
+    def close(self) -> None:
+        self._stop.set()

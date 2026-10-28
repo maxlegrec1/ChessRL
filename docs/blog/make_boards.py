@@ -1,0 +1,193 @@
+"""Board data for the post's games and puzzles (site/components/charts/chessrl-boards.json), and the
+piece drawings the board uses (site/components/charts/chessPieces.ts).
+
+  .venv/bin/python docs/blog/make_boards.py --puzzles puzzles.jsonl --puzzle 02TvL \
+      --game sims0 sims0.pgn 6 --game sf2000 sf2000.pgn 52 --ckpt step.pt --moves-left sims0
+
+--puzzles: rows from scripts/puzzle_scan.py; games: PGNs from scripts/cpu_stockfish_match.py.
+Every position is computed here with python-chess, so the blog's board only draws FENs. The
+pieces are python-chess's SVG set (Colin M. L. Burnett's drawings).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+import chess
+import chess.pgn
+import chess.svg
+
+CHARTS = Path(__file__).resolve().parent / "site" / "components" / "charts"
+OUT = CHARTS / "chessrl-boards.json"
+PIECES_TS = CHARTS / "chessPieces.ts"
+# Ladder anchor names (as scripts/showcase_games.py writes them) -> what a reader understands.
+PLAYERS = {"sf_s20_n1000 (ladder anchor)": "Stockfish 16, full strength, 1,000 positions per move",
+           "sf_s20_n5000 (ladder anchor)": "Stockfish 16, full strength, 5,000 positions per move",
+           "sf_s20_n20000 (ladder anchor)": "Stockfish 16, full strength, 20,000 positions per move"}
+
+
+def player(name: str) -> str:
+    """A PGN player name (scripts/showcase_games.py, scripts/cpu_stockfish_match.py) for readers."""
+    if "ChessRL" in name:
+        sims = re.search(r"\((\d+) simulations", name)
+        if sims and sims.group(1) == "0":
+            return "ChessRL, network alone (no search)"
+        return f"ChessRL, {sims.group(1) if sims else 800} simulations per move"
+    m = re.match(r"Stockfish 16 UCI_Elo (\d+) \((\d+) ms\)", name)
+    if m:
+        return f"Stockfish 16 limited to {m.group(1)} Elo, {m.group(2)} ms per move"
+    return PLAYERS.get(name, name)
+
+
+def ply(board: chess.Board, move: chess.Move) -> dict:
+    san = board.san(move)
+    board.push(move)
+    return {"san": san, "fen": board.fen(), "from": chess.square_name(move.from_square),
+            "to": chess.square_name(move.to_square)}
+
+
+def puzzle_line(row: dict) -> dict:
+    board = chess.Board(row["fen"])
+    setup = chess.Move.from_uci(row["moves"][0])
+    setup_san = board.san(setup)
+    board.push(setup)
+    start = board.fen()
+    side = "white" if board.turn == chess.WHITE else "black"
+    steps = iter(row["steps"])
+    plies = []
+    for k, uci in enumerate(row["moves"][1:]):
+        p = ply(board, chess.Move.from_uci(uci))
+        if k % 2 == 0:  # the solver's move: the network alone, then after its search
+            s = next(steps)
+            p["net"] = {"alone": s["prior"], "search": s["share"],
+                        **({"favourite": s["raw_top"], "favouriteAlone": s["raw_top_prior"]}
+                           if s["raw_top"] != p["san"] else {})}
+        plies.append(p)
+    return {"start": start, "plies": plies, "orientation": side, "sims": row.get("sims", 800),
+            "intro": f"{'White' if side == 'black' else 'Black'} has just played {setup_san}. "
+                     f"{side.capitalize()} to move and win.",
+            "meta": {"id": row["id"], "rating": row["rating"], "themes": row["themes"]}}
+
+
+def search_scores(ckpt: str, positions: list[chess.Board], sims: int) -> list[float]:
+    """White's expected score (win 1, draw 0.5) for each position, from the network's own search:
+    the most-visited move's average value, one simulation at a time as in the games."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.analysis.engine import Net, analyse  # noqa: PLC0415
+
+    net = Net(ckpt, threads=8)
+    out = []
+    for b in positions:
+        if b.is_checkmate():  # the side to move is mated
+            s = 0.0
+        elif b.is_game_over(claim_draw=True):
+            s = 0.5
+        else:
+            best = analyse(net, b, sims, batch=1)["moves"][0]
+            s = best["score"]
+        out.append(round(s if b.turn == chess.WHITE else 1 - s, 3))
+    return out
+
+
+def stockfish_scores(positions: list[chess.Board], depth: int) -> list[float]:
+    """White's expected score (win 1, draw 0.5) for each position, from full-strength Stockfish's
+    win/draw/loss estimate at a fixed depth."""
+    import shutil  # noqa: PLC0415
+
+    import chess.engine  # noqa: PLC0415
+
+    sf = chess.engine.SimpleEngine.popen_uci(shutil.which("stockfish") or "/usr/games/stockfish")
+    sf.configure({"Threads": 8, "Hash": 256, "UCI_ShowWDL": True})
+    out = []
+    try:
+        for b in positions:
+            if b.is_checkmate():
+                s = 0.0 if b.turn == chess.WHITE else 1.0
+            elif b.is_game_over(claim_draw=True):
+                s = 0.5
+            else:
+                s = sf.analyse(b, chess.engine.Limit(depth=depth))["wdl"].white().expectation()
+            out.append(round(s, 3))
+    finally:
+        sf.quit()
+    return out
+
+
+def game_line(pgn_path: Path, index: int, ckpt: str | None = None, moves_left: bool = False,
+              search_sims: int = 0, sf_depth: int = 0) -> dict:
+    with pgn_path.open() as fh:
+        for _ in range(index):
+            game = chess.pgn.read_game(fh)
+    board = game.board()
+    positions = [board.copy()]
+    plies = []
+    for m in game.mainline_moves():
+        plies.append(ply(board, m))
+        positions.append(board.copy())
+    h = game.headers
+    out = {"start": game.board().fen(), "plies": plies, "orientation": "white" if "ChessRL" in h["White"] else "black",
+           "white": player(h["White"]), "black": player(h["Black"]), "result": h["Result"]}
+    if ckpt and moves_left:
+        # The network's moves-left estimate for every position (its outcome head, in plies -> moves).
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from src.analysis.engine import Net  # noqa: PLC0415
+
+        est = [round(e / 2, 1) for _, _, e in Net(ckpt, threads=4).evaluate(positions)]
+        out["startMovesLeft"] = est[0]
+        for p, e in zip(plies, est[1:]):
+            p["movesLeft"] = e
+    if ckpt and search_sims:
+        scores = search_scores(ckpt, positions, search_sims)
+        out["searchSims"], out["startScore"] = search_sims, scores[0]
+        for p, s in zip(plies, scores[1:]):
+            p["whiteScore"] = s
+    if sf_depth:
+        scores = stockfish_scores(positions, sf_depth)
+        out["sfDepth"], out["startSfScore"] = sf_depth, scores[0]
+        for p, s in zip(plies, scores[1:]):
+            p["sfWhiteScore"] = s
+    return out
+
+
+def write_pieces() -> None:
+    # 45x45 drawings; ids and classes dropped (a board shows the same piece several times).
+    clean = {k: re.sub(r' (id|class)="[^"]*"', "", v) for k, v in chess.svg.PIECES.items()}
+    body = ",\n".join(f"  {k}: {json.dumps(v)}" for k, v in sorted(clean.items()))
+    PIECES_TS.write_text("// Chess pieces by Colin M. L. Burnett, as shipped with python-chess (chess.svg).\n"
+                         "// Generated by docs/blog/make_boards.py in ChessRL. Each is a 45x45 SVG fragment.\n"
+                         f"const PIECES: Record<string, string> = {{\n{body},\n}}\nexport default PIECES\n")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--puzzles", type=Path, required=True)
+    p.add_argument("--puzzle", nargs="+", required=True, help="puzzle ids, in the order the post shows them")
+    p.add_argument("--game", nargs=3, action="append", default=[], metavar=("NAME", "PGN", "INDEX"),
+                   help="a game to show: its name in the post's data, the PGN, its 1-based index there")
+    p.add_argument("--ckpt", help="the network that played the games (for --moves-left and --search-score)")
+    p.add_argument("--moves-left", nargs="*", default=[], help="games that get the network's moves-left estimate")
+    p.add_argument("--search-score", nargs="*", default=[],
+                   help="games that get White's expected score from the network's search, at every position")
+    p.add_argument("--search-sims", type=int, default=800)
+    p.add_argument("--stockfish-score", nargs="*", default=[],
+                   help="games that get White's expected score from full-strength Stockfish, at every position")
+    p.add_argument("--stockfish-depth", type=int, default=20)
+    a = p.parse_args()
+    rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
+    data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle},
+                  "games": {name: game_line(Path(pgn), int(idx), a.ckpt, name in a.moves_left,
+                                            a.search_sims if name in a.search_score else 0,
+                                            a.stockfish_depth if name in a.stockfish_score else 0)
+                            for name, pgn, idx in a.game}}
+    OUT.write_text(json.dumps(data, indent=1) + "\n")
+    write_pieces()
+    print("wrote", OUT.name, PIECES_TS.name, {pid: len(v["plies"]) for pid, v in data["puzzles"].items()},
+          {name: len(v["plies"]) for name, v in data["games"].items()})
+
+
+if __name__ == "__main__":
+    main()

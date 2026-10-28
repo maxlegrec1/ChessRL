@@ -1,0 +1,10 @@
+# Run B: the sims-400 recipe with the played move sampled in proportion to the
+# visit counts (root temperature 1.0) for the whole game instead of the first 30
+# plies, the only change: more varied late-game positions, at the cost of noisier
+# game results (which the search's value head learns from). Sampling all game
+# was neutral against opening-only at 6M positions on the ResNet; this tests it at
+# the encoder's plateau. Compare with enc_sims400 (seeds 1 and 2).
+extends: enc_sims400.yaml
+selfplay:
+  save_pgn: true  # for the opening-diversity metrics
+  temperature_plies: -1

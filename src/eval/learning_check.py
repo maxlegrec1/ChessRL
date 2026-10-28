@@ -226,13 +226,14 @@ def find_latest_checkpoint(run_dir: Path | None, use_teacher: bool = False) -> P
 
 
 def load_model(checkpoint_path: Path, device: str) -> SmallModel:
+    from src.models.factory import model_from_checkpoint
+
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model = SmallModel().to(device).eval()
-    # strict=False so pre-MLH checkpoints still load — the new mlh_* params
-    # stay at their fresh init.
-    model.load_state_dict(state, strict=False)
-    return model
+    if not (isinstance(ckpt, dict) and "model" in ckpt):
+        ckpt = {"model": ckpt}
+    # Architecture comes from the checkpoint's model_spec (main-branch = 4x64);
+    # strict=False so pre-MLH checkpoints still load.
+    return model_from_checkpoint(ckpt, device).eval()
 
 
 def run_inference(

@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChessRL analysis</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.base.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.brown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessground@9.1.1/assets/chessground.cburnett.css">
+<style>
+  :root {
+    --surface: #fcfcfb; --page: #f4f3f0; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --accent: #2a78d6; --good: #1baf7a; --row: #eef4fc;
+    --white-side: #f7f6f2; --draw-side: #b9b8b0; --black-side: #2b2b29;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --page: #0d0d0d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --accent: #3987e5; --good: #199e70; --row: #1f2a38;
+      --white-side: #e9e8e2; --draw-side: #6d6c66; --black-side: #0b0b0b;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; }
+  header h1 { font-size: 17px; margin: 0 12px 0 0; font-weight: 600; }
+  select, input, button { font: inherit; color: var(--ink); background: var(--surface);
+         border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  main { display: grid; grid-template-columns: minmax(280px, 640px) minmax(300px, 420px);
+         gap: 16px; padding: 0 16px 16px; align-items: start; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  #board { width: 100%; aspect-ratio: 1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  #fen { flex: 1; min-width: 200px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 6px; }
+  .wdl { display: flex; height: 22px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+  .wdl div { height: 100%; }
+  .wdl-legend { display: flex; justify-content: space-between; color: var(--ink2); font-size: 12px; margin-top: 4px; }
+  input[type=range] { width: 100%; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: right; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; padding: 5px 6px; border-bottom: 1px solid var(--line); color: var(--ink2); }
+  td:first-child { color: var(--ink); font-weight: 600; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--row); }
+  tbody tr.best td:first-child::before { content: ""; display: inline-block; width: 8px; height: 8px;
+         border-radius: 50%; background: var(--good); margin-right: 6px; }
+  .bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--accent); vertical-align: middle; margin-left: 6px; opacity: .8; }
+  #status { color: var(--ink2); font-size: 12px; min-height: 18px; }
+  #movelist { color: var(--ink2); font-family: ui-monospace, monospace; font-size: 12.5px; max-height: 140px; overflow: auto; }
+  .note { color: var(--muted); font-size: 12px; }
+  .scroll { max-height: 360px; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>♟ ChessRL analysis</h1>
+  <label>Model <select id="model"></select></label>
+  <span class="note">CPU search on this machine · no root noise</span>
+  <a class="note" href="/games">Self-play games →</a>
+</header>
+<main>
+  <section class="card">
+    <div id="board" class="cg-wrap"></div>
+    <div class="row">
+      <button id="start">Start position</button>
+      <button id="undo">Undo</button>
+      <button id="flip">Flip board</button>
+    </div>
+    <div class="row">
+      <input id="fen" spellcheck="false" aria-label="FEN">
+      <button id="load">Load FEN</button>
+    </div>
+    <p class="note">A pasted FEN has no move history; the network was trained with the last 7 positions
+      as input, so it plays best on positions reached by playing moves from the start.</p>
+  </section>
+  <section class="card">
+    <div class="label">Mode</div>
+    <div class="row" style="margin-top:0">
+      <select id="mode">
+        <option value="analysis">Analysis</option>
+        <option value="white">Play as White</option>
+        <option value="black">Play as Black</option>
+      </select>
+      <label id="hintsbox" hidden><input type="checkbox" id="hints"> Show hints</label>
+      <button id="newgame" hidden>New game</button>
+    </div>
+
+    <div class="label" style="margin-top:14px">Search: <span id="simsval"></span></div>
+    <input type="range" id="sims" min="0" max="1600" step="50" value="400">
+    <div class="row" id="analysis-buttons">
+      <button id="play" class="primary">▶ Self-play</button>
+      <button id="step">Play best move</button>
+    </div>
+    <div id="status" style="margin-top:8px"></div>
+
+    <div id="hintpanel">
+      <div class="label" style="margin-top:10px">Evaluation (value head)</div>
+      <div class="wdl" id="wdl"><div id="w"></div><div id="d"></div><div id="l"></div></div>
+      <div class="wdl-legend"><span id="wtext">White –</span><span id="dtext">draw –</span><span id="ltext">Black –</span></div>
+      <div class="label" style="margin-top:10px">Candidate moves</div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Move</th><th>Policy</th><th>Visits</th><th title="expected score for the side to move">Score</th></tr></thead>
+          <tbody id="moves"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="label" style="margin-top:12px">Game</div>
+    <div id="movelist"></div>
+  </section>
+</main>
+<script type="module">
+import { Chessground } from "https://cdn.jsdelivr.net/npm/chessground@9.1.1/+esm";
+
+const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+const $ = (id) => document.getElementById(id);
+const pct = (x) => (x == null ? "–" : `${(100 * x).toFixed(1)}%`);
+let baseFen = START, moves = [], orientation = "white", playing = false, inflight = null, last = null;
+let mode = "analysis", thinking = false;  // mode: "analysis" | "white" | "black" (the colour you play)
+const playMode = () => mode !== "analysis";
+const showHints = () => !playMode() || $("hints").checked;
+
+const cg = Chessground($("board"), {
+  fen: START, orientation,
+  movable: { free: false, color: "white", showDests: true, events: { after: onUserMove } },
+  drawable: { enabled: true, visible: true },
+  animation: { duration: 150 },
+});
+
+function onUserMove(orig, dest) {
+  const piece = cg.state.pieces.get(dest);
+  const promo = piece && piece.role === "pawn" && (dest[1] === "8" || dest[1] === "1") ? "q" : "";
+  stopPlay();
+  moves.push(orig + dest + promo);
+  if (playMode()) modelReply(); else analyse();
+}
+
+async function request(sims) {
+  if (inflight) inflight.abort();
+  inflight = new AbortController();
+  const body = { model: $("model").value, fen: baseFen, moves, sims: sims ?? +$("sims").value };
+  const res = await fetch("/api/analyse", { method: "POST", body: JSON.stringify(body), signal: inflight.signal });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+async function analyse(sims) {
+  $("status").textContent = "thinking…";
+  try {
+    const data = await request(sims);
+    render(data);
+    return data;
+  } catch (e) {
+    if (e.name !== "AbortError") { $("status").textContent = `error: ${e.message}`; moves.pop(); }
+    return null;
+  }
+}
+
+// Play mode: the model searches the position in front of it (slider simulations) and plays its best move.
+async function modelReply() {
+  thinking = true;
+  const d = await analyse();
+  if (d && !d.status && d.best && d.turn !== mode) {
+    moves.push(d.best);
+    await analyse(showHints() ? undefined : 0);  // your turn: search only if hints are shown
+  }
+  thinking = false;
+  if (last) render(last);
+}
+
+function render(d) {
+  last = d;
+  const turn = d.turn;
+  const yourTurn = !playMode() || turn === mode;
+  cg.set({
+    fen: d.fen, turnColor: turn, check: d.check, lastMove: d.last ? [d.last.slice(0, 2), d.last.slice(2, 4)] : undefined,
+    movable: { color: playing || thinking || d.status || !yourTurn ? undefined : turn, dests: new Map(Object.entries(d.dests)) },
+  });
+  $("fen").value = d.fen;
+  $("hintpanel").hidden = !showHints();
+  // Arrows: the search's visit share (or the raw policy at 0 simulations).
+  const useShare = d.sims > 0;
+  const shapes = (d.moves || []).slice(0, 5)
+    .map((m, i) => ({ m, w: useShare ? m.share : m.prior, i }))
+    .filter(({ w, i }) => i === 0 || w >= 0.04)
+    .map(({ m, w, i }) => ({ orig: m.uci.slice(0, 2), dest: m.uci.slice(2, 4), brush: i === 0 ? "green" : "blue",
+                              modifiers: { lineWidth: Math.round(3 + 13 * w) } }));
+  cg.setAutoShapes(showHints() ? shapes : []);
+  // Value head, shown from White's side.
+  if (d.wdl) {
+    const [w, dr, l] = turn === "white" ? d.wdl : [d.wdl[2], d.wdl[1], d.wdl[0]];
+    $("w").style.cssText = `width:${100 * w}%;background:var(--white-side)`;
+    $("d").style.cssText = `width:${100 * dr}%;background:var(--draw-side)`;
+    $("l").style.cssText = `width:${100 * l}%;background:var(--black-side)`;
+    $("wtext").textContent = `White ${pct(w)}`; $("dtext").textContent = `draw ${pct(dr)}`; $("ltext").textContent = `Black ${pct(l)}`;
+  }
+  const maxShare = Math.max(1e-9, ...(d.moves || []).map((m) => (useShare ? m.share : m.prior)));
+  $("moves").innerHTML = (d.moves || []).slice(0, 30).map((m, i) => `
+    <tr data-uci="${m.uci}" class="${i === 0 ? "best" : ""}">
+      <td>${m.san}</td><td>${pct(m.prior)}</td>
+      <td>${useShare ? `${m.visits}<span class="bar" style="width:${Math.round(40 * m.share / maxShare)}px"></span>` : "–"}</td>
+      <td>${m.score == null ? "–" : pct(m.score)}</td></tr>`).join("");
+  document.querySelectorAll("#moves tr").forEach((tr) => tr.addEventListener("click", () => {
+    if (playMode() && !yourTurn) return;
+    stopPlay(); moves.push(tr.dataset.uci);
+    if (playMode()) modelReply(); else analyse();
+  }));
+  $("status").textContent = statusText(d, yourTurn);
+  const sans = d.sans || [];
+  const firstNo = +baseFen.split(" ")[5] || 1, blackFirst = baseFen.split(" ")[1] === "b";
+  let out = [], n = firstNo, i = 0;
+  if (blackFirst && sans.length) { out.push(`${n}… ${sans[0]}`); i = 1; n++; }
+  for (; i < sans.length; i += 2, n++) out.push(`${n}. ${sans[i]}${sans[i + 1] ? " " + sans[i + 1] : ""}`);
+  $("movelist").textContent = out.join("  ") || "–";
+}
+
+function statusText(d, yourTurn) {
+  const params = d.params ? ` · ${(d.params / 1e6).toFixed(2)}M params` : "";
+  if (!playMode()) {
+    const s = d.status ? `Game over: ${d.status}` : `${d.turn} to move`;
+    return `${s} · ${d.sims} simulations in ${d.seconds}s${params}`;
+  }
+  if (d.status === "checkmate") return d.turn === mode ? "Checkmate: the model wins." : "Checkmate: you win!";
+  if (d.status) return `Game over: ${d.status}.`;
+  const who = `model plays with ${$("sims").value} simulations per move${params}`;
+  return thinking || !yourTurn ? `Model thinking… (${who})` : `Your move (${who})`;
+}
+
+async function playLoop() {
+  while (playing) {
+    const d = last && last.fen && !last.status ? last : await analyse();
+    if (!playing || !d || d.status || !d.best) break;
+    moves.push(d.best);
+    const next = await analyse();
+    if (!next || next.status) break;
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  stopPlay();
+}
+
+function stopPlay() {
+  playing = false;
+  $("play").textContent = "▶ Self-play";
+  if (last && !last.status && !thinking && (!playMode() || last.turn === mode)) {
+    cg.set({ movable: { color: last.turn, dests: new Map(Object.entries(last.dests)) } });
+  }
+}
+
+// Start (or restart) from baseFen; in play mode the model moves first when it's its turn.
+async function newGame() {
+  stopPlay();
+  moves = [];
+  const d = await analyse(playMode() && !showHints() ? 0 : undefined);
+  if (playMode() && d && !d.status && d.turn !== mode) modelReply();
+}
+
+function setMode(m) {
+  mode = m;
+  const p = playMode();
+  $("hintsbox").hidden = !p;
+  $("newgame").hidden = !p;
+  $("analysis-buttons").hidden = p;
+  if (p) { $("hints").checked = false; orientation = mode; cg.set({ orientation }); }
+}
+
+$("mode").addEventListener("change", () => { setMode($("mode").value); newGame(); });
+$("newgame").addEventListener("click", () => { baseFen = START; newGame(); });
+$("hints").addEventListener("change", () => {
+  if ($("hints").checked && last && !last.status && last.turn === mode && !thinking) analyse(); else if (last) render(last);
+});
+$("play").addEventListener("click", () => {
+  if (playing) return stopPlay();
+  playing = true;
+  $("play").textContent = "■ Stop";
+  playLoop();
+});
+$("step").addEventListener("click", async () => {
+  stopPlay();
+  const d = last && !last.status ? last : await analyse();
+  if (d && d.best) { moves.push(d.best); analyse(); }
+});
+$("undo").addEventListener("click", () => {
+  if (thinking) return;
+  stopPlay();
+  // In play mode take back your move and the model's reply together.
+  const plies = playMode() && last && last.turn === mode && moves.length >= 2 ? 2 : 1;
+  moves.splice(Math.max(0, moves.length - plies));
+  analyse(playMode() && !showHints() ? 0 : undefined).then((d) => {
+    if (playMode() && d && !d.status && d.turn !== mode) modelReply();
+  });
+});
+$("start").addEventListener("click", () => { baseFen = START; newGame(); });
+$("load").addEventListener("click", () => { baseFen = $("fen").value.trim() || START; newGame(); });
+$("flip").addEventListener("click", () => { orientation = orientation === "white" ? "black" : "white"; cg.set({ orientation }); });
+$("model").addEventListener("change", () => { if (!thinking) analyse(playMode() && !showHints() ? 0 : undefined); });
+$("sims").addEventListener("input", () => { $("simsval").textContent = simsText(); });
+$("sims").addEventListener("change", () => { if (!playMode()) analyse(); else if (last) render(last); });
+const simsText = () => (+$("sims").value === 0 ? "policy only (0 simulations)" : `${$("sims").value} simulations`);
+$("simsval").textContent = simsText();
+
+// Models grouped by run (best-rated run first), newest checkpoint first within a run.
+const models = await (await fetch("/api/models")).json();
+const groups = new Map();
+for (const m of models) { if (!groups.has(m.run)) groups.set(m.run, []); groups.get(m.run).push(m); }
+const elo = (m) => (m.elo == null ? "unrated" : Math.round(m.elo).toLocaleString("en-US"));
+$("model").innerHTML = [...groups].map(([run, ms]) => `<optgroup label="${run}">${
+  ms.sort((a, b) => b.step - a.step).map((m) => `<option value="${m.id}"${m.default ? " selected" : ""}>${run} · step ${m.step / 1000}k · ${elo(m)}</option>`).join("")
+}</optgroup>`).join("");
+analyse();
+</script>
+</body>
+</html>
