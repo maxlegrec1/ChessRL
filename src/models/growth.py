@@ -1,4 +1,4 @@
-"""Function-preserving growth of the SmallModel ResNet trunk.
+"""Function-preserving growth of the ResNet trunk and of the encoder's depth.
 
 Depth: new residual blocks get a zero-initialised final BatchNorm (gamma =
 beta = 0), so each new block adds 0 to its input; block inputs are post-ReLU

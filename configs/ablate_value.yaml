@@ -1,4 +1,0 @@
-# Leave-one-out ablation of the signal arm: MCTS uses value_q / mlh_q (main)
-# instead of the outcome-trained heads.
-extends: signal.yaml
-search_heads: search

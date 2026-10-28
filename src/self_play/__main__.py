@@ -39,8 +39,6 @@ _CPP_FIELDS = (
     "pcr_fast_simulations",
     "quick_policy_temperature",
     "fifo_buffer",
-    "curriculum_prob",
-    "curriculum_max_pieces",
 )
 
 _STAT_FIELDS = (
@@ -56,7 +54,6 @@ _STAT_FIELDS = (
     "fast_searches",
     "policy_moves",
     "records_written",
-    "curriculum_games",
     "playthrough_games",
     "playthrough_would_resign",
     "playthrough_false_resign",
@@ -76,15 +73,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def curriculum_prob_at(sp: SelfPlayConfig, trainer_step: int) -> float:
-    """curriculum_prob linearly annealed to 0 over curriculum_anneal_steps."""
-    if sp.curriculum_anneal_steps <= 0:
-        return sp.curriculum_prob
-    return sp.curriculum_prob * max(0.0, 1.0 - trainer_step / sp.curriculum_anneal_steps)
-
-
 def build_cpp_config(
-    sp: SelfPlayConfig, engine_path: str, buffer_path: Path, trainer_step: int
+    sp: SelfPlayConfig, engine_path: str, buffer_path: Path
 ) -> _inference_cpp.SelfPlayConfig:
     cfg = _inference_cpp.SelfPlayConfig()
     for name in _CPP_FIELDS:
@@ -94,7 +84,6 @@ def build_cpp_config(
     cfg.concurrency = sp.boards
     cfg.max_games = -1
     cfg.pgn_dir = str(sp.pgn_dir)
-    cfg.curriculum_prob = curriculum_prob_at(sp, trainer_step)
     return cfg
 
 
@@ -122,12 +111,10 @@ def main() -> int:
         f"temp_plies={sp.temperature_plies} late_temp={sp.temperature_late} "
         f"dirichlet={sp.use_dirichlet}(alpha={sp.dirichlet_alpha}, eps={sp.dirichlet_epsilon}) "
         f"random_opening_plies={sp.random_opening_plies} resign={sp.resign_threshold} "
-        f"pcr={sp.pcr_full_prob}/{sp.pcr_fast_simulations} fifo={sp.fifo_buffer} "
-        f"curriculum={sp.curriculum_prob}(anneal {sp.curriculum_anneal_steps})"
+        f"pcr={sp.pcr_full_prob}/{sp.pcr_fast_simulations} fifo={sp.fifo_buffer}"
     )
 
     worker = None
-    current_curriculum = None
     resign_mark = None  # (would, false) counters at the last calibration
     window_t = time.time()
     window_positions = 0
@@ -146,23 +133,17 @@ def main() -> int:
                     time.sleep(5)
                     engine_watcher._refresh(force=True)
                     continue
-                step = engine_watcher.engine_step
                 worker = _inference_cpp.SelfPlayWorker(
-                    build_cpp_config(sp, engine_path, buffer_path, step)
+                    build_cpp_config(sp, engine_path, buffer_path)
                 )
-                current_curriculum = curriculum_prob_at(sp, step)
-                console.log(f"Initialized worker with engine: {engine_path} (step {step})")
+                console.log(
+                    f"Initialized worker with engine: {engine_path} "
+                    f"(step {engine_watcher.engine_step})"
+                )
             elif new_engine:
                 # Swap in place: games in progress keep going on the new net.
                 worker.set_engine(new_engine)
-                step = engine_watcher.engine_step
-                curriculum = curriculum_prob_at(sp, step)
-                if curriculum != current_curriculum:
-                    worker.set_config(build_cpp_config(sp, new_engine, buffer_path, step))
-                    current_curriculum = curriculum
-                console.log(
-                    f"Swapped engine: {new_engine} (step {step}, curriculum {curriculum:.3f})"
-                )
+                console.log(f"Swapped engine: {new_engine} (step {engine_watcher.engine_step})")
 
             step_metrics = worker.step()
             window_positions += step_metrics.positions_generated
@@ -194,12 +175,7 @@ def main() -> int:
                         if new != sp.resign_threshold:
                             sp.resign_threshold = new
                             worker.set_config(
-                                build_cpp_config(
-                                    sp,
-                                    engine_watcher.engine_path,
-                                    buffer_path,
-                                    engine_watcher.engine_step,
-                                )
+                                build_cpp_config(sp, engine_watcher.engine_path, buffer_path)
                             )
                         resign_mark = (
                             stats.playthrough_would_resign,
@@ -213,7 +189,6 @@ def main() -> int:
                     "games_per_sec": window_games / dt,
                     "step_seconds": window_runtime / max(1, window_steps),
                     "buffer_records": worker.get_buffer_size(),
-                    "curriculum_prob": current_curriculum,
                     "resign_threshold": sp.resign_threshold,
                     **{f"total_{k}": getattr(stats, k) for k in _STAT_FIELDS},
                 }

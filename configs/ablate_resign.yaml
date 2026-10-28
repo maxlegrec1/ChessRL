@@ -1,4 +1,0 @@
-# Leave-one-out ablation of the signal arm: no resignation (main).
-extends: signal.yaml
-selfplay:
-  resign_threshold: 0.0

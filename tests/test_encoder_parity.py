@@ -1,11 +1,8 @@
 """Cross-language parity for the 111-plane encoder.
 
 The Python encoder (`src.models.small.fen_encoder.fen_to_tensor`) and the
-C++ encoder (`encodeSmallFeatures` exposed via the new pybind hook
-`encode_position_with_history`) MUST agree bit-for-bit on the input
-tensor for every position the model ever sees. This was the load-bearing
-verification when planning the AlphaZero history extension — same risk
-class as the cache rank-flip bug we hit earlier.
+C++ encoder (`encodeSmallFeatures`, exposed as `encode_position_with_history`)
+must agree bit-for-bit on the input tensor for every position the model sees.
 """
 
 from __future__ import annotations

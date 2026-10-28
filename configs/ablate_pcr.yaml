@@ -1,5 +1,0 @@
-# Leave-one-out ablation of the signal arm: every move gets the full 800-sim
-# search and is recorded (main) — no playout-cap randomization.
-extends: signal.yaml
-selfplay:
-  pcr_full_prob: 1.0

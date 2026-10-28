@@ -126,8 +126,7 @@ class EncoderModel(nn.Module):
     def spec(self) -> dict:
         return {"arch": "encoder", **self.cfg}
 
-    def forward(self, inp, *, return_all: bool = False, **_):
-        x = inp[0] if isinstance(inp, (list, tuple)) else inp
+    def forward(self, x, *, return_all: bool = False):
         b = x.shape[0]
         x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos
         h = x0

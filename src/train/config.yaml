@@ -1,103 +1,104 @@
+# The training recipe: what `python -m src.run` uses for a new run. The run directory keeps a
+# copy (artifacts/runs/<id>/config.yaml), which --resume reads. Every setting is written out:
+# a key missing here falls back to the dataclass default in config.py, which is the original
+# (first post) recipe, not this one. Field-by-field reference: docs/CONFIG.md.
+
 device: cuda
-# 2048 (was 1024): lower-variance updates + better trainer-GPU use + fewer
-# trainer steps per unit data. LR deliberately left at 0.001 — flag if
-# convergence shifts (a ~1.4x LR bump is the usual large-batch pairing).
 batch_size: 2048
 learning_rate: 0.001
-weight_decay: 0.0
+optimizer: adamw
+# Decoupled weight decay, on weight matrices only (norms, biases and gains are exempt). It
+# keeps the encoder's activations well inside FP16 range for the TensorRT engine.
+weight_decay: 0.05
 beta1: 0.9
 beta2: 0.999
-log_every: 1
+grad_clip: 1.0
+lr_schedule:
+  kind: constant
+  warmup_steps: 1000
 amp_dtype: float16
-run_name: null
-teacher_decay: 0.8
-teacher_weight: 0.2
+log_every: 5
 
-checkpoint:
-  dir: artifacts/checkpoints
-  # 500 (was 100): self-play is ~2.2x faster and target_k makes the trainer
-  # step-rate track it, so at 100 the TRT engine rebuilt ~2.2x too often in
-  # wall-clock (perma-convert + data-gen model churning too fast). 500
-  # restores a slow, stable engine cadence and amortizes the TRT build cost.
-  every_steps: 500
-  keep_last: 999999
-  build_script: scripts/build_trt.sh
-  engine_dir: artifacts/engines
-  iteration_file: artifacts/engines/.iteration
+model:
+  arch: encoder # transformer, one token per square: 0.81M parameters
+  d_model: 128
+  layers: 4
+  heads: 8
+  d_ff: 256
 
-data:
-  dataset_path: artifacts/buffers/buffer.bin
-  reload_seconds: 20
-  # ~10% of selfplay.max_buffer_size — wait until the replay buffer has this
-  # many records before training starts, so the first batches are drawn from
-  # diverse data and the steady-state samples-per-insertion ratio is the
-  # constraint rather than the initial transient. Scaled with the 2x buffer.
-  min_samples_to_start: 200000
-  warmup_poll_seconds: 5
-  # Trainer pacing: each record gets sampled this many times on average over its
-  # buffer lifetime. Sleep auto-adjusts to track the live self-play rate.
-  target_k: 5.0
-
-selfplay:
-  boards: 1024
-  # MCTS worker threads. With virtual-loss batched descent (width>1) each
-  # thread holds W leaves in flight, so fewer threads is better: the bench
-  # sweep on the 4090 found width=8 + threads=128 → 347 pos/sec, beating
-  # threads=256 (293) — larger thread counts inflate per-batch latency.
-  # 0 = legacy hardcoded 256.
-  threads: 128
-  # 0 disables the TT entirely. Profile measured ~1.5% hit rate during
-  # self-play (with random-opening plies), making the per-leaf lock+hash
-  # overhead net-negative. Re-enable (e.g. 4096) only if hit rate climbs.
-  hash_size: 0
-  simulations: 800
-  cpuct: 0.65
-  temperature: 1.3
-  temperature_at_root: 1.0
-  # Virtual-loss batched-descent width. 1 = legacy strict-sequential MCTS
-  # (search quality every existing model was trained on, ~168 pos/sec).
-  # 8 = throughput knee on the 4090 (~356 pos/sec steady-state, 2.1×) at
-  # the cost of blurrier search. Off-knee widths buy little (w=48 only
-  # ~356 too, but Elo craters). This is a NEW quality/throughput tradeoff
-  # — pre-overhaul self-play always ran at the width=1 equivalent.
-  virtual_loss_width: 8
-  use_dirichlet: true
-  # Canonical AlphaZero chess values (Silver et al. 2018):
-  #   α = 0.3, ε = 0.25 (verified against the AlphaZero/AlphaGo-Zero papers
-  #   and the Lc0 implementation). Previously 0.12 / 0.05 — both dialled well
-  #   below canonical, which starves rare actions (e.g. castling: only 132
-  #   true castles in 2M buffer records, model ranks O-O dead-last 48/48 in a
-  #   position where its own V_q recognises O-O as the BEST post-move value).
-  #   Restoring the canonical values puts ~25% noise mass on root priors,
-  #   giving MCTS exploration a real shot at low-prior legal moves.
-  dirichlet_alpha: 0.3
-  dirichlet_epsilon: 0.25
-  # 2,000,000 (was 1,000,000): self-play is ~2.2x faster, so a 1M buffer was
-  # fully cycled ~2.2x faster — each record's wall-clock lifetime / effective
-  # data age shrank, making the training distribution move too fast. 2M
-  # restores the old effective data window. ~832 B/record => ~1.7 GB on disk.
-  max_buffer_size: 2000000
-  flush_interval: 1
-  poll_seconds: 300
-  save_pgn: false
-  pgn_dir: artifacts/pgns
-  # Optional: play N uniform-random legal plies at the start of each game for
-  # opening diversity (0 disables; current behavior). A small positive value
-  # like 4-8 dramatically increases the fraction of buffer records with
-  # converged MCTS WDL signal.
-  random_opening_plies: 8
-
+# The policy learns the search's visit counts. The search reads the value and moves-left
+# heads trained on game results, not the ones trained on its own backed-up estimates.
+policy_target: visits
+search_heads: outcome
 loss_weights:
-  # Coefficients on each head's loss in total_loss.
-  # Defaults preserve the previously hardcoded recipe.
-  policy: 0.1
+  policy: 1.0
   value: 1.0
   value_q: 1.0
   mlh: 0.05
   mlh_q: 0.05
 
+checkpoint:
+  dir: artifacts/checkpoints
+  # A checkpoint and a new TensorRT engine every 500 steps. The engine builds in the
+  # background (async_engine_build) and self-play loads it without restarting.
+  every_steps: 500
+  keep_last: 999999
+  build_script: scripts/build_trt.sh
+  engine_dir: artifacts/engines
+  iteration_file: artifacts/engines/.iteration
+async_engine_build: true
+
+data:
+  dataset_path: artifacts/buffers/buffer.bin
+  min_samples_to_start: 50000
+  warmup_poll_seconds: 5
+  # Pacing: the trainer samples each record about target_k times on average.
+  target_k: 5.0
+  # Sample from a window over the newest records that grows with the data (KataGo):
+  # W(N) = c * (1 + beta * ((N / c) ** alpha - 1) / alpha). Needs selfplay.fifo_buffer.
+  window_c: 250000
+  window_alpha: 0.75
+  window_beta: 0.4
+
+selfplay:
+  boards: 1024
+  # Fewer threads batch better with virtual-loss width 8 (128 measured faster than 256).
+  threads: 128
+  hash_size: 0 # transposition table off: ~1.5% hit rate, not worth the locking
+  # Playout-cap randomisation: 25% of moves get a full 400-simulation search and are saved
+  # for training; the others get 50 simulations and only move the game forward.
+  simulations: 400
+  pcr_full_prob: 0.25
+  pcr_fast_simulations: 50
+  cpuct: 0.65
+  temperature: 1.3 # prior temperature inside the tree
+  # Moves are sampled from the visit counts for the first 30 searched plies; after that the
+  # most visited move is played.
+  temperature_at_root: 1.0
+  temperature_plies: 30
+  temperature_late: 0.0
+  # Virtual-loss width: each thread collects 8 leaves per network call (bigger GPU batches,
+  # slightly blurrier search). 1 = strictly sequential search.
+  virtual_loss_width: 8
+  use_dirichlet: true
+  dirichlet_alpha: 0.3 # AlphaZero's chess values, on full searches only
+  dirichlet_epsilon: 0.25
+  # Uniform-random plies at the start of every game, for opening variety.
+  random_opening_plies: 8
+  # Resign below 5% expected score for 3 own moves in a row. 10% of games never resign,
+  # to measure how often resigning would have been wrong.
+  resign_threshold: 0.05
+  resign_consecutive: 3
+  resign_playthrough: 0.1
+  max_plies: 600
+  # Ring buffer: 2M records x 1,280 bytes = 2.6 GB, the oldest records overwritten first.
+  max_buffer_size: 2000000
+  fifo_buffer: true
+  poll_seconds: 300
+  save_pgn: false
+  pgn_dir: artifacts/pgns
+
 wandb:
+  enabled: false # metrics go to <run>/metrics/*.jsonl, which the dashboard reads
   project: self_play
   entity: null
-  run_name: null
-  enabled: true

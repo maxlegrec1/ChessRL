@@ -16,7 +16,7 @@ from torch import amp, optim
 
 from src.models.factory import build_model, normalize_spec
 from src.models.growth import grow_encoder, grow_resnet
-from src.models.small.vocab import policy_index, policy_to_idx
+from src.models.small.vocab import policy_to_idx
 
 from .config import TrainingConfig
 from .dataset import (
@@ -144,10 +144,6 @@ class Trainer:
             factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (
                 1.0 + math.cos(math.pi * progress)
             )
-        elif sched.kind == "steps":
-            for drop_step, drop_factor in sorted(sched.drops):
-                if step >= drop_step:
-                    factor = float(drop_factor)
         warm = 1.0
         if sched.warmup_steps > 0:
             warm = min(1.0, (rel + 1) / sched.warmup_steps)
@@ -278,9 +274,7 @@ class Trainer:
 
         # Token-bucket pacing: the trainer may consume target_k samples per
         # record self-play has written since training started, re-checked every
-        # 0.2 s. (main estimated the insertion rate over a 30 s window and slept
-        # batch / (k * rate); right after start the window is empty, the rate
-        # reads ~0, and the first sleep was ~2048 / 5 = 410 s.)
+        # 0.2 s.
         writes0 = self.buffer.total_writes
         trained0 = self.samples_processed
         # Insertion rate over a sliding window, for the logs only.
@@ -562,4 +556,4 @@ class Trainer:
         )
 
 
-__all__ = ["Trainer", "legal_move_probability", "policy_index"]
+__all__ = ["Trainer", "legal_move_probability"]

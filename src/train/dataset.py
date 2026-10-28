@@ -277,12 +277,6 @@ class ReplayBuffer:
         except (FileNotFoundError, ValueError):
             self.capacity = max(self.capacity, n)
 
-    def read_stats(self) -> dict:
-        try:
-            return json.loads(self.stats_path.read_text())
-        except (FileNotFoundError, ValueError):
-            return {}
-
     def current_window(self) -> int:
         n = self._mapped_records
         if not self.fifo or self.window_c <= 0:
