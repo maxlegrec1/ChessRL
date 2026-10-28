@@ -73,7 +73,28 @@ def puzzle_line(row: dict) -> dict:
             "meta": {"id": row["id"], "rating": row["rating"], "themes": row["themes"]}}
 
 
-def game_line(pgn_path: Path, index: int, ckpt: str | None = None) -> dict:
+def search_scores(ckpt: str, positions: list[chess.Board], sims: int) -> list[float]:
+    """White's expected score (win 1, draw 0.5) for each position, from the network's own search:
+    the most-visited move's average value, one simulation at a time as in the games."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.analysis.engine import Net, analyse  # noqa: PLC0415
+
+    net = Net(ckpt, threads=8)
+    out = []
+    for b in positions:
+        if b.is_checkmate():  # the side to move is mated
+            s = 0.0
+        elif b.is_game_over(claim_draw=True):
+            s = 0.5
+        else:
+            best = analyse(net, b, sims, batch=1)["moves"][0]
+            s = best["score"]
+        out.append(round(s if b.turn == chess.WHITE else 1 - s, 3))
+    return out
+
+
+def game_line(pgn_path: Path, index: int, ckpt: str | None = None, moves_left: bool = False,
+              search_sims: int = 0) -> dict:
     with pgn_path.open() as fh:
         for _ in range(index):
             game = chess.pgn.read_game(fh)
@@ -86,7 +107,7 @@ def game_line(pgn_path: Path, index: int, ckpt: str | None = None) -> dict:
     h = game.headers
     out = {"start": game.board().fen(), "plies": plies, "orientation": "white" if "ChessRL" in h["White"] else "black",
            "white": player(h["White"]), "black": player(h["Black"]), "result": h["Result"]}
-    if ckpt:
+    if ckpt and moves_left:
         # The network's moves-left estimate for every position (its outcome head, in plies -> moves).
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from src.analysis.engine import Net  # noqa: PLC0415
@@ -95,6 +116,11 @@ def game_line(pgn_path: Path, index: int, ckpt: str | None = None) -> dict:
         out["startMovesLeft"] = est[0]
         for p, e in zip(plies, est[1:]):
             p["movesLeft"] = e
+    if ckpt and search_sims:
+        scores = search_scores(ckpt, positions, search_sims)
+        out["searchSims"], out["startScore"] = search_sims, scores[0]
+        for p, s in zip(plies, scores[1:]):
+            p["whiteScore"] = s
     return out
 
 
@@ -113,12 +139,16 @@ def main() -> None:
     p.add_argument("--puzzle", nargs="+", required=True, help="puzzle ids, in the order the post shows them")
     p.add_argument("--game", nargs=3, action="append", default=[], metavar=("NAME", "PGN", "INDEX"),
                    help="a game to show: its name in the post's data, the PGN, its 1-based index there")
-    p.add_argument("--ckpt", help="checkpoint whose moves-left estimate is added to the --moves-left games")
-    p.add_argument("--moves-left", nargs="*", default=[], help="names of the games that get the moves-left estimate")
+    p.add_argument("--ckpt", help="the network that played the games (for --moves-left and --search-score)")
+    p.add_argument("--moves-left", nargs="*", default=[], help="games that get the network's moves-left estimate")
+    p.add_argument("--search-score", nargs="*", default=[],
+                   help="games that get White's expected score from the network's search, at every position")
+    p.add_argument("--search-sims", type=int, default=800)
     a = p.parse_args()
     rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
     data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle},
-                  "games": {name: game_line(Path(pgn), int(idx), a.ckpt if name in a.moves_left else None)
+                  "games": {name: game_line(Path(pgn), int(idx), a.ckpt, name in a.moves_left,
+                                            a.search_sims if name in a.search_score else 0)
                             for name, pgn, idx in a.game}}
     OUT.write_text(json.dumps(data, indent=1) + "\n")
     write_pieces()

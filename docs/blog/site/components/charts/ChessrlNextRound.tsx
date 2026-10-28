@@ -53,10 +53,22 @@ export function ActivationChart() {
 }
 
 export function SearchGame() {
+  const game = boards.games.sf2000 as unknown as BoardLine
+  const score: Series[] = [{
+    name: "White's expected score, by the network's search", slot: 1,
+    points: [game.startScore ?? 0.5, ...game.plies.map((p) => p.whiteScore ?? 0.5)].map((s, k) => [k / 2, s]),
+  }]
   return (
     <Figure title="With search: the network against Stockfish limited to 2000 Elo"
-      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. Pieces by Colin M. L. Burnett.">
-      <ChessBoard line={boards.games.sf2000 as unknown as BoardLine} />
+      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. For every position, the network's own 800-simulation search also gives White's expected score (a win counts 1, a draw half): 62% at the start, above 90% after the knight fork, and above 97% from move 18 on. Pieces by Colin M. L. Burnett.">
+      <ChessBoard line={game} />
+      <div className="mt-5">
+        <Legend series={score} />
+        <LineChart series={score} xLabel="moves played" yLabel="White's score" xDomain={[0, 40]}
+          yDomain={[0, 1]} xStep={5} yStep={0.25} height={220} snap={0.3}
+          xFormat={(x) => `after move ${Math.floor(x)}`} yFormat={percent}
+          refLine={{ y: 0.5, label: 'even' }} />
+      </div>
     </Figure>
   )
 }

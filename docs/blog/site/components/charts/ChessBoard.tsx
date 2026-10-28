@@ -15,6 +15,7 @@ export type Ply = {
   // Puzzle solver moves: the move's probability for the network alone and its share of the search.
   net?: { alone: number; search: number; favourite?: string; favouriteAlone?: number }
   movesLeft?: number // games: the network's estimate of the moves left after this ply
+  whiteScore?: number // games: White's expected score after this ply, from the network's search
 }
 export type BoardLine = {
   start: string
@@ -26,6 +27,8 @@ export type BoardLine = {
   black?: string
   result?: string
   startMovesLeft?: number // the network's moves-left estimate for the starting position
+  startScore?: number // White's expected score at the starting position, from the network's search
+  searchSims?: number
 }
 
 const FILES = 'abcdefgh'
@@ -181,6 +184,14 @@ export default function ChessBoard({ line }: { line: BoardLine }) {
               <span className="text-gray-900 dark:text-gray-100">{line.white}</span></div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 rounded-sm bg-gray-900 dark:border dark:border-gray-500" />
               <span className="text-gray-900 dark:text-gray-100">{line.black}</span></div>
+          </div>
+        )}
+        {line.startScore !== undefined && (
+          <div className="space-y-1 rounded-md bg-gray-50 p-3 dark:bg-gray-900">
+            <Bar label="White's score" value={i === 0 ? line.startScore : (last?.whiteScore ?? 0)} strong />
+            <p className="text-gray-600 dark:text-gray-400">
+              expected by the network&apos;s search ({line.searchSims} simulations); a draw counts half
+            </p>
           </div>
         )}
         {line.startMovesLeft !== undefined && (
