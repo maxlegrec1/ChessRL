@@ -107,60 +107,61 @@ function Tokens() {
 }
 
 function Layers() {
-  // The main line (residual stream) runs down the left; each block branches off it at a dot,
-  // and its output is added back in at a + node further down.
-  const attendTo: [number, number][] = [[6, 1], [7, 5], [2, 0], [0, 7], [5, 7]]
-  const c = (f: number, r: number): [number, number] => [60 + f * 9 + 4.5, 112 + r * 9 + 4.5]
-  const [sx, sy] = c(2, 5)
+  // A classic pre-norm transformer layer, drawn top to bottom. Each sub-block's input branches off
+  // the main line at a dot and is added back to its output at a + (the skip connections).
+  const X = 160 // the main line
+  const down = (y1: number, y2: number) => (
+    <g>
+      <path d={`M${X} ${y1}V${y2 - 7}`} className="cr-wire" />
+      <Tip x={X} y={y2} dir="down" />
+    </g>
+  )
+  const box = (y: number, h: number, lines: string[], strong = true) => (
+    <g>
+      <rect x={X - 102} y={y} width={204} height={h} rx={6} className="cr-box" />
+      {lines.map((t, i) => (
+        <text key={t} x={X} y={y + h / 2 + 4 + (i - (lines.length - 1) / 2) * 15} textAnchor="middle"
+          className={strong && i === 0 ? 'cr-strong' : undefined}>{t}</text>
+      ))}
+    </g>
+  )
+  const skip = (from: number, to: number) => (
+    <g>
+      <circle cx={X} cy={from} r={3} fill={INK} />
+      <path d={`M${X} ${from}H${X - 118}V${to}H${X - 16}`} className="cr-wire" />
+      <Tip x={X - 9} y={to} dir="right" />
+    </g>
+  )
   return (
-    <svg {...svgProps(300, 330, 'Four layers, each: add the input tokens back in, then attention, where every square reads from every other square with a learned bias for each pair of squares, then a small network applied to each square on its own. Each block adds its output back onto the main line.')}>
-      <text x={34} y={12}>64 tokens in</text>
-      <path d="M24 0V316" className="cr-wire" />
-      <Tip x={24} y={324} dir="down" />
-      <Plus x={24} y={34} />
-      <text x={42} y={38}>add the input tokens back in</text>
+    <svg {...svgProps(320, 452, 'One transformer layer, repeated 4 times: add the input tokens back in; normalise (RMSNorm); multi-head attention with 8 heads, where every square reads from every other square, plus a learned bias for each pair of squares; add the layer input back (skip connection); normalise; a feed-forward network, 128 to 256 to 128 numbers, applied to each square on its own; add back again (skip connection). After the 4 layers, a final normalisation.')}>
+      <text x={X} y={14} textAnchor="middle">64 tokens, 128 numbers each</text>
+      {down(20, 50)}
+      <rect x={X - 140} y={50} width={280} height={318} rx={10} className="cr-box" strokeDasharray="5 4" />
+      <text x={X + 132} y={360} textAnchor="end" className="cr-strong">× 4</text>
 
-      <Tip x={24} y={62} dir="down" />
-      <circle cx={24} cy={74} r={3} fill={INK} />
-      <path d="M24 74H40" className="cr-wire" />
-      <Tip x={48} y={74} dir="right" />
-      <rect x={48} y={58} width={248} height={150} rx={6} className="cr-box" />
-      <text x={60} y={78} className="cr-strong">attention</text>
-      <text x={60} y={96}>normalise, then 8 heads in parallel</text>
-      <Board x={60} y={112} sq={9} />
-      <Mark x={60} y={112} sq={9} f={2} r={5} />
-      {attendTo.map(([f, r]) => {
-        const [tx, ty] = c(f, r)
-        return (
-          <g key={`${f}${r}`}>
-            <line x1={sx} y1={sy} x2={tx} y2={ty} stroke={ACCENT} strokeWidth={1.25} />
-            <circle cx={tx} cy={ty} r={2.2} fill={ACCENT} />
-          </g>
-        )
-      })}
-      <text x={146} y={126}>each square reads</text>
-      <text x={146} y={142}>from every other,</text>
-      <text x={146} y={158}>plus a learned bias</text>
-      <text x={146} y={174}>for each pair of</text>
-      <text x={146} y={190}>squares</text>
-      <Tip x={24} y={150} dir="down" />
-      <path d="M48 196H40" className="cr-wire" />
-      <Tip x={33} y={196} dir="left" />
-      <Plus x={24} y={196} />
+      <Plus x={X} y={72} />
+      <text x={X + 16} y={68}>add the input</text>
+      <text x={X + 16} y={82}>tokens back in</text>
+      {down(81, 102)}
+      {skip(92, 220)}
+      {box(102, 22, ['RMSNorm'], false)}
+      {down(124, 138)}
+      {box(138, 58, ['Multi-head attention', '8 heads: each square reads', 'every other, + a bias per pair'])}
+      {down(196, 211)}
+      <Plus x={X} y={220} />
 
-      <Tip x={24} y={226} dir="down" />
-      <circle cx={24} cy={236} r={3} fill={INK} />
-      <path d="M24 236H40" className="cr-wire" />
-      <Tip x={48} y={236} dir="right" />
-      <rect x={48} y={222} width={248} height={68} rx={6} className="cr-box" />
-      <text x={60} y={242} className="cr-strong">small network, square by square</text>
-      <text x={60} y={260}>normalise, then</text>
-      <text x={60} y={276}>128 → 256 → 128 numbers</text>
-      <Tip x={24} y={264} dir="down" />
-      <path d="M48 280H40" className="cr-wire" />
-      <Tip x={33} y={280} dir="left" />
-      <Plus x={24} y={280} />
-      <text x={42} y={318}>repeat 4 times, then normalise</text>
+      {down(229, 250)}
+      {skip(240, 354)}
+      {box(250, 22, ['RMSNorm'], false)}
+      {down(272, 286)}
+      {box(286, 44, ['Feed-forward', '128 → 256 → 128, per square'])}
+      {down(330, 345)}
+      <Plus x={X} y={354} />
+
+      {down(363, 390)}
+      {box(390, 22, ['RMSNorm'], false)}
+      {down(412, 428)}
+      <text x={X} y={444} textAnchor="middle">64 tokens, to the two heads</text>
     </svg>
   )
 }
@@ -237,12 +238,13 @@ export default function EncoderDiagram() {
       <figcaption className="mt-3 text-sm text-gray-500 dark:text-gray-400">
         The 111 numbers for a square say which piece stands on it in the current position and in the 7
         before it, whether each of those positions is a repetition, plus castling rights, side to move,
-        en passant and the 50-move counter. &quot;Normalise&quot; rescales each token to a fixed average size
-        (a layer called RMSNorm). Attention has 8 heads: 8 separate ways of choosing which squares to read from,
-        computed in parallel. The learned bias is one 64 × 64 table per head, shared by all four layers: it is
-        how the network learns the shape of the board. The &quot;small network&quot; boxes are two-layer
-        networks (MLPs). There are really two value outputs and two moves-left outputs: one of each is trained
-        on final game results (the one the search uses), the other on the search&apos;s own estimates.
+        en passant and the 50-move counter. RMSNorm rescales each token to a fixed average size. Attention has
+        8 heads: 8 separate ways of choosing which squares to read from, computed in parallel. The learned bias
+        is one 64 × 64 table per head, shared by all four layers: it is how the network learns the shape of the
+        board. The feed-forward block and the &quot;small network&quot; of the value head are two-layer
+        networks (MLPs). The skip connections add each block&apos;s input back to its output. There are really
+        two value outputs and two moves-left outputs: one of each is trained on final game results (the one the
+        search uses), the other on the search&apos;s own estimates.
       </figcaption>
     </figure>
   )
