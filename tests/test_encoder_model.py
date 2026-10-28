@@ -55,9 +55,16 @@ def test_onnx_export(tmp_path):
             p, _v, vq, mlh, mlh_q = self.inner(x, return_all=True)
             return p, torch.softmax(vq, dim=-1), mlh, mlh_q
 
-    torch.onnx.export(Wrap(m), torch.rand(2, 8, 8, 111), (tmp_path / "enc.onnx").as_posix(),
-                      input_names=["input"], output_names=["policy", "value", "mlh", "mlh_q"],
-                      dynamic_axes={"input": {0: "batch_size"}}, opset_version=17, dynamo=False)
+    torch.onnx.export(
+        Wrap(m),
+        torch.rand(2, 8, 8, 111),
+        (tmp_path / "enc.onnx").as_posix(),
+        input_names=["input"],
+        output_names=["policy", "value", "mlh", "mlh_q"],
+        dynamic_axes={"input": {0: "batch_size"}},
+        opset_version=17,
+        dynamo=False,
+    )
     assert (tmp_path / "enc.onnx").stat().st_size > 0
 
 

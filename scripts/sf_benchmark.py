@@ -25,8 +25,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def run_match(engine: str, elo: int, games: int, sims: int, pgn_dir: Path) -> dict:
     pgn = pgn_dir / f"sf{elo}_{Path(engine).stem}.pgn"
-    cmd = [sys.executable, "scripts/stockfish_match.py", "--engine", engine, "--num-games", str(games),
-           "--sf-elo", str(elo), "--simulations", str(sims), "--out", str(pgn)]
+    cmd = [
+        sys.executable,
+        "scripts/stockfish_match.py",
+        "--engine",
+        engine,
+        "--num-games",
+        str(games),
+        "--sf-elo",
+        str(elo),
+        "--simulations",
+        str(sims),
+        "--out",
+        str(pgn),
+    ]
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True).stdout
     m = re.search(r"(\d+)W / (\d+)D / (\d+)L\s+->\s+([\d.]+)/(\d+)", out)
     if not m:
@@ -34,8 +46,17 @@ def run_match(engine: str, elo: int, games: int, sims: int, pgn_dir: Path) -> di
     w, d, l, score, n = int(m[1]), int(m[2]), int(m[3]), float(m[4]), int(m[5])
     p = score / n
     implied = elo - 400 * math.log10(1 / p - 1) if 0 < p < 1 else None
-    return {"engine": Path(engine).stem, "sf_elo": elo, "sims": sims, "games": n, "w": w, "d": d, "l": l,
-            "score": round(p, 4), "implied_elo": round(implied, 1) if implied is not None else None}
+    return {
+        "engine": Path(engine).stem,
+        "sf_elo": elo,
+        "sims": sims,
+        "games": n,
+        "w": w,
+        "d": d,
+        "l": l,
+        "score": round(p, 4),
+        "implied_elo": round(implied, 1) if implied is not None else None,
+    }
 
 
 def main() -> None:

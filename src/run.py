@@ -99,7 +99,11 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
     cfg = load_config(base_config)
     model = build_model(cfg.model).eval()
     torch.save(
-        {"model": model.state_dict(), "model_spec": model.spec(), "config": {"search_heads": cfg.search_heads}},
+        {
+            "model": model.state_dict(),
+            "model_spec": model.spec(),
+            "config": {"search_heads": cfg.search_heads},
+        },
         init_pt,
     )
 
@@ -130,7 +134,9 @@ def _has_engine(run_dir: Path) -> bool:
     it = run_dir / "engines" / ".iteration"
     if not it.is_file():
         return False
-    return any(line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines())
+    return any(
+        line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines()
+    )
 
 
 def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
@@ -139,8 +145,14 @@ def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
     step = ckpt.stem.split("_")[1]
     print(f"[launcher] no engine yet: building one from {ckpt.name}", flush=True)
     subprocess.run(
-        ["bash", str(ROOT / "scripts" / "build_trt.sh"), str(ckpt), str(int(step)),
-         str(run_dir / "engines"), str(run_dir / "engines" / ".iteration")],
+        [
+            "bash",
+            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ckpt),
+            str(int(step)),
+            str(run_dir / "engines"),
+            str(run_dir / "engines" / ".iteration"),
+        ],
         cwd=ROOT,
         check=True,
     )

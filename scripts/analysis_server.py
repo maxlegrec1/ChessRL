@@ -38,10 +38,14 @@ def run_name(run_dir: Path) -> str:
 
 def ladder_elo(run_dir: Path, step: int) -> float | None:
     try:
-        rows = [json.loads(l) for l in (run_dir / "ladder" / "ladder.jsonl").read_text().splitlines() if l.strip()]
+        rows = [
+            json.loads(l)
+            for l in (run_dir / "ladder" / "ladder.jsonl").read_text().splitlines()
+            if l.strip()
+        ]
     except (FileNotFoundError, ValueError):
         return None
-    near = [r for r in rows if abs(r.get("step", -10**9) - step) <= 2500]
+    near = [r for r in rows if abs(r.get("step", -(10**9)) - step) <= 2500]
     return min(near, key=lambda r: abs(r["step"] - step))["elo"] if near else None
 
 
@@ -62,11 +66,20 @@ def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
         if step % 5000 and step != newest[ck.parent] and (name, step) not in RERATED:
             continue
         elo = RERATED.get((name, step), ladder_elo(run, step))
-        found.append({"path": str(ck), "run": f"{name} ({run.parent.name})", "step": step, "elo": elo})
+        found.append(
+            {"path": str(ck), "run": f"{name} ({run.parent.name})", "step": step, "elo": elo}
+        )
     for d in extra:
         for ck in sorted(d.glob("**/step_*.pt")):
             step = int(ck.stem.split("_")[1])
-            found.append({"path": str(ck), "run": "encoder (armE)", "step": step, "elo": RERATED.get(("encoder", step))})
+            found.append(
+                {
+                    "path": str(ck),
+                    "run": "encoder (armE)",
+                    "step": step,
+                    "elo": RERATED.get(("encoder", step)),
+                }
+            )
     for m in found:
         m["id"] = m["path"]  # stable across rescans
         elo = f"{m['elo']:,.0f}" if m["elo"] is not None else "unrated"
@@ -77,7 +90,9 @@ def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
 class Engines:
     """Discovered checkpoints (rescanned on demand) and loaded nets, least-recently-used first out."""
 
-    def __init__(self, runs_root: Path, extra: list[Path], threads: int, default_run: str = "", keep: int = 4) -> None:
+    def __init__(
+        self, runs_root: Path, extra: list[Path], threads: int, default_run: str = "", keep: int = 4
+    ) -> None:
         self.runs_root, self.extra, self.default_run = runs_root, extra, default_run
         self.models: dict[str, dict] = {}
         self.rescan()
@@ -130,8 +145,14 @@ def board_state(board: chess.Board) -> dict:
         if to not in dests[chess.square_name(m.from_square)]:
             dests[chess.square_name(m.from_square)].append(to)
     last = board.peek().uci() if board.move_stack else None
-    return {"fen": board.fen(), "turn": "white" if board.turn else "black", "dests": dests,
-            "check": board.is_check(), "last": last, "history": len(board.move_stack)}
+    return {
+        "fen": board.fen(),
+        "turn": "white" if board.turn else "black",
+        "dests": dests,
+        "check": board.is_check(),
+        "last": last,
+        "history": len(board.move_stack),
+    }
 
 
 def pgn_files(runs_root: Path) -> list[Path]:
@@ -155,9 +176,23 @@ def read_games(path: Path) -> list[dict]:
                 last.append([chess.square_name(mv.from_square), chess.square_name(mv.to_square)])
                 checks.append(board.is_check())
             result = game.headers.get("Result", "*")
-            end = "checkmate" if board.is_checkmate() else ("draw" if result == "1/2-1/2" else "resignation")
-            games.append({"n": len(games) + 1, "result": result, "end": end, "plies": len(sans), "san": sans,
-                          "fens": fens, "last": last, "checks": checks})
+            end = (
+                "checkmate"
+                if board.is_checkmate()
+                else ("draw" if result == "1/2-1/2" else "resignation")
+            )
+            games.append(
+                {
+                    "n": len(games) + 1,
+                    "result": result,
+                    "end": end,
+                    "plies": len(sans),
+                    "san": sans,
+                    "fens": fens,
+                    "last": last,
+                    "checks": checks,
+                }
+            )
     return games
 
 
@@ -184,18 +219,31 @@ def make_handler(engines: Engines):
                 self._send(200, GAMES_PAGE.read_bytes(), "text/html; charset=utf-8")
             elif self.path == "/api/pgns":
                 root = engines.runs_root
-                self._json(200, [{"id": str(p.relative_to(root)), "label": f"{p.parent.name} / {p.name}"}
-                                 for p in pgn_files(root)])
+                self._json(
+                    200,
+                    [
+                        {"id": str(p.relative_to(root)), "label": f"{p.parent.name} / {p.name}"}
+                        for p in pgn_files(root)
+                    ],
+                )
             elif self.path.startswith("/api/pgn?id="):
                 from urllib.parse import unquote
 
                 wanted = unquote(self.path.split("=", 1)[1])
-                files = {str(p.relative_to(engines.runs_root)): p for p in pgn_files(engines.runs_root)}
+                files = {
+                    str(p.relative_to(engines.runs_root)): p for p in pgn_files(engines.runs_root)
+                }
                 if wanted not in files:  # only the listed samples, never an arbitrary path
                     return self._json(404, {"error": f"unknown PGN {wanted}"})
                 self._json(200, {"id": wanted, "games": read_games(files[wanted])})
             elif self.path == "/api/models":
-                self._json(200, [{k: m[k] for k in ("id", "label", "run", "step", "elo", "default")} for m in engines.rescan()])
+                self._json(
+                    200,
+                    [
+                        {k: m[k] for k in ("id", "label", "run", "step", "elo", "default")}
+                        for m in engines.rescan()
+                    ],
+                )
             else:
                 self._json(404, {"error": "not found"})
 
@@ -203,7 +251,9 @@ def make_handler(engines: Engines):
             if self.path != "/api/analyse":
                 return self._json(404, {"error": "not found"})
             try:
-                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                req = json.loads(
+                    self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                )
                 board, sans = position(req.get("fen") or chess.STARTING_FEN, req.get("moves") or [])
                 sims = max(0, min(MAX_SIMS, int(req.get("sims", 0))))
                 state = board_state(board)
@@ -230,9 +280,17 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8510)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--threads", type=int, default=8, help="torch CPU threads per search")
-    p.add_argument("--runs-root", type=Path, default=Path(os.environ.get("CHESSRL_RUNS_ROOT", Path.home() / "chessrl-runs")))
-    p.add_argument("--extra", type=Path, nargs="*", default=[ROOT / "artifacts" / "scratch" / "branch45500"])
-    p.add_argument("--default-run", default="encfinal", help="preselect this run's newest checkpoint")
+    p.add_argument(
+        "--runs-root",
+        type=Path,
+        default=Path(os.environ.get("CHESSRL_RUNS_ROOT", Path.home() / "chessrl-runs")),
+    )
+    p.add_argument(
+        "--extra", type=Path, nargs="*", default=[ROOT / "artifacts" / "scratch" / "branch45500"]
+    )
+    p.add_argument(
+        "--default-run", default="encfinal", help="preselect this run's newest checkpoint"
+    )
     a = p.parse_args()
     engines = Engines(a.runs_root, a.extra, a.threads, a.default_run)
     best = max(engines.models.values(), key=lambda m: m["elo"] or 0, default=None)

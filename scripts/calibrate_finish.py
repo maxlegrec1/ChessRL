@@ -51,12 +51,23 @@ def main() -> None:
     ratings = {n: 200.0 * i for i, n in enumerate(names)}
     for _ in range(200):
         for n in names[1:]:
-            vs = [(ratings[b], s) for x, b, s in results if x == n] + [(ratings[x], 1 - s) for x, b, s in results if b == n]
+            vs = [(ratings[b], s) for x, b, s in results if x == n] + [
+                (ratings[x], 1 - s) for x, b, s in results if b == n
+            ]
             ratings[n] = ladder.fit_rating(vs, prior=ratings[n])[0]
     ratings = {n: round(r - ratings["random"], 1) for n, r in ratings.items()}
     out = ladder.ANCHOR_RATINGS_FILES[a.openings]
-    out.write_text(json.dumps({"ratings": ratings, "games_per_pair": a.games_per_pair, "openings": a.openings,
-                               "pairs": {f"{x} vs {y}": f"{s}/{n}" for (x, y), (s, n) in totals.items()}}, indent=2))
+    out.write_text(
+        json.dumps(
+            {
+                "ratings": ratings,
+                "games_per_pair": a.games_per_pair,
+                "openings": a.openings,
+                "pairs": {f"{x} vs {y}": f"{s}/{n}" for (x, y), (s, n) in totals.items()},
+            },
+            indent=2,
+        )
+    )
     print(json.dumps(ratings, indent=2))
 
 

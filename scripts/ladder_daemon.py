@@ -43,8 +43,16 @@ def opening_probe(engine: str, sims: int) -> dict:
     out: dict = {"sims": sims}
     for key, n in (("policy", 0), ("search", sims)):
         res = _inference_cpp.small_mcts_search_batch_with_history(
-            histories=[[]], fens=[""], simulations=n, cpuct=0.65, temperature=1.0, engine_path=engine,
-            temperature_at_root=0.0, use_dirichlet=False, virtual_loss_width=1)
+            histories=[[]],
+            fens=[""],
+            simulations=n,
+            cpuct=0.65,
+            temperature=1.0,
+            engine_path=engine,
+            temperature_at_root=0.0,
+            use_dirichlet=False,
+            virtual_loss_width=1,
+        )
         out[key] = {uci: round(float(p), 4) for uci, p in res[0]["policy"]}
     return out
 
@@ -66,12 +74,22 @@ def rate_engine(engine: str, estimate: float | None, ratings: dict, args) -> dic
             anchor.close()
 
     picked = ladder.pick_anchors(estimate, ratings, k=args.anchors)
-    scores = ladder.adaptive_anchor_scores(play, picked, ratings, sweep=args.sweep, max_extra=args.max_extra)
-    per_anchor = {n: {"w": s.count(1.0), "d": s.count(0.5), "l": s.count(0.0)} for n, s in scores.items()}
+    scores = ladder.adaptive_anchor_scores(
+        play, picked, ratings, sweep=args.sweep, max_extra=args.max_extra
+    )
+    per_anchor = {
+        n: {"w": s.count(1.0), "d": s.count(0.5), "l": s.count(0.0)} for n, s in scores.items()
+    }
     results = [(ratings.get(n, 0.0), x) for n, s in scores.items() for x in s]
     elo, se = ladder.fit_rating(results, prior=estimate if estimate is not None else 0.0)
-    row.update(elo=round(elo, 1), elo_se=round(se, 1), anchors=per_anchor, extra_anchors=len(scores) - len(picked),
-               openings=args.openings, seconds=round(time.time() - t0, 1))
+    row.update(
+        elo=round(elo, 1),
+        elo_se=round(se, 1),
+        anchors=per_anchor,
+        extra_anchors=len(scores) - len(picked),
+        openings=args.openings,
+        seconds=round(time.time() - t0, 1),
+    )
     return row
 
 
@@ -82,13 +100,27 @@ def main() -> None:
     p.add_argument("--sims", type=int, default=100)
     p.add_argument("--games", type=int, default=48, help="games per anchor (both colours)")
     p.add_argument("--anchors", type=int, default=2)
-    p.add_argument("--sweep", type=float, default=0.85,
-                   help="score that counts as a sweep and adds the next anchor up (or down)")
-    p.add_argument("--max-extra", type=int, default=3, help="extra anchors per rating (0 = original ladder)")
-    p.add_argument("--openings", choices=("sf", "random"), default="sf",
-                   help="sf: balanced Stockfish-chosen openings (default); random: 8 random plies (original)")
-    p.add_argument("--opening-sims", type=int, default=400,
-                   help="simulations of the first-move probe's search (fixed across runs)")
+    p.add_argument(
+        "--sweep",
+        type=float,
+        default=0.85,
+        help="score that counts as a sweep and adds the next anchor up (or down)",
+    )
+    p.add_argument(
+        "--max-extra", type=int, default=3, help="extra anchors per rating (0 = original ladder)"
+    )
+    p.add_argument(
+        "--openings",
+        choices=("sf", "random"),
+        default="sf",
+        help="sf: balanced Stockfish-chosen openings (default); random: 8 random plies (original)",
+    )
+    p.add_argument(
+        "--opening-sims",
+        type=int,
+        default=400,
+        help="simulations of the first-move probe's search (fixed across runs)",
+    )
     p.add_argument("--calibrate", action="store_true")
     p.add_argument("--once", action="store_true")
     args = p.parse_args()
@@ -99,7 +131,9 @@ def main() -> None:
 
     ratings = ladder.load_anchor_ratings(args.openings)
     if not ratings:
-        sys.exit(f"no anchor calibration for the {args.openings!r} openings: run --calibrate --openings {args.openings}")
+        sys.exit(
+            f"no anchor calibration for the {args.openings!r} openings: run --calibrate --openings {args.openings}"
+        )
     out_dir = args.run_dir / "ladder"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "ladder.jsonl"
@@ -113,11 +147,19 @@ def main() -> None:
         due = time.time() - last_t >= args.every_min * 60
         if eng and due and eng[0] != last_step:
             step, engine = eng
-            row = {"t": time.time(), "step": step, "engine": engine, **rate_engine(engine, estimate, ratings, args)}
+            row = {
+                "t": time.time(),
+                "step": step,
+                "engine": engine,
+                **rate_engine(engine, estimate, ratings, args),
+            }
             with out.open("a") as fh:
                 fh.write(json.dumps(row) + "\n")
-            print(f"step {step}: elo {row['elo']} ± {row['elo_se']}  puzzles {row['puzzles']['line']:.3f} "
-                  f"({row['seconds']}s) {row['anchors']}", flush=True)
+            print(
+                f"step {step}: elo {row['elo']} ± {row['elo_se']}  puzzles {row['puzzles']['line']:.3f} "
+                f"({row['seconds']}s) {row['anchors']}",
+                flush=True,
+            )
             estimate, last_t, last_step = row["elo"], row["t"], step
         if args.once:
             return

@@ -74,9 +74,16 @@ def main() -> None:
             for m in STEP_RE.finditer(text):
                 step = int(m.group(1))
                 if step > last_step:
-                    rows.append({"step": step, "t": now, "loss/total": float(m.group(2)),
-                                 "acc/policy": float(m.group(3)), "acc/value": float(m.group(4)),
-                                 "buffer/total_writes": writes})
+                    rows.append(
+                        {
+                            "step": step,
+                            "t": now,
+                            "loss/total": float(m.group(2)),
+                            "acc/policy": float(m.group(3)),
+                            "acc/value": float(m.group(4)),
+                            "buffer/total_writes": writes,
+                        }
+                    )
                     last_step = step
             if rows:
                 with (metrics / "train.jsonl").open("a") as fh:

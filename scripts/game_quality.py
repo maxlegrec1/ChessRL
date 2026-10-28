@@ -59,10 +59,21 @@ def main() -> None:
                     losses.append(max(0, min(best, 1000) - min(after, 1000)))
                 else:
                     board.push(move)
-            rows.append((idx, opp, res, board.fullmove_number, sum(losses) / max(1, len(losses)), max(losses or [0]),
-                         sum(x >= 100 for x in losses)))
+            rows.append(
+                (
+                    idx,
+                    opp,
+                    res,
+                    board.fullmove_number,
+                    sum(losses) / max(1, len(losses)),
+                    max(losses or [0]),
+                    sum(x >= 100 for x in losses),
+                )
+            )
     sf.quit()
-    print("game  opponent                                   result moves  avg_loss  max_loss  >=100cp")
+    print(
+        "game  opponent                                   result moves  avg_loss  max_loss  >=100cp"
+    )
     for r in sorted(rows, key=lambda r: r[4]):
         print(f"{r[0]:4d}  {r[1][:42]:42s} {r[2]:7s} {r[3]:5d}  {r[4]:8.1f}  {r[5]:8d}  {r[6]:7d}")
 

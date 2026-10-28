@@ -160,7 +160,9 @@ def main() -> int:
                 if curriculum != current_curriculum:
                     worker.set_config(build_cpp_config(sp, new_engine, buffer_path, step))
                     current_curriculum = curriculum
-                console.log(f"Swapped engine: {new_engine} (step {step}, curriculum {curriculum:.3f})")
+                console.log(
+                    f"Swapped engine: {new_engine} (step {step}, curriculum {curriculum:.3f})"
+                )
 
             step_metrics = worker.step()
             window_positions += step_metrics.positions_generated
@@ -175,18 +177,34 @@ def main() -> int:
                 stats = worker.stats()
                 if sp.resign_target_fp > 0 and sp.resign_threshold > 0:
                     if resign_mark is None:
-                        resign_mark = (stats.playthrough_would_resign, stats.playthrough_false_resign)
+                        resign_mark = (
+                            stats.playthrough_would_resign,
+                            stats.playthrough_false_resign,
+                        )
                     would = stats.playthrough_would_resign - resign_mark[0]
                     false = stats.playthrough_false_resign - resign_mark[1]
                     if would >= sp.resign_calibration_window:
-                        new = calibrate_resign(sp.resign_threshold, would, false, sp.resign_target_fp)
-                        console.log(f"[resign] window fp={false / would:.3f} threshold "
-                                    f"{sp.resign_threshold:.4f} -> {new:.4f}")
+                        new = calibrate_resign(
+                            sp.resign_threshold, would, false, sp.resign_target_fp
+                        )
+                        console.log(
+                            f"[resign] window fp={false / would:.3f} threshold "
+                            f"{sp.resign_threshold:.4f} -> {new:.4f}"
+                        )
                         if new != sp.resign_threshold:
                             sp.resign_threshold = new
-                            worker.set_config(build_cpp_config(sp, engine_watcher.engine_path, buffer_path,
-                                                               engine_watcher.engine_step))
-                        resign_mark = (stats.playthrough_would_resign, stats.playthrough_false_resign)
+                            worker.set_config(
+                                build_cpp_config(
+                                    sp,
+                                    engine_watcher.engine_path,
+                                    buffer_path,
+                                    engine_watcher.engine_step,
+                                )
+                            )
+                        resign_mark = (
+                            stats.playthrough_would_resign,
+                            stats.playthrough_false_resign,
+                        )
                 row = {
                     "t": now,
                     "engine_step": engine_watcher.engine_step,

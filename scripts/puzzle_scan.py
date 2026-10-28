@@ -32,9 +32,16 @@ def main() -> None:
     p.add_argument("--threads", type=int, default=8)
     a = p.parse_args()
     net = Net(a.ckpt, threads=a.threads)
-    rows = [r for r in csv.DictReader((ROOT / "data/puzzles/lichess_1k.csv").open())
-            if int(r["Rating"]) >= a.min_rating]
-    done = {json.loads(line)["id"] for line in a.out.read_text().splitlines()} if a.out.exists() else set()
+    rows = [
+        r
+        for r in csv.DictReader((ROOT / "data/puzzles/lichess_1k.csv").open())
+        if int(r["Rating"]) >= a.min_rating
+    ]
+    done = (
+        {json.loads(line)["id"] for line in a.out.read_text().splitlines()}
+        if a.out.exists()
+        else set()
+    )
     for r in sorted(rows, key=lambda r: -int(r["Rating"])):
         if r["PuzzleId"] in done:
             continue
@@ -47,23 +54,45 @@ def main() -> None:
             want = moves[i]
             by = {m["uci"]: m for m in res["moves"]}
             raw_top = max(res["moves"], key=lambda m: m["prior"])
-            steps.append({"fen": board.fen(), "want": want, "san": board.san(chess.Move.from_uci(want)),
-                          "played": res["best"], "prior": round(by[want]["prior"], 3) if want in by else 0.0,
-                          "share": round(by[want]["share"], 3) if want in by else 0.0,
-                          "raw_top": raw_top["san"], "raw_top_prior": round(raw_top["prior"], 3),
-                          "wdl": [round(x, 3) for x in res["wdl"]]})
+            steps.append(
+                {
+                    "fen": board.fen(),
+                    "want": want,
+                    "san": board.san(chess.Move.from_uci(want)),
+                    "played": res["best"],
+                    "prior": round(by[want]["prior"], 3) if want in by else 0.0,
+                    "share": round(by[want]["share"], 3) if want in by else 0.0,
+                    "raw_top": raw_top["san"],
+                    "raw_top_prior": round(raw_top["prior"], 3),
+                    "wdl": [round(x, 3) for x in res["wdl"]],
+                }
+            )
             if res["best"] != want:
                 ok = False
                 break
             board.push_uci(want)
             if i + 1 < len(moves):
                 board.push_uci(moves[i + 1])
-        row = {"id": r["PuzzleId"], "rating": int(r["Rating"]), "themes": r["Themes"], "fen": r["FEN"],
-               "moves": moves, "solved": ok, "sims": a.sims, "ckpt": a.ckpt, "steps": steps}
+        row = {
+            "id": r["PuzzleId"],
+            "rating": int(r["Rating"]),
+            "themes": r["Themes"],
+            "fen": r["FEN"],
+            "moves": moves,
+            "solved": ok,
+            "sims": a.sims,
+            "ckpt": a.ckpt,
+            "steps": steps,
+        }
         with a.out.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
-        print(r["PuzzleId"], r["Rating"], "solved" if ok else "missed",
-              [(s["san"], s["prior"], s["share"]) for s in steps], flush=True)
+        print(
+            r["PuzzleId"],
+            r["Rating"],
+            "solved" if ok else "missed",
+            [(s["san"], s["prior"], s["share"]) for s in steps],
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

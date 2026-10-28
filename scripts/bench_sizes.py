@@ -29,7 +29,13 @@ def parse_spec(text: str) -> dict:
     if text.startswith("enc"):
         # enc<d_model>x<layers>, e.g. enc128x4 (heads = d_model / 16, d_ff = 2 * d_model)
         d, layers = (int(v) for v in text[3:].split("x"))
-        return {"arch": "encoder", "d_model": d, "layers": layers, "heads": max(1, d // 16), "d_ff": 2 * d}
+        return {
+            "arch": "encoder",
+            "d_model": d,
+            "layers": layers,
+            "heads": max(1, d // 16),
+            "d_ff": 2 * d,
+        }
     blocks, channels = (int(v) for v in text.split("x"))
     return {"arch": "resnet", "blocks": blocks, "channels": channels}
 
@@ -71,18 +77,54 @@ def main() -> None:
         params = sum(t.numel() for t in model.parameters())
         ckpt = scratch / f"{text}.pt"
         torch.save({"model": model.state_dict(), "model_spec": spec}, ckpt)
-        subprocess.run(["bash", str(ROOT / "scripts" / "build_trt.sh"), str(ckpt), "0", str(scratch),
-                        str(scratch / ".iteration")], check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            [
+                "bash",
+                str(ROOT / "scripts" / "build_trt.sh"),
+                str(ckpt),
+                "0",
+                str(scratch),
+                str(scratch / ".iteration"),
+            ],
+            check=True,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+        )
         engine = scratch / f"{text}.trt"
         out_json = scratch / f"bench_{text}.json"
-        subprocess.run([sys.executable, str(ROOT / "scripts" / "bench_selfplay.py"), "--engine", str(engine),
-                        "--duration-sec", str(a.duration_sec), "--warmup-sec", str(a.warmup_sec),
-                        "--threads", str(a.threads), "--virtual-loss-width", "8", "--random-opening-plies", "8",
-                        "--dirichlet-alpha", "0.3", "--dirichlet-epsilon", "0.25", "--out", str(out_json)],
-                       check=True, cwd=ROOT)
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "bench_selfplay.py"),
+                "--engine",
+                str(engine),
+                "--duration-sec",
+                str(a.duration_sec),
+                "--warmup-sec",
+                str(a.warmup_sec),
+                "--threads",
+                str(a.threads),
+                "--virtual-loss-width",
+                "8",
+                "--random-opening-plies",
+                "8",
+                "--dirichlet-alpha",
+                "0.3",
+                "--dirichlet-epsilon",
+                "0.25",
+                "--out",
+                str(out_json),
+            ],
+            check=True,
+            cwd=ROOT,
+        )
         bench = json.loads(out_json.read_text())
-        row = {"spec": text, "params": params, "trainer_samples_per_sec": trainer_samples_per_sec(spec),
-               "selfplay": bench}
+        row = {
+            "spec": text,
+            "params": params,
+            "trainer_samples_per_sec": trainer_samples_per_sec(spec),
+            "selfplay": bench,
+        }
         results.append(row)
         print(json.dumps({k: v for k, v in row.items() if k != "selfplay"}), flush=True)
     a.out.parent.mkdir(parents=True, exist_ok=True)

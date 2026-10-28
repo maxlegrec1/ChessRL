@@ -81,7 +81,9 @@ class Net:
         return net
 
     @torch.no_grad()
-    def evaluate(self, boards: list[chess.Board]) -> list[tuple[dict[chess.Move, float], tuple[float, float, float], float]]:
+    def evaluate(
+        self, boards: list[chess.Board]
+    ) -> list[tuple[dict[chess.Move, float], tuple[float, float, float], float]]:
         """Per board: legal-move priors, WDL for the side to move, estimated plies left."""
         x = torch.from_numpy(np.stack([encode(b) for b in boards]))
         p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
@@ -95,7 +97,13 @@ class Net:
             lg = np.array([logits[i, j] if j >= 0 else -1e9 for j in idx], dtype=np.float64)
             pr = np.exp(lg - lg.max()) if len(lg) else lg
             pr = pr / pr.sum() if len(pr) else pr
-            out.append(({m: float(q) for m, q in zip(moves, pr)}, tuple(float(t) for t in wdl[i]), float(plies[i])))
+            out.append(
+                (
+                    {m: float(q) for m, q in zip(moves, pr, strict=True)},
+                    tuple(float(t) for t in wdl[i]),
+                    float(plies[i]),
+                )
+            )
         return out
 
 
@@ -105,8 +113,12 @@ def terminal_value(board: chess.Board, twofold: bool = False) -> float | None:
     twofold: count a position seen before as a draw (search tree rule)."""
     if board.is_checkmate():
         return -1.0
-    if (board.is_stalemate() or board.is_insufficient_material() or board.halfmove_clock >= 100
-            or board.is_repetition(2 if twofold else 3)):
+    if (
+        board.is_stalemate()
+        or board.is_insufficient_material()
+        or board.halfmove_clock >= 100
+        or board.is_repetition(2 if twofold else 3)
+    ):
         return 0.0
     return None
 
@@ -144,14 +156,21 @@ class Node:
         return self.w / self.n if self.n else 0.0
 
 
-def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: int = 8,
-           twofold_draw: bool = False, mlh_eps: float = 0.05) -> dict:
+def search(
+    net: Net,
+    board: chess.Board,
+    sims: int,
+    cpuct: float = 0.65,
+    batch: int = 8,
+    twofold_draw: bool = False,
+    mlh_eps: float = 0.05,
+) -> dict:
     """PUCT search from `board`. Returns the root, its evaluation and timing."""
     t0 = time.time()
     root = Node(board.copy())
     root.terminal = terminal_value(root.board)
     if root.terminal is None:
-        (priors, wdl, plies), = net.evaluate([root.board])
+        ((priors, wdl, plies),) = net.evaluate([root.board])
         _expand(root, priors, wdl, plies, twofold_draw)
     done = 0
     while done < sims and root.terminal is None:
@@ -172,9 +191,11 @@ def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: 
             paths.append(path)
         pending = [l for l in leaves if l.terminal is None and not l.expanded]
         if pending:
-            for l, (priors, wdl, plies) in zip(pending, net.evaluate([l.board for l in pending])):
+            for l, (priors, wdl, plies) in zip(
+                pending, net.evaluate([l.board for l in pending]), strict=True
+            ):
                 _expand(l, priors, wdl, plies, twofold_draw)
-        for leaf, path in zip(leaves, paths):
+        for leaf, path in zip(leaves, paths, strict=True):
             for nd in path[1:]:
                 nd.vloss -= 1
             v = leaf.terminal if leaf.terminal is not None else (leaf.wdl[0] - leaf.wdl[2])
@@ -190,8 +211,13 @@ def search(net: Net, board: chess.Board, sims: int, cpuct: float = 0.65, batch: 
     return {"root": root, "sims": done, "seconds": time.time() - t0}
 
 
-def _expand(node: Node, priors: dict[chess.Move, float], wdl: tuple[float, float, float], plies: float,
-            twofold_draw: bool) -> None:
+def _expand(
+    node: Node,
+    priors: dict[chess.Move, float],
+    wdl: tuple[float, float, float],
+    plies: float,
+    twofold_draw: bool,
+) -> None:
     node.wdl, node.plies_est = wdl, plies
     for m, p in priors.items():
         child = node.board.copy(stack=True)
@@ -223,12 +249,23 @@ def analyse(net: Net, board: chess.Board, sims: int, **search_kw) -> dict:
     root = res["root"]
     rows = []
     for m, c in root.children.items():
-        rows.append({
-            "uci": m.uci(), "san": board.san(m), "prior": c.prior,
-            "visits": c.n, "share": c.n / max(1, root.n) if sims else 0.0,
-            "score": (c.q() + 1) / 2 if c.n else None,  # expected score for the side to move
-        })
+        rows.append(
+            {
+                "uci": m.uci(),
+                "san": board.san(m),
+                "prior": c.prior,
+                "visits": c.n,
+                "share": c.n / max(1, root.n) if sims else 0.0,
+                "score": (c.q() + 1) / 2 if c.n else None,  # expected score for the side to move
+            }
+        )
     rows.sort(key=lambda r: (r["visits"], r["prior"]), reverse=True)
     best = rows[0]["uci"] if rows else None
-    return {"moves": rows, "best": best, "wdl": root.wdl, "sims": res["sims"],
-            "seconds": round(res["seconds"], 3), "status": end_reason(board)}
+    return {
+        "moves": rows,
+        "best": best,
+        "wdl": root.wdl,
+        "sims": res["sims"],
+        "seconds": round(res["seconds"], 3),
+        "status": end_reason(board),
+    }

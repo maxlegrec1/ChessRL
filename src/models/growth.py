@@ -95,7 +95,7 @@ def grow_encoder(old, layers: int):
     device = next(old.parameters()).device
     new = EncoderModel(**{**cfg, "layers": layers}).to(device)
     new.load_state_dict(old.state_dict(), strict=False)  # shared names: embed, blocks.0..n-1, heads
-    for block in new.blocks[cfg["layers"]:]:
+    for block in new.blocks[cfg["layers"] :]:
         block.out.weight.zero_()
         block.down.weight.zero_()
         block.x0_gain.zero_()

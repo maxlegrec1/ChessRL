@@ -15,13 +15,20 @@ def _ladder(trainer, elos, start_step=0, hours=3.0):
     path = trainer.run_dir / "ladder" / "ladder.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time() - hours * 3600
-    rows = [{"t": t0 + i * hours * 3600 / (len(elos) - 1), "step": start_step + 100 * i, "elo": e}
-            for i, e in enumerate(elos)]
+    rows = [
+        {"t": t0 + i * hours * 3600 / (len(elos) - 1), "step": start_step + 100 * i, "elo": e}
+        for i, e in enumerate(elos)
+    ]
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-@pytest.mark.parametrize("elos,expect", [([900, 1000, 1100, 1200, 1300, 1400, 1500], False),
-                                         ([1380, 1400, 1390, 1410, 1395, 1405, 1400], True)])
+@pytest.mark.parametrize(
+    "elos,expect",
+    [
+        ([900, 1000, 1100, 1200, 1300, 1400, 1500], False),
+        ([1380, 1400, 1390, 1410, 1395, 1405, 1400], True),
+    ],
+)
 def test_plateau_detection(tmp_path, elos, expect):
     cfg = _config(tmp_path, "visits")
     cfg.growth.trigger = "plateau"

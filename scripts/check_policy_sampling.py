@@ -47,14 +47,27 @@ def main() -> None:
         z = sum(w.values())
         expected = {m: v / z for m, v in w.items()}
         res = _inference_cpp.small_mcts_search_batch_with_history(
-            histories=[r["moves"]] * a.draws, fens=[""] * a.draws, simulations=0, cpuct=0.65, temperature=1.0,
-            engine_path=a.engine, temperature_at_root=a.temp, use_dirichlet=False, virtual_loss_width=8)
+            histories=[r["moves"]] * a.draws,
+            fens=[""] * a.draws,
+            simulations=0,
+            cpuct=0.65,
+            temperature=1.0,
+            engine_path=a.engine,
+            temperature_at_root=a.temp,
+            use_dirichlet=False,
+            virtual_loss_width=8,
+        )
         counts = collections.Counter(x["action"] for x in res)
-        tv = 0.5 * sum(abs(counts.get(m, 0) / a.draws - expected.get(m, 0.0)) for m in set(counts) | set(expected))
+        tv = 0.5 * sum(
+            abs(counts.get(m, 0) / a.draws - expected.get(m, 0.0))
+            for m in set(counts) | set(expected)
+        )
         worst = max(worst, tv)
         top = sorted(expected.items(), key=lambda kv: -kv[1])[:4]
-        print(f"ply {len(r['moves']):3d}  TV {tv:.3f}  " + "  ".join(
-            f"{m} exp {v:.3f} got {counts.get(m, 0) / a.draws:.3f}" for m, v in top))
+        print(
+            f"ply {len(r['moves']):3d}  TV {tv:.3f}  "
+            + "  ".join(f"{m} exp {v:.3f} got {counts.get(m, 0) / a.draws:.3f}" for m, v in top)
+        )
     print(f"worst total variation: {worst:.3f}", "OK" if worst < 0.06 else "MISMATCH")
 
 

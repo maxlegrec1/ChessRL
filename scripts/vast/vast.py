@@ -37,7 +37,9 @@ DASHBOARD_PORT = 8501
 
 
 def vast(*args: str):
-    out = subprocess.run(["vastai", *args, "--raw"], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(
+        ["vastai", *args, "--raw"], capture_output=True, text=True, check=True
+    ).stdout
     return json.loads(out) if out.strip() else None
 
 
@@ -60,7 +62,11 @@ def active(ledger: dict) -> dict:
 
 def by_label(ledger: dict, label: str) -> tuple[str, dict]:
     # Prefer a live instance: a label can be reused after its box was destroyed.
-    matches = [(iid, inst) for iid, inst in ledger["instances"].items() if inst["label"] == label or iid == label]
+    matches = [
+        (iid, inst)
+        for iid, inst in ledger["instances"].items()
+        if inst["label"] == label or iid == label
+    ]
     live = [m for m in matches if m[1].get("ended") is None]
     if live or matches:
         return (live or matches)[-1]
@@ -69,7 +75,10 @@ def by_label(ledger: dict, label: str) -> tuple[str, dict]:
 
 def spend(ledger: dict, now: float | None = None) -> float:
     now = now or time.time()
-    return sum(((i.get("ended") or now) - i["started"]) / 3600.0 * i["dph"] for i in ledger["instances"].values())
+    return sum(
+        ((i.get("ended") or now) - i["started"]) / 3600.0 * i["dph"]
+        for i in ledger["instances"].values()
+    )
 
 
 def burn_rate(ledger: dict) -> float:
@@ -91,9 +100,18 @@ def ssh_target(iid: str) -> tuple[str, int] | None:
 def ssh_base(target: tuple[str, int]) -> list[str]:
     host, port = target
     return [
-        "ssh", "-p", str(port),
-        "-o", f"UserKnownHostsFile={KNOWN_HOSTS}", "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=15", f"root@{host}",
+        "ssh",
+        "-p",
+        str(port),
+        "-o",
+        f"UserKnownHostsFile={KNOWN_HOSTS}",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ConnectTimeout=15",
+        f"root@{host}",
     ]
 
 
@@ -101,31 +119,43 @@ def ssh_base(target: tuple[str, int]) -> list[str]:
 def search_offers(gpus: list[str], min_cores: int, disk: int) -> list[dict]:
     rows = []
     for gpu in gpus:
-        q = (f"gpu_name={gpu} num_gpus=1 cpu_cores_effective>={min_cores} cuda_max_good>=12.8 "
-             f"reliability>0.98 verified=true rentable=true inet_down>=200 disk_space>={disk}")
+        q = (
+            f"gpu_name={gpu} num_gpus=1 cpu_cores_effective>={min_cores} cuda_max_good>=12.8 "
+            f"reliability>0.98 verified=true rentable=true inet_down>=200 disk_space>={disk}"
+        )
         rows += vast("search", "offers", q, "-o", "dph") or []
     return sorted(rows, key=lambda o: o["dph_total"])
 
 
 def cmd_offers(a) -> None:
     rows = search_offers(a.gpu, a.min_cores, a.disk)
-    print(f"{'offer':>9} {'gpu':<10} {'$/h':>6} {'cores':>5} {'ram':>4} {'cuda':>5} {'dl':>5}  cpu / location")
+    print(
+        f"{'offer':>9} {'gpu':<10} {'$/h':>6} {'cores':>5} {'ram':>4} {'cuda':>5} {'dl':>5}  cpu / location"
+    )
     for o in rows[: a.n]:
-        print(f"{o['id']:>9} {o['gpu_name']:<10} {o['dph_total']:6.3f} {o.get('cpu_cores_effective', 0):5.0f} "
-              f"{(o.get('cpu_ram') or 0) // 1024:4d} {o.get('cuda_max_good', 0):5.1f} {o.get('inet_down', 0):5.0f}  "
-              f"{(o.get('cpu_name') or '')[:26]} / {o.get('geolocation', '')}")
+        print(
+            f"{o['id']:>9} {o['gpu_name']:<10} {o['dph_total']:6.3f} {o.get('cpu_cores_effective', 0):5.0f} "
+            f"{(o.get('cpu_ram') or 0) // 1024:4d} {o.get('cuda_max_good', 0):5.1f} {o.get('inet_down', 0):5.0f}  "
+            f"{(o.get('cpu_name') or '')[:26]} / {o.get('geolocation', '')}"
+        )
 
 
 def cmd_launch(a) -> None:
     ledger = load_ledger()
     # `search offers id=N` matches nothing, so find the offer in the usual search.
     # Same filters as `offers` (a looser query hits the result cap before cheap 32-core boxes).
-    rows = [o for o in search_offers(["RTX_4090", "RTX_5090"], 32, a.disk) if str(o["id"]) == str(a.offer)]
+    rows = [
+        o
+        for o in search_offers(["RTX_4090", "RTX_5090"], 32, a.disk)
+        if str(o["id"]) == str(a.offer)
+    ]
     # Vast's search returns slightly different result sets between calls, so an
     # offer just listed can be missing here; then assume ~$1.2/h for the budget
     # check and read the real price from the created instance.
     offer = rows[0] if rows else {"gpu_name": "?", "dph_total": 1.2}
-    projected = spend(ledger) + burn_rate(ledger) + offer["dph_total"]  # one more hour of everything
+    projected = (
+        spend(ledger) + burn_rate(ledger) + offer["dph_total"]
+    )  # one more hour of everything
     if projected > LAUNCH_CAP_USD:
         sys.exit(f"refusing: projected spend ${projected:.2f} > launch cap ${LAUNCH_CAP_USD:.0f}")
     # Vast's account-key injection failed on several hosts ("Permission denied
@@ -133,13 +163,28 @@ def cmd_launch(a) -> None:
     # /root/.ssh/authorized_keys"), so also install our public key from the
     # container's onstart, owned by root, with /root itself not group/world-writable.
     pub = (Path.home() / ".ssh" / "id_ed25519.pub").read_text().strip()
-    onstart = (f"mkdir -p /root/.ssh; grep -qF '{pub}' /root/.ssh/authorized_keys 2>/dev/null || "
-               f"echo '{pub}' >> /root/.ssh/authorized_keys; "
-               "chown root:root /root /root/.ssh /root/.ssh/authorized_keys; chmod go-w /root; "
-               "chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys")
+    onstart = (
+        f"mkdir -p /root/.ssh; grep -qF '{pub}' /root/.ssh/authorized_keys 2>/dev/null || "
+        f"echo '{pub}' >> /root/.ssh/authorized_keys; "
+        "chown root:root /root /root/.ssh /root/.ssh/authorized_keys; chmod go-w /root; "
+        "chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys"
+    )
     try:
-        res = vast("create", "instance", str(a.offer), "--image", a.image, "--disk", str(a.disk),
-                   "--ssh", "--direct", "--label", a.label, "--onstart-cmd", onstart)
+        res = vast(
+            "create",
+            "instance",
+            str(a.offer),
+            "--image",
+            a.image,
+            "--disk",
+            str(a.disk),
+            "--ssh",
+            "--direct",
+            "--label",
+            a.label,
+            "--onstart-cmd",
+            onstart,
+        )
     except subprocess.CalledProcessError as exc:
         sys.exit(f"offer {a.offer} not available: {exc.stdout or exc.stderr}")
     iid = str(res["new_contract"])
@@ -147,20 +192,32 @@ def cmd_launch(a) -> None:
         for _ in range(10):
             info = vast("show", "instance", iid) or {}
             if info.get("dph_total"):
-                offer = {"gpu_name": info.get("gpu_name", "?"), "dph_total": float(info["dph_total"]),
-                         "cpu_cores_effective": info.get("cpu_cores_effective")}
+                offer = {
+                    "gpu_name": info.get("gpu_name", "?"),
+                    "dph_total": float(info["dph_total"]),
+                    "cpu_cores_effective": info.get("cpu_cores_effective"),
+                }
                 break
             time.sleep(3)
     used = {i.get("local_port") for i in active(ledger).values()}
     port = next(p for p in range(DASHBOARD_PORT, DASHBOARD_PORT + 50) if p not in used)
     ledger["instances"][iid] = {
-        "label": a.label, "offer": a.offer, "gpu": offer["gpu_name"], "dph": offer["dph_total"],
-        "cores": offer.get("cpu_cores_effective"), "started": time.time(), "ended": None, "local_port": port,
+        "label": a.label,
+        "offer": a.offer,
+        "gpu": offer["gpu_name"],
+        "dph": offer["dph_total"],
+        "cores": offer.get("cpu_cores_effective"),
+        "started": time.time(),
+        "ended": None,
+        "local_port": port,
         "deadline": time.time() + a.hours * 3600 if a.hours else None,
     }
     save_ledger(ledger)
-    print(f"launched {a.label}: instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/h), "
-          f"dashboard -> http://localhost:{port}" + (f", auto-destroy in {a.hours:g} h" if a.hours else ""))
+    print(
+        f"launched {a.label}: instance {iid} ({offer['gpu_name']}, ${offer['dph_total']:.3f}/h), "
+        f"dashboard -> http://localhost:{port}"
+        + (f", auto-destroy in {a.hours:g} h" if a.hours else "")
+    )
 
 
 def cmd_cpus(a) -> None:
@@ -174,7 +231,9 @@ def cmd_cpus(a) -> None:
     ledger = load_ledger()
     iid, _ = by_label(ledger, a.label)
     machines = {i: (vast("show", "instance", i) or {}).get("machine_id") for i in active(ledger)}
-    peers = sorted((i for i, m in machines.items() if m is not None and m == machines.get(iid)), key=int)
+    peers = sorted(
+        (i for i, m in machines.items() if m is not None and m == machines.get(iid)), key=int
+    )
     idx = peers.index(iid) if iid in peers else 0
     print(f"{32 * idx}-{32 * idx + 31}")
 
@@ -192,7 +251,11 @@ def cmd_deadline(a) -> None:
     else:
         inst["deadline"] = time.time() + a.hours * 3600
     save_ledger(ledger)
-    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(inst["deadline"])) if inst["deadline"] else "none"
+    when = (
+        time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(inst["deadline"]))
+        if inst["deadline"]
+        else "none"
+    )
     print(f"{inst['label']}: deadline {when}")
 
 
@@ -203,8 +266,10 @@ def cmd_status(a) -> None:
         hours = (time.time() - inst["started"]) / 3600
         target = ssh_target(iid)
         ssh = " ".join(ssh_base(target)[:3] + [ssh_base(target)[-1]]) if target else "(no ssh yet)"
-        print(f"  {inst['label']:<14} id={iid} {inst['gpu']} ${inst['dph']:.3f}/h {hours:5.1f}h "
-              f"dash=http://localhost:{inst['local_port']}  {ssh}")
+        print(
+            f"  {inst['label']:<14} id={iid} {inst['gpu']} ${inst['dph']:.3f}/h {hours:5.1f}h "
+            f"dash=http://localhost:{inst['local_port']}  {ssh}"
+        )
 
 
 def cmd_ssh(a) -> None:
@@ -220,8 +285,12 @@ def cmd_bootstrap(a) -> None:
     """Wait for ssh, then run scripts/vast/setup_box.sh (fetched by commit SHA) in the background."""
     ledger = load_ledger()
     iid, inst = by_label(ledger, a.label)
-    out = subprocess.run(["git", "ls-remote", "https://github.com/maxlegrec1/ChessRL.git",
-                          f"refs/heads/{a.branch}"], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(
+        ["git", "ls-remote", "https://github.com/maxlegrec1/ChessRL.git", f"refs/heads/{a.branch}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     sha = out.split()[0]
     url = f"https://raw.githubusercontent.com/maxlegrec1/ChessRL/{sha}/scripts/vast/setup_box.sh"
     deadline = time.time() + a.timeout
@@ -232,10 +301,15 @@ def cmd_bootstrap(a) -> None:
         except Exception:
             pass
         if target:
-            r = subprocess.run(ssh_base(target) + [
-                f"mkdir -p /workspace && cd /workspace && curl -fsSL {url} -o setup_box.sh && "
-                f"(nohup bash setup_box.sh {a.branch} > setup.log 2>&1 &) && echo started"],
-                capture_output=True, text=True)
+            r = subprocess.run(
+                ssh_base(target)
+                + [
+                    f"mkdir -p /workspace && cd /workspace && curl -fsSL {url} -o setup_box.sh && "
+                    f"(nohup bash setup_box.sh {a.branch} > setup.log 2>&1 &) && echo started"
+                ],
+                capture_output=True,
+                text=True,
+            )
             if "started" in r.stdout:
                 print(f"{inst['label']}: setup started from {sha[:8]} (tail /workspace/setup.log)")
                 return
@@ -257,7 +331,9 @@ def destroy(ledger: dict, iid: str) -> bool:
             save_ledger(ledger)
             return True
         time.sleep(3)
-    print(f"WARNING: instance {iid} still exists after destroy: {r.stdout.strip()} {r.stderr.strip()}")
+    print(
+        f"WARNING: instance {iid} still exists after destroy: {r.stdout.strip()} {r.stderr.strip()}"
+    )
     return False
 
 
@@ -298,10 +374,20 @@ def cmd_guard(a) -> None:
         print(f"BUDGET CAP REACHED (${spent:.2f}): destroyed all instances")
     rate = burn_rate(ledger)
     budget = {
-        "t": time.time(), "spent": round(spent, 3), "cap": CAP_USD, "launch_cap": LAUNCH_CAP_USD,
-        "burn_per_hour": round(rate, 3), "hours_left": round((CAP_USD - spent) / rate, 1) if rate else None,
+        "t": time.time(),
+        "spent": round(spent, 3),
+        "cap": CAP_USD,
+        "launch_cap": LAUNCH_CAP_USD,
+        "burn_per_hour": round(rate, 3),
+        "hours_left": round((CAP_USD - spent) / rate, 1) if rate else None,
         "instances": [
-            {"label": i["label"], "gpu": i["gpu"], "dph": i["dph"], "started": i["started"], "ended": i["ended"]}
+            {
+                "label": i["label"],
+                "gpu": i["gpu"],
+                "dph": i["dph"],
+                "started": i["started"],
+                "ended": i["ended"],
+            }
             for i in ledger["instances"].values()
         ],
     }
@@ -312,9 +398,20 @@ def cmd_guard(a) -> None:
         if target:
             host, port = target
             subprocess.run(
-                ["scp", "-q", "-P", str(port), "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
-                 "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-                 str(BUDGET), f"root@{host}:/workspace/budget.json"],
+                [
+                    "scp",
+                    "-q",
+                    "-P",
+                    str(port),
+                    "-o",
+                    f"UserKnownHostsFile={KNOWN_HOSTS}",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    "ConnectTimeout=15",
+                    str(BUDGET),
+                    f"root@{host}:/workspace/budget.json",
+                ],
                 capture_output=True,
             )
     print(f"spent ${spent:.2f} / ${CAP_USD:.0f}, burn ${rate:.2f}/h")
@@ -355,10 +452,22 @@ def cmd_tunnels(a) -> None:
             if alive:
                 proc[0].terminate()
             cmd = ssh_base(target)
-            cmd[1:1] = ["-N", "-L", f"{inst['local_port']}:localhost:{DASHBOARD_PORT}", "-o", "ExitOnForwardFailure=yes"]
-            procs[iid] = (subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-                          inst["local_port"], target)
-            print(f"tunnel {inst['label']}: localhost:{inst['local_port']} -> {target[0]}:{target[1]}", flush=True)
+            cmd[1:1] = [
+                "-N",
+                "-L",
+                f"{inst['local_port']}:localhost:{DASHBOARD_PORT}",
+                "-o",
+                "ExitOnForwardFailure=yes",
+            ]
+            procs[iid] = (
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+                inst["local_port"],
+                target,
+            )
+            print(
+                f"tunnel {inst['label']}: localhost:{inst['local_port']} -> {target[0]}:{target[1]}",
+                flush=True,
+            )
         time.sleep(15)
 
 
@@ -376,18 +485,46 @@ def sync_one(iid: str, inst: dict) -> None:
     for src in BOX_RUNS:
         # Every 10k-step checkpoint, plus each run's newest one: a run's final
         # weights rarely land on a multiple of 10k before its deadline.
-        ls = subprocess.run([*ssh.split(), f"root@{host}", f"ls -1 {src}*/checkpoints/step_*.pt 2>/dev/null | sort"],
-                            capture_output=True, text=True)
+        ls = subprocess.run(
+            [
+                *ssh.split(),
+                f"root@{host}",
+                f"ls -1 {src}*/checkpoints/step_*.pt 2>/dev/null | sort",
+            ],
+            capture_output=True,
+            text=True,
+        )
         last: dict[str, str] = {}
         for line in ls.stdout.split():
-            rel = line[len(src):] if line.startswith(src) else None
+            rel = line[len(src) :] if line.startswith(src) else None
             if rel and rel.count("/") == 2:
                 last[rel.split("/")[0]] = rel
         newest = [f"--include={rel}" for rel in last.values()]
-        filters = ["--include=*/", "--include=metrics/***", "--include=ladder/***", "--include=config.yaml",
-                   "--include=*.log", "--include=*.stats.json", "--include=step_*0000.pt", *newest, "--exclude=*"]
-        r = subprocess.run(["rsync", "-az", "--prune-empty-dirs", *filters, "-e", ssh,
-                            f"root@{host}:{src}", f"{dest}/"], capture_output=True, text=True)
+        filters = [
+            "--include=*/",
+            "--include=metrics/***",
+            "--include=ladder/***",
+            "--include=config.yaml",
+            "--include=*.log",
+            "--include=*.stats.json",
+            "--include=step_*0000.pt",
+            *newest,
+            "--exclude=*",
+        ]
+        r = subprocess.run(
+            [
+                "rsync",
+                "-az",
+                "--prune-empty-dirs",
+                *filters,
+                "-e",
+                ssh,
+                f"root@{host}:{src}",
+                f"{dest}/",
+            ],
+            capture_output=True,
+            text=True,
+        )
         if r.returncode not in (0, 23):  # 23: source dir absent on this box
             print(f"sync {inst['label']} {src}: rc={r.returncode} {r.stderr.strip()[:200]}")
 
@@ -399,7 +536,9 @@ def cmd_sync(a) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("offers")
     o.add_argument("--gpu", nargs="+", default=["RTX_4090", "RTX_5090"])
@@ -412,7 +551,9 @@ def main() -> None:
     la.add_argument("--label", required=True)
     la.add_argument("--image", default=IMAGE)
     la.add_argument("--disk", type=int, default=120)
-    la.add_argument("--hours", type=float, default=0, help="auto sync+destroy after this many hours (0 = never)")
+    la.add_argument(
+        "--hours", type=float, default=0, help="auto sync+destroy after this many hours (0 = never)"
+    )
     la.set_defaults(fn=cmd_launch)
     cp = sub.add_parser("cpus")
     cp.add_argument("label")

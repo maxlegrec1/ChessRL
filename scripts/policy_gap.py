@@ -51,20 +51,35 @@ def build(a) -> None:
     rng = random.Random(a.seed)
     rng.shuffle(opening)
     rng.shuffle(later)
-    picked = [(h, s, "opening") for h, s in opening[: a.n_opening]] + [(h, s, "later") for h, s in later[: a.n_later]]
+    picked = [(h, s, "opening") for h, s in opening[: a.n_opening]] + [
+        (h, s, "later") for h, s in later[: a.n_later]
+    ]
     scores = stockfish([h for h, _, _ in picked], a.sf_nodes, a.sf_procs)
-    rows = [{"moves": h, "source": s, "phase": ph, "scores": sc} for (h, s, ph), sc in zip(picked, scores, strict=True)
-            if sc]
+    rows = [
+        {"moves": h, "source": s, "phase": ph, "scores": sc}
+        for (h, s, ph), sc in zip(picked, scores, strict=True)
+        if sc
+    ]
     Path(a.out).write_text(json.dumps(rows) + "\n")
-    print(f"wrote {len(rows)} positions ({sum(r['phase'] == 'opening' for r in rows)} opening) to {a.out}")
+    print(
+        f"wrote {len(rows)} positions ({sum(r['phase'] == 'opening' for r in rows)} opening) to {a.out}"
+    )
 
 
 def search_full(engine: str, hist: list[list[str]], sims: int) -> list[dict]:
     import _inference_cpp
 
     return _inference_cpp.small_mcts_search_batch_with_history(
-        histories=hist, fens=[""] * len(hist), simulations=sims, cpuct=0.65, temperature=1.3,
-        engine_path=engine, temperature_at_root=0.0, use_dirichlet=False, virtual_loss_width=8)
+        histories=hist,
+        fens=[""] * len(hist),
+        simulations=sims,
+        cpuct=0.65,
+        temperature=1.3,
+        engine_path=engine,
+        temperature_at_root=0.0,
+        use_dirichlet=False,
+        virtual_loss_width=8,
+    )
 
 
 def sharpen(d: dict[str, float], temp: float) -> dict[str, float]:
@@ -95,7 +110,9 @@ def kl(p: dict[str, float], q: dict[str, float]) -> float:
 
 
 def with_effective(s: dict) -> dict:
-    s["effective_moves"] = round(math.exp(s["entropy"]), 2) if s.get("entropy") is not None else None
+    s["effective_moves"] = (
+        round(math.exp(s["entropy"]), 2) if s.get("entropy") is not None else None
+    )
     return s
 
 
@@ -111,22 +128,33 @@ def measure_one(ckpt: Path, rows: list[dict], work: Path, variants: bool) -> dic
     visits = [{m: p for m, p in r["policy"] if p > 0} for r in res]
     root_e = [r["value"][0] + 0.5 * r["value"][1] for r in res]
     best_e = [max(s.values()) for s in sf]
-    out = {"checkpoint": str(ckpt), "step": int(ckpt.stem.split("_")[1]) if ckpt.stem.startswith("step_") else None}
+    out = {
+        "checkpoint": str(ckpt),
+        "step": int(ckpt.stem.split("_")[1]) if ckpt.stem.startswith("step_") else None,
+    }
     for phase in ("all", "opening", "later"):
         idx = [i for i, r in enumerate(rows) if phase == "all" or r["phase"] == phase]
         pol = with_effective(summarize([policy[i] for i in idx], [sf[i] for i in idx]))
         srch = with_effective(summarize([visits[i] for i in idx], [sf[i] for i in idx]))
         out[phase] = {
-            "policy": pol, "search400": srch,
-            "gap_sampled_loss": round(pol["sampled_expected_loss"] - srch["sampled_expected_loss"], 4),
-            "gap_top_move_loss": round(pol["top_move_expected_loss"] - srch["top_move_expected_loss"], 4),
+            "policy": pol,
+            "search400": srch,
+            "gap_sampled_loss": round(
+                pol["sampled_expected_loss"] - srch["sampled_expected_loss"], 4
+            ),
+            "gap_top_move_loss": round(
+                pol["top_move_expected_loss"] - srch["top_move_expected_loss"], 4
+            ),
             "kl_search_vs_policy": round(sum(kl(visits[i], policy[i]) for i in idx) / len(idx), 4),
             "value_head_mae": round(sum(abs(head_e[i] - best_e[i]) for i in idx) / len(idx), 4),
             "search_value_mae": round(sum(abs(root_e[i] - best_e[i]) for i in idx) / len(idx), 4),
         }
     if variants:
         idx = [i for i, r in enumerate(rows) if r["phase"] == "opening"]
-        v50 = [{m: p for m, p in r["policy"] if p > 0} for r in search_full(engine, [hist[i] for i in idx], 50)]
+        v50 = [
+            {m: p for m, p in r["policy"] if p > 0}
+            for r in search_full(engine, [hist[i] for i in idx], 50)
+        ]
         opts = {
             "visits50 (today)": v50,
             "visits50 top move": [{max(d, key=d.get): 1.0} for d in v50],
@@ -138,7 +166,9 @@ def measure_one(ckpt: Path, rows: list[dict], work: Path, variants: bool) -> dic
             "policy top-3": [top_k(policy[i], 3) for i in idx],
             "policy top move": [{max(policy[i], key=policy[i].get): 1.0} for i in idx],
         }
-        out["opening_variants"] = {k: with_effective(summarize(v, [sf[i] for i in idx])) for k, v in opts.items()}
+        out["opening_variants"] = {
+            k: with_effective(summarize(v, [sf[i] for i in idx])) for k, v in opts.items()
+        }
     return out
 
 
@@ -154,9 +184,12 @@ def measure(a) -> None:
         with out.open("a") as fh:
             fh.write(json.dumps(res) + "\n")
         g = res["all"]
-        print(f"{a.label} {ck.stem}: policy loss {g['policy']['sampled_expected_loss']} -> search "
-              f"{g['search400']['sampled_expected_loss']} (gap {g['gap_sampled_loss']}), top move gap "
-              f"{g['gap_top_move_loss']}, KL {g['kl_search_vs_policy']}", flush=True)
+        print(
+            f"{a.label} {ck.stem}: policy loss {g['policy']['sampled_expected_loss']} -> search "
+            f"{g['search400']['sampled_expected_loss']} (gap {g['gap_sampled_loss']}), top move gap "
+            f"{g['gap_top_move_loss']}, KL {g['kl_search_vs_policy']}",
+            flush=True,
+        )
 
 
 def main() -> None:

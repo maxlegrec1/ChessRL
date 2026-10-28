@@ -53,14 +53,37 @@ def log(msg: str) -> None:
 def build_engine(ckpt: Path, mode: str, out: Path) -> str:
     onnx, trt = out / f"{mode}.onnx", out / f"{mode}.trt"
     if not trt.exists():
-        subprocess.run([sys.executable, "-m", "src.export.to_onnx", "--ckpt_path", str(ckpt),
-                        "--onnx_path", str(onnx), "--search_heads", mode], cwd=ROOT, check=True,
-                       capture_output=True)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.export.to_onnx",
+                "--ckpt_path",
+                str(ckpt),
+                "--onnx_path",
+                str(onnx),
+                "--search_heads",
+                mode,
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
         # Same profile as scripts/build_trt.sh.
-        subprocess.run(["trtexec", f"--onnx={onnx}", f"--saveEngine={trt}", "--fp16",
-                        "--minShapes=input:1x8x8x111", "--optShapes=input:256x8x8x111",
-                        "--maxShapes=input:512x8x8x111", "--shapes=input:256x8x8x111"],
-                       check=True, capture_output=True)
+        subprocess.run(
+            [
+                "trtexec",
+                f"--onnx={onnx}",
+                f"--saveEngine={trt}",
+                "--fp16",
+                "--minShapes=input:1x8x8x111",
+                "--optShapes=input:256x8x8x111",
+                "--maxShapes=input:512x8x8x111",
+                "--shapes=input:256x8x8x111",
+            ],
+            check=True,
+            capture_output=True,
+        )
     return str(trt)
 
 
@@ -73,8 +96,15 @@ def summarize_scores(scores: list[float]) -> dict:
     s = np.asarray(scores, dtype=float)
     mean, se = float(s.mean()), float(s.std(ddof=1) / math.sqrt(len(s)))
     lo, hi = elo_diff(mean - 1.96 * se), elo_diff(mean + 1.96 * se)
-    return {"games": len(s), "w": int((s == 1).sum()), "d": int((s == 0.5).sum()), "l": int((s == 0).sum()),
-            "score": round(mean, 4), "elo": round(elo_diff(mean), 1), "elo_95": [round(lo, 1), round(hi, 1)]}
+    return {
+        "games": len(s),
+        "w": int((s == 1).sum()),
+        "d": int((s == 0.5).sum()),
+        "l": int((s == 0).sum()),
+        "score": round(mean, 4),
+        "elo": round(elo_diff(mean), 1),
+        "elo_95": [round(lo, 1), round(hi, 1)],
+    }
 
 
 def rate(engine: str, estimate: float, games_per_anchor: int, sims: int) -> dict:
@@ -94,8 +124,9 @@ def rate(engine: str, estimate: float, games_per_anchor: int, sims: int) -> dict
     return {"elo": round(elo, 1), "elo_se": round(se, 1), "anchors": per_anchor, "puzzles": puzzles}
 
 
-def head_to_head(engine_a: str, engine_b: str, openings: list[list[str]], sims: int,
-                 max_plies: int = 300) -> tuple[list[float], list[list[str]]]:
+def head_to_head(
+    engine_a: str, engine_b: str, openings: list[list[str]], sims: int, max_plies: int = 300
+) -> tuple[list[float], list[list[str]]]:
     """A against B, every opening with both colours. Scores from A's side, and the move lists."""
     games = [ladder.Game(o, w) for o in openings for w in (True, False)]  # "model" = A
     while True:
@@ -109,8 +140,10 @@ def head_to_head(engine_a: str, engine_b: str, openings: list[list[str]], sims: 
             break
         # Split before anyone moves: each game makes one move per pass, so the end
         # check above runs before every search (a game A just ended must not reach B).
-        batches = [(engine_a, [g for g in live if g.model_to_move]),
-                   (engine_b, [g for g in live if not g.model_to_move])]
+        batches = [
+            (engine_a, [g for g in live if g.model_to_move]),
+            (engine_b, [g for g in live if not g.model_to_move]),
+        ]
         for engine, batch in batches:
             if batch:
                 for g, uci in zip(batch, ladder.mcts_moves(engine, batch, sims), strict=True):
@@ -119,7 +152,9 @@ def head_to_head(engine_a: str, engine_b: str, openings: list[list[str]], sims: 
     return [g.result for g in games], [g.history for g in games]
 
 
-def sample_positions(histories: list[list[str]], n: int, min_ply: int = 10, seed: int = 0) -> list[list[str]]:
+def sample_positions(
+    histories: list[list[str]], n: int, min_ply: int = 10, seed: int = 0
+) -> list[list[str]]:
     """Move lists of n positions taken from the games (not terminal, after the random opening)."""
     rng = random.Random(seed)
     cands = []
@@ -143,10 +178,14 @@ def board_of(moves: list[str]) -> chess.Board:
 @torch.no_grad()
 def head_wdls(ckpt: Path, positions: list[list[str]]) -> dict[str, np.ndarray]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model_from_checkpoint(torch.load(ckpt, map_location=device, weights_only=False), device).eval()
+    model = model_from_checkpoint(
+        torch.load(ckpt, map_location=device, weights_only=False), device
+    ).eval()
     out = {"outcome": [], "q_value": []}
     for i in range(0, len(positions), 256):
-        x = torch.from_numpy(np.stack([encode(board_of(m)) for m in positions[i:i + 256]])).to(device)
+        x = torch.from_numpy(np.stack([encode(board_of(m)) for m in positions[i : i + 256]])).to(
+            device
+        )
         _, v, vq, _, _ = model(x, return_all=True)
         out["outcome"].append(torch.softmax(v.float(), -1).cpu().numpy())
         out["q_value"].append(torch.softmax(vq.float(), -1).cpu().numpy())
@@ -194,15 +233,21 @@ def compare_heads(heads: dict[str, np.ndarray], sf: np.ndarray, plies: np.ndarra
     for name, wdl in heads.items():
         e = wdl[:, 0] + 0.5 * wdl[:, 1]
         row = {}
-        for label, mask in (("all", plies >= 0), ("ply<40", plies < 40), ("ply40-80", (plies >= 40) & (plies < 80)),
-                            ("ply>=80", plies >= 80)):
+        for label, mask in (
+            ("all", plies >= 0),
+            ("ply<40", plies < 40),
+            ("ply40-80", (plies >= 40) & (plies < 80)),
+            ("ply>=80", plies >= 80),
+        ):
             if mask.sum() < 20:
                 continue
             row[label] = {
                 "n": int(mask.sum()),
                 "spearman": round(float(np.corrcoef(ranks(e[mask]), ranks(sf_e[mask]))[0, 1]), 4),
                 "mae_expected_score": round(float(np.abs(e[mask] - sf_e[mask]).mean()), 4),
-                "cross_entropy": round(float(-(sf[mask] * np.log(np.clip(wdl[mask], 1e-6, 1))).sum(1).mean()), 4),
+                "cross_entropy": round(
+                    float(-(sf[mask] * np.log(np.clip(wdl[mask], 1e-6, 1))).sum(1).mean()), 4
+                ),
                 "argmax_agree": round(float((wdl[mask].argmax(1) == sf[mask].argmax(1)).mean()), 4),
             }
         out[name] = row
@@ -214,15 +259,26 @@ def dirichlet_bias(engine: str, positions: list[list[str]], sims: int) -> dict:
 
     def run(noise: bool) -> list[dict]:
         return _inference_cpp.small_mcts_search_batch_with_history(
-            histories=positions, fens=[""] * len(positions), simulations=sims, cpuct=0.65, temperature=1.3,
-            engine_path=engine, temperature_at_root=0.0, use_dirichlet=noise, dirichlet_alpha=0.3,
-            dirichlet_epsilon=0.25, virtual_loss_width=8)
+            histories=positions,
+            fens=[""] * len(positions),
+            simulations=sims,
+            cpuct=0.65,
+            temperature=1.3,
+            engine_path=engine,
+            temperature_at_root=0.0,
+            use_dirichlet=noise,
+            dirichlet_alpha=0.3,
+            dirichlet_epsilon=0.25,
+            virtual_loss_width=8,
+        )
 
     def stats(res: list[dict]) -> tuple[np.ndarray, np.ndarray, list[str]]:
         root_e = np.array([r["value"][0] + 0.5 * r["value"][1] for r in res])
         best = [max(r["policy"], key=lambda mv: mv[1])[0] for r in res]
         # q_values: the move's average value from the side to move, in [-1, 1].
-        best_e = np.array([(r["q_values"].get(m, 0.0) + 1.0) / 2.0 for r, m in zip(res, best, strict=True)])
+        best_e = np.array(
+            [(r["q_values"].get(m, 0.0) + 1.0) / 2.0 for r, m in zip(res, best, strict=True)]
+        )
         return root_e, best_e, best
 
     off_root, off_best, off_move = stats(run(False))
@@ -231,7 +287,9 @@ def dirichlet_bias(engine: str, positions: list[list[str]], sims: int) -> dict:
         "positions": len(positions),
         "root_value_shift_mean": round(float((on_root - off_root).mean()), 4),
         "root_value_shift_mean_abs": round(float(np.abs(on_root - off_root).mean()), 4),
-        "most_visited_move_changed": round(float(np.mean([a != b for a, b in zip(on_move, off_move, strict=True)])), 4),
+        "most_visited_move_changed": round(
+            float(np.mean([a != b for a, b in zip(on_move, off_move, strict=True)])), 4
+        ),
         "root_minus_best_noise_off": round(float((off_root - off_best).mean()), 4),
         "root_minus_best_noise_on": round(float((on_root - on_best).mean()), 4),
         "note": "values are expected scores (W + D/2) for the side to move; root = the value_q training target",
@@ -242,10 +300,14 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--estimate", type=float, required=True, help="current ladder Elo (picks the anchors)")
+    p.add_argument(
+        "--estimate", type=float, required=True, help="current ladder Elo (picks the anchors)"
+    )
     p.add_argument("--sims", type=int, default=100, help="search per move in the rating games")
     p.add_argument("--anchor-games", type=int, default=144, help="games per anchor (both colours)")
-    p.add_argument("--h2h-openings", type=int, default=200, help="openings per pairing (x2 colours)")
+    p.add_argument(
+        "--h2h-openings", type=int, default=200, help="openings per pairing (x2 colours)"
+    )
     p.add_argument("--positions", type=int, default=2000)
     p.add_argument("--sf-nodes", type=int, default=1_000_000)
     p.add_argument("--sf-procs", type=int, default=24)
@@ -267,7 +329,9 @@ def main() -> None:
         for m in MODES:
             if m not in res.get("ladder", {}):
                 log(f"ladder: {m}")
-                res.setdefault("ladder", {})[m] = rate(engines[m], a.estimate, a.anchor_games, a.sims)
+                res.setdefault("ladder", {})[m] = rate(
+                    engines[m], a.estimate, a.anchor_games, a.sims
+                )
                 save()
 
     openings = ladder.make_openings(a.h2h_openings, seed=4321)
@@ -291,7 +355,9 @@ def main() -> None:
     save()
 
     log("Dirichlet bias")
-    res["dirichlet_bias"] = dirichlet_bias(engines["outcome"], positions[: a.bias_positions], a.bias_sims)
+    res["dirichlet_bias"] = dirichlet_bias(
+        engines["outcome"], positions[: a.bias_positions], a.bias_sims
+    )
     save()
     log(json.dumps(res, indent=1))
 

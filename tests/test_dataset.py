@@ -101,10 +101,15 @@ def reference_planes(rec: np.void, mirror: bool) -> np.ndarray:
     past = rec["past_bb"].copy()
     if mirror:
         fen = chess.Board(fen).mirror().fen()
-        flipped = past.view(np.uint8).reshape(7, 12, 8)[:, :, ::-1].copy().view(np.uint64).reshape(7, 12)
+        flipped = (
+            past.view(np.uint8).reshape(7, 12, 8)[:, :, ::-1].copy().view(np.uint64).reshape(7, 12)
+        )
         past = np.concatenate([flipped[:, 6:], flipped[:, :6]], axis=1)
     return encode_record_planes(
-        fen, past_bitboards=past, past_repetitions=rec["past_rep"], current_repetition=bool(rec["cur_rep"])
+        fen,
+        past_bitboards=past,
+        past_repetitions=rec["past_rep"],
+        current_repetition=bool(rec["cur_rep"]),
     )
 
 

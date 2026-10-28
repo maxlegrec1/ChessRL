@@ -36,7 +36,9 @@ def main() -> None:
         w.writerow(["PuzzleId", "FEN", "Moves", "Rating", "Themes"])
         for band in picked.values():
             for row in band:
-                w.writerow([row["PuzzleId"], row["FEN"], row["Moves"], row["Rating"], row["Themes"]])
+                w.writerow(
+                    [row["PuzzleId"], row["FEN"], row["Moves"], row["Rating"], row["Themes"]]
+                )
     print({f"{lo}-{hi}": len(picked[i]) for i, (lo, hi) in enumerate(BANDS)})
 
 

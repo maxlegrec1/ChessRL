@@ -115,11 +115,15 @@ class Batch:
     def to(self, device: torch.device | str, non_blocking: bool = True) -> Batch:
         moved = {}
         for name, value in self.__dict__.items():
-            moved[name] = value.to(device, non_blocking=non_blocking) if torch.is_tensor(value) else value
+            moved[name] = (
+                value.to(device, non_blocking=non_blocking) if torch.is_tensor(value) else value
+            )
         return Batch(**moved)
 
 
-def records_to_batch(rows: np.ndarray, mirror_prob: float = 0.0, rng: random.Random | None = None) -> Batch:
+def records_to_batch(
+    rows: np.ndarray, mirror_prob: float = 0.0, rng: random.Random | None = None
+) -> Batch:
     """Pack structured record rows into a Batch (no plane decoding yet)."""
     rng = rng or random
     b = len(rows)
@@ -307,7 +311,11 @@ class ReplayBuffer:
         if not ok.all():
             # Torn or foreign rows (a write racing the read): resample them.
             bad = int((~ok).sum())
-            rows = np.concatenate([rows[ok], self.sample_rows(bad)]) if ok.any() else self.sample_rows(batch_size)
+            rows = (
+                np.concatenate([rows[ok], self.sample_rows(bad)])
+                if ok.any()
+                else self.sample_rows(batch_size)
+            )
         return rows
 
     def sample_batch(self, batch_size: int, mirror_prob: float = 0.5) -> Batch:
@@ -335,8 +343,10 @@ class Prefetcher:
             try:
                 with self._lock:
                     batch = self.buffer.sample_batch(self.batch_size, self.mirror_prob)
-                pinned = {k: (v.pin_memory() if torch.is_tensor(v) and torch.cuda.is_available() else v)
-                          for k, v in batch.__dict__.items()}
+                pinned = {
+                    k: (v.pin_memory() if torch.is_tensor(v) and torch.cuda.is_available() else v)
+                    for k, v in batch.__dict__.items()
+                }
                 self._queue.put(Batch(**pinned))
             except Exception as exc:  # keep the trainer alive; surface on next get()
                 self._queue.put(exc)

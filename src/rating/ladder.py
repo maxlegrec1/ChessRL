@@ -28,7 +28,14 @@ PUZZLES = ROOT / "data" / "puzzles" / "lichess_1k.csv"
 SF_OPENINGS = ROOT / "data" / "openings" / "sf_balanced_6ply.json"
 ANCHOR_RATINGS_FILES = {"random": ANCHOR_RATINGS, "sf": ROOT / "src" / "rating" / "anchors_sf.json"}
 
-_PIECE_VALUE = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
+_PIECE_VALUE = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 0,
+}
 
 # name -> (kind, params). Ordered weakest to strongest (by design; calibration decides).
 ANCHORS: dict[str, tuple[str, dict]] = {
@@ -80,8 +87,11 @@ class Anchor:
                 board.pop()
                 if mate:
                     return m
-                score = _PIECE_VALUE[board.piece_type_at(m.to_square)] if board.is_capture(m) and \
-                    board.piece_type_at(m.to_square) else 0.0
+                score = (
+                    _PIECE_VALUE[board.piece_type_at(m.to_square)]
+                    if board.is_capture(m) and board.piece_type_at(m.to_square)
+                    else 0.0
+                )
                 if score > best_score:
                     best, best_score = [m], score
                 elif score == best_score:
@@ -122,8 +132,12 @@ def rules_end(board: chess.Board) -> tuple[bool, chess.Color | None]:
     could be made with the next move does not end the game."""
     if board.is_checkmate():
         return True, not board.turn
-    if (board.is_stalemate() or board.is_insufficient_material() or board.halfmove_clock >= 100
-            or board.is_repetition(3)):
+    if (
+        board.is_stalemate()
+        or board.is_insufficient_material()
+        or board.halfmove_clock >= 100
+        or board.is_repetition(3)
+    ):
         return True, None
     return False, None
 
@@ -164,8 +178,9 @@ def mcts_moves(engine_path: str, games: list[Game], sims: int) -> list[str]:
     return [r["action"] for r in res]
 
 
-def play_match(engine_path: str, anchor: Anchor, openings: list[list[str]], sims: int,
-               max_plies: int = 300) -> list[float]:
+def play_match(
+    engine_path: str, anchor: Anchor, openings: list[list[str]], sims: int, max_plies: int = 300
+) -> list[float]:
     """Model vs anchor, every opening with both colours. Returns model scores."""
     games = [Game(o, w) for o in openings for w in (True, False)]
     while True:
@@ -205,14 +220,16 @@ def fit_rating(results: list[tuple[float, float]], prior: float = 0.0) -> tuple[
         grad = hess = 0.0
         for opp, s in data:
             p = expected(r, opp)
-            grad += (s - p)
+            grad += s - p
             hess -= p * (1.0 - p)
         k = math.log(10.0) / 400.0
         step = -(grad * k) / (hess * k * k) if hess else 0.0
         r += max(-400.0, min(400.0, step))
         if abs(step) < 0.01:
             break
-    info = sum(expected(r, o) * (1 - expected(r, o)) for o, _ in data) * (math.log(10.0) / 400.0) ** 2
+    info = (
+        sum(expected(r, o) * (1 - expected(r, o)) for o, _ in data) * (math.log(10.0) / 400.0) ** 2
+    )
     return r, (1.0 / math.sqrt(info)) if info > 0 else float("inf")
 
 
@@ -242,7 +259,7 @@ def pick_anchors(estimate: float | None, ratings: dict[str, float], k: int = 2) 
         return names[:k] or ["random", "greedy"]
     below = [n for n in names if ratings[n] <= estimate]
     above = [n for n in names if ratings[n] > estimate]
-    picks = below[-(k // 2):] + above[: k - k // 2]
+    picks = below[-(k // 2) :] + above[: k - k // 2]
     if len(picks) < k:
         picks = sorted(names, key=lambda n: abs(ratings[n] - estimate))[:k]
     return picks
@@ -252,14 +269,15 @@ def next_anchor(current: str, ratings: dict[str, float], up: bool, exclude: set[
     """The closest calibrated anchor above (up) or below `current` not yet played."""
     names = sorted(ratings, key=ratings.get)
     i = names.index(current)
-    for name in (names[i + 1:] if up else names[:i][::-1]):
+    for name in names[i + 1 :] if up else names[:i][::-1]:
         if name not in exclude:
             return name
     return None
 
 
-def adaptive_anchor_scores(play, anchors: list[str], ratings: dict[str, float], sweep: float = 0.85,
-                           max_extra: int = 3) -> dict[str, list[float]]:
+def adaptive_anchor_scores(
+    play, anchors: list[str], ratings: dict[str, float], sweep: float = 0.85, max_extra: int = 3
+) -> dict[str, list[float]]:
     """Play the picked anchors, then step up (or down) while the result is lopsided.
 
     Anchors are picked around the previous rating, so a network that improved a lot
@@ -287,7 +305,12 @@ def adaptive_anchor_scores(play, anchors: list[str], ratings: dict[str, float], 
 def load_puzzles(path: Path = PUZZLES) -> list[dict]:
     with path.open(newline="") as fh:
         return [
-            {"id": r["PuzzleId"], "fen": r["FEN"], "moves": r["Moves"].split(), "rating": int(r["Rating"])}
+            {
+                "id": r["PuzzleId"],
+                "fen": r["FEN"],
+                "moves": r["Moves"].split(),
+                "rating": int(r["Rating"]),
+            }
             for r in csv.DictReader(fh)
         ]
 
@@ -304,8 +327,13 @@ def puzzle_accuracy(engine_path: str, puzzles: list[dict], sims: int) -> dict:
         res = _inference_cpp.small_mcts_search_batch_with_history(
             histories=[s["p"]["moves"][: s["ply"]] for s in live],
             fens=[s["p"]["fen"] for s in live],
-            simulations=sims, cpuct=0.65, temperature=1.0, engine_path=engine_path,
-            temperature_at_root=0.0, use_dirichlet=False, virtual_loss_width=1,
+            simulations=sims,
+            cpuct=0.65,
+            temperature=1.0,
+            engine_path=engine_path,
+            temperature_at_root=0.0,
+            use_dirichlet=False,
+            virtual_loss_width=1,
         )
         for s, r in zip(live, res, strict=True):
             want = s["p"]["moves"][s["ply"]]
@@ -366,10 +394,15 @@ def calibrate(games_per_pair: int = 100, openings_source: str = "random") -> dic
     ratings = {n: 200.0 * i for i, n in enumerate(names)}
     for _ in range(200):
         for n in names[1:]:
-            vs = [(ratings[b], s) for a, b, s in results if a == n] + \
-                 [(ratings[a], 1 - s) for a, b, s in results if b == n]
+            vs = [(ratings[b], s) for a, b, s in results if a == n] + [
+                (ratings[a], 1 - s) for a, b, s in results if b == n
+            ]
             ratings[n] = fit_rating(vs, prior=ratings[n])[0]
     ratings = {n: round(r - ratings["random"], 1) for n, r in ratings.items()}
-    out.write_text(json.dumps({"ratings": ratings, "games_per_pair": games_per_pair,
-                               "openings": openings_source}, indent=2))
+    out.write_text(
+        json.dumps(
+            {"ratings": ratings, "games_per_pair": games_per_pair, "openings": openings_source},
+            indent=2,
+        )
+    )
     return ratings

@@ -17,7 +17,11 @@ def normalize_spec(spec) -> dict:
     spec = dict(spec)
     arch = spec.get("arch", "resnet")
     if arch == "resnet":
-        return {"arch": "resnet", "blocks": int(spec.get("blocks", 4)), "channels": int(spec.get("channels", 64))}
+        return {
+            "arch": "resnet",
+            "blocks": int(spec.get("blocks", 4)),
+            "channels": int(spec.get("channels", 64)),
+        }
     if arch == "encoder":
         keys = ("d_model", "layers", "heads", "d_ff")
         return {"arch": "encoder", **{k: int(spec[k]) for k in keys}}

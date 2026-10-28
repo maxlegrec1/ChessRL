@@ -55,7 +55,9 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     resumed = Trainer(cfg)
     assert resumed.step == 4
     assert resumed.model.spec() == {"arch": "resnet", "blocks": 5, "channels": 80}
-    for a, b in zip(trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True):
+    for a, b in zip(
+        trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True
+    ):
         torch.testing.assert_close(a, b)
     assert (cfg.checkpoint.dir.parent / "metrics" / "train.jsonl").exists()
 

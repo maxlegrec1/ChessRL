@@ -91,9 +91,18 @@ def search(engine: str, pos: list[list[str]], sims: int, noise: bool) -> list[di
     import _inference_cpp
 
     res = _inference_cpp.small_mcts_search_batch_with_history(
-        histories=pos, fens=[""] * len(pos), simulations=sims, cpuct=0.65, temperature=1.3,
-        engine_path=engine, temperature_at_root=0.0, use_dirichlet=noise, dirichlet_alpha=0.3,
-        dirichlet_epsilon=0.25, virtual_loss_width=8)
+        histories=pos,
+        fens=[""] * len(pos),
+        simulations=sims,
+        cpuct=0.65,
+        temperature=1.3,
+        engine_path=engine,
+        temperature_at_root=0.0,
+        use_dirichlet=noise,
+        dirichlet_alpha=0.3,
+        dirichlet_epsilon=0.25,
+        virtual_loss_width=8,
+    )
     return [{m: p for m, p in r["policy"] if p > 0} for r in res]
 
 
@@ -115,10 +124,16 @@ def summarize(dists: list[dict[str, float]], sf: list[dict[str, float]]) -> dict
         ent.append(-sum(p * math.log(p) for p in probs.values() if p > 0))
         on_best.append(sum(p for m, p in probs.items() if loss[m] < 0.02))
     mean = lambda xs: round(sum(xs) / len(xs), 4) if xs else None  # noqa: E731
-    return {"positions": len(exp_loss), "sampled_expected_loss": mean(exp_loss),
-            "sampled_p_loss_over_0.10": mean(blunder), "sampled_p_loss_over_0.30": mean(big),
-            "mass_on_near_best_moves": mean(on_best), "entropy": mean(ent),
-            "top_move_expected_loss": mean(top_loss), "top_move_p_loss_over_0.10": mean(top_blunder)}
+    return {
+        "positions": len(exp_loss),
+        "sampled_expected_loss": mean(exp_loss),
+        "sampled_p_loss_over_0.10": mean(blunder),
+        "sampled_p_loss_over_0.30": mean(big),
+        "mass_on_near_best_moves": mean(on_best),
+        "entropy": mean(ent),
+        "top_move_expected_loss": mean(top_loss),
+        "top_move_p_loss_over_0.10": mean(top_blunder),
+    }
 
 
 def main() -> None:
@@ -136,7 +151,10 @@ def main() -> None:
     pos = positions(a.pgn, a.n, a.max_ply, seed=0)
     hist = [h for h, _ in pos]
     net = Net(a.ckpt, threads=4)
-    policy = [{m.uci(): pr for m, pr in priors.items()} for priors, _, _ in net.evaluate([board_of(h) for h in hist])]
+    policy = [
+        {m.uci(): pr for m, pr in priors.items()}
+        for priors, _, _ in net.evaluate([board_of(h) for h in hist])
+    ]
     v50 = search(a.engine, hist, 50, noise=False)
     v400n = search(a.engine, hist, 400, noise=True)
     v400 = search(a.engine, hist, 400, noise=False)
@@ -148,8 +166,14 @@ def main() -> None:
     sf = stockfish(hist, a.sf_nodes, a.sf_procs)
 
     out = {"checkpoint": str(a.ckpt), "plies": f"0-{a.max_ply - 1}"}
-    for name, d in (("policy", policy), ("visits50", v50), ("visits400n", v400n), ("selfplay", mix),
-                    ("visits400", v400), ("played", played)):
+    for name, d in (
+        ("policy", policy),
+        ("visits50", v50),
+        ("visits400n", v400n),
+        ("selfplay", mix),
+        ("visits400", v400),
+        ("played", played),
+    ):
         out[name] = summarize(d, sf)
     print(json.dumps(out, indent=1))
     if a.out:

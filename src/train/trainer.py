@@ -79,7 +79,9 @@ class Trainer:
         self.samples_processed = 0
         self.last_growth_step = -(10**9)
         self.amp_dtype = AMP_DTYPES.get(config.amp_dtype.lower(), torch.float16)
-        self.scaler = amp.GradScaler(device=self.device_type, enabled=self.amp_dtype == torch.float16)
+        self.scaler = amp.GradScaler(
+            device=self.device_type, enabled=self.amp_dtype == torch.float16
+        )
 
         spec = normalize_spec(config.model)
         ckpt = None
@@ -123,8 +125,10 @@ class Trainer:
         params = list(self.model.parameters())
         if cfg.weight_decay > 0:
             # Decay matrices only: norm weights, biases and scalar gains stay free.
-            params = [{"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
-                      {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0}]
+            params = [
+                {"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
+                {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0},
+            ]
         if cfg.optimizer == "adamw":
             return optim.AdamW(params, **kwargs)
         return optim.Adam(params, **kwargs)
@@ -137,7 +141,9 @@ class Trainer:
         if sched.kind == "cosine" and sched.total_steps > 0:
             hold = max(0, sched.hold_steps)
             progress = min(1.0, max(0, rel - hold) / max(1, sched.total_steps - hold))
-            factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+            factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (
+                1.0 + math.cos(math.pi * progress)
+            )
         elif sched.kind == "steps":
             for drop_step, drop_factor in sorted(sched.drops):
                 if step >= drop_step:
@@ -217,7 +223,10 @@ class Trainer:
         except (FileNotFoundError, ValueError):
             return False
         rows = [r for r in rows if r.get("step", 0) >= max(0, self.last_growth_step)]
-        if len(rows) < g.plateau_min_ratings or (rows[-1]["t"] - rows[0]["t"]) < g.plateau_hours * 3600:
+        if (
+            len(rows) < g.plateau_min_ratings
+            or (rows[-1]["t"] - rows[0]["t"]) < g.plateau_hours * 3600
+        ):
             return False
         window = [r for r in rows if r["t"] >= rows[-1]["t"] - g.plateau_hours * 3600]
         k = max(1, len(window) // 3)
@@ -250,12 +259,16 @@ class Trainer:
             if cur["arch"] == "encoder":
                 self.model = grow_encoder(self.model, layers)
             else:
-                self.model = grow_resnet(self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"]))
+                self.model = grow_resnet(
+                    self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"])
+                )
             self.model.train()
             self.optimizer = self._make_optimizer()
             self._forward = torch.compile(self.model) if self.config.compile else self.model
             self.last_growth_step = self.step
-            self._log_event("grow", spec=self.model.spec(), params_before=before, params=self.param_count())
+            self._log_event(
+                "grow", spec=self.model.spec(), params_before=before, params=self.param_count()
+            )
 
     def run(self) -> None:
         self._wait_for_warmup()
@@ -316,7 +329,8 @@ class Trainer:
                         **{f"model_{k}": v for k, v in self.model.spec().items() if k != "arch"},
                         **{
                             "pacing/g_records_per_sec": g,
-                            "pacing/k_actual": (self.samples_processed - trained0) / max(1, produced),
+                            "pacing/k_actual": (self.samples_processed - trained0)
+                            / max(1, produced),
                             "pacing/waited_s": waited,
                             "pacing/step_time_s": float(np.mean(step_times)),
                             "buffer/window": self.buffer.current_window(),
@@ -374,14 +388,18 @@ class Trainer:
         visit_target = dense_policy_target(batch)
         visit_ce = -(visit_target * log_probs).sum(dim=-1)
         visit_loss = (visit_ce * has_visits).sum() / has_visits.sum().clamp_min(1)
-        played = torch.where(full, batch.played_idx, torch.full_like(batch.played_idx, IGNORE_INDEX))
+        played = torch.where(
+            full, batch.played_idx, torch.full_like(batch.played_idx, IGNORE_INDEX)
+        )
         played_loss = F.cross_entropy(policy_logits, played, ignore_index=IGNORE_INDEX)
         policy_loss = visit_loss if cfg.policy_target == "visits" else played_loss
 
         value_loss = F.cross_entropy(value_logits, batch.value_outcome)
         value_q_loss = F.cross_entropy(value_q_logits, batch.value_mcts)
         mlh_loss = ((mlh_pred - target_mlh).pow(2) * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0)
-        mlh_q_loss = ((mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask).sum() / mlh_q_mask.sum().clamp_min(1.0)
+        mlh_q_loss = (
+            (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
+        ).sum() / mlh_q_mask.sum().clamp_min(1.0)
 
         lw = cfg.loss_weights
         total_loss = (
@@ -408,7 +426,9 @@ class Trainer:
             target_entropy = -(visit_target * visit_target.clamp_min(1e-12).log()).sum(-1)
             vm = batch.value_mcts
             castle_cand = torch.isin(batch.played_idx, _CASTLE_IDX.to(self.device))
-            kings_home = (((batch.cur_bb[:, 5] >> _E1) & 1) > 0) | (((batch.cur_bb[:, 11] >> _E8) & 1) > 0)
+            kings_home = (((batch.cur_bb[:, 5] >> _E1) & 1) > 0) | (
+                ((batch.cur_bb[:, 11] >> _E8) & 1) > 0
+            )
             metrics: dict[str, torch.Tensor | float] = {
                 "loss/total": total_loss.detach(),
                 "loss/policy": policy_loss.detach(),
@@ -421,14 +441,17 @@ class Trainer:
                 # KL(visits || policy) = CE - H(target): 0 when the net matches the search.
                 "policy/kl_to_visits": ((visit_ce - target_entropy) * has_visits).sum()
                 / has_visits.sum().clamp_min(1),
-                "acc/policy": ((top1 == played) & played_ok).float().sum() / played_ok.float().sum().clamp_min(1),
-                "acc/policy_top_visit": (
-                    (top1 == visit_target.argmax(dim=-1)) & has_visits
-                ).float().sum() / has_visits.float().sum().clamp_min(1),
+                "acc/policy": ((top1 == played) & played_ok).float().sum()
+                / played_ok.float().sum().clamp_min(1),
+                "acc/policy_top_visit": ((top1 == visit_target.argmax(dim=-1)) & has_visits)
+                .float()
+                .sum()
+                / has_visits.float().sum().clamp_min(1),
                 "acc/value": (value_logits.argmax(dim=-1) == value_labels).float().mean(),
                 "acc/value_q": (value_q_logits.argmax(dim=-1) == value_q_labels).float().mean(),
                 "entropy/policy": -(probs * log_probs).sum(dim=-1).mean(),
-                "entropy/visit_target": (target_entropy * has_visits).sum() / has_visits.sum().clamp_min(1),
+                "entropy/visit_target": (target_entropy * has_visits).sum()
+                / has_visits.sum().clamp_min(1),
                 "buffer/frac_W_geq_0.8": (vm[:, 0] >= 0.8).float().mean(),
                 "buffer/frac_D_geq_0.8": (vm[:, 1] >= 0.8).float().mean(),
                 "buffer/frac_L_geq_0.8": (vm[:, 2] >= 0.8).float().mean(),
@@ -436,13 +459,19 @@ class Trainer:
                 "buffer/decisive_outcome": (value_labels != 1).float().mean(),
                 "buffer/wdl_agreement": (value_labels == value_q_labels).float().mean(),
                 "buffer/castle_rate": (castle_cand & kings_home).float().mean(),
-                "mlh/pred_plies": (mlh_pred * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
-                "mlh/target_plies": (target_mlh * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
+                "mlh/pred_plies": (mlh_pred * mlh_mask).sum()
+                / mlh_mask.sum().clamp_min(1.0)
+                * 25.0,
+                "mlh/target_plies": (target_mlh * mlh_mask).sum()
+                / mlh_mask.sum().clamp_min(1.0)
+                * 25.0,
                 "amp/scale": self.scaler.get_scale() if self.scaler.is_enabled() else 1.0,
             }
             if expensive:
                 rows = min(16, probs.shape[0])
-                metrics["legal_move_prob"] = legal_move_probability(probs[:rows].float().cpu(), batch.fens[:rows])
+                metrics["legal_move_prob"] = legal_move_probability(
+                    probs[:rows].float().cpu(), batch.fens[:rows]
+                )
         return metrics
 
     # ------------------------------------------------------------------ #
@@ -470,7 +499,9 @@ class Trainer:
     def _load_checkpoint(self, ckpt: dict, path: Path) -> None:
         missing, unexpected = self.model.load_state_dict(ckpt["model"], strict=False)
         if missing:
-            self.console.log(f"[resume] new params not in checkpoint (initialized fresh): {missing}")
+            self.console.log(
+                f"[resume] new params not in checkpoint (initialized fresh): {missing}"
+            )
         if unexpected:
             self.console.log(f"[resume] checkpoint has unused params: {unexpected}")
         try:
@@ -520,11 +551,15 @@ class Trainer:
             self._log_event("build_skipped", checkpoint=checkpoint_path.name)
             return
         if self._build_proc is not None and self._build_proc.returncode not in (0, None):
-            self.console.log(f"[WARN] previous engine build exited rc={self._build_proc.returncode}")
+            self.console.log(
+                f"[WARN] previous engine build exited rc={self._build_proc.returncode}"
+            )
         log_path = self.run_dir / "engine_builds.log"
         self._build_log = log_path.open("a")
         self._build_proc = subprocess.Popen(cmd, stdout=self._build_log, stderr=subprocess.STDOUT)
-        self.console.log(f"Engine build started for {checkpoint_path.name} (pid {self._build_proc.pid})")
+        self.console.log(
+            f"Engine build started for {checkpoint_path.name} (pid {self._build_proc.pid})"
+        )
 
 
 __all__ = ["Trainer", "legal_move_probability", "policy_index"]

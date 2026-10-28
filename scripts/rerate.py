@@ -34,13 +34,39 @@ def old_rating(ckpt: Path) -> float | None:
 
 
 def build(ckpt: Path, work: Path) -> str:
-    onnx, trt = work / f"{ckpt.parent.parent.name}_{ckpt.stem}.onnx", work / f"{ckpt.parent.parent.name}_{ckpt.stem}.trt"
+    onnx, trt = (
+        work / f"{ckpt.parent.parent.name}_{ckpt.stem}.onnx",
+        work / f"{ckpt.parent.parent.name}_{ckpt.stem}.trt",
+    )
     if not trt.exists():
-        subprocess.run([sys.executable, "-m", "src.export.to_onnx", "--ckpt_path", str(ckpt), "--onnx_path", str(onnx)],
-                       cwd=ROOT, check=True, capture_output=True)
-        subprocess.run(["trtexec", f"--onnx={onnx}", f"--saveEngine={trt}", "--fp16", "--minShapes=input:1x8x8x111",
-                        "--optShapes=input:256x8x8x111", "--maxShapes=input:512x8x8x111", "--shapes=input:256x8x8x111"],
-                       check=True, capture_output=True)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.export.to_onnx",
+                "--ckpt_path",
+                str(ckpt),
+                "--onnx_path",
+                str(onnx),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "trtexec",
+                f"--onnx={onnx}",
+                f"--saveEngine={trt}",
+                "--fp16",
+                "--minShapes=input:1x8x8x111",
+                "--optShapes=input:256x8x8x111",
+                "--maxShapes=input:512x8x8x111",
+                "--shapes=input:256x8x8x111",
+            ],
+            check=True,
+            capture_output=True,
+        )
     return str(trt)
 
 
@@ -61,7 +87,11 @@ def main() -> None:
     openings = ladder.load_openings(a.openings, a.games // 2)
     done = set()
     if a.out.exists():
-        done = {json.loads(line)["checkpoint"] for line in a.out.read_text().splitlines() if line.strip()}
+        done = {
+            json.loads(line)["checkpoint"]
+            for line in a.out.read_text().splitlines()
+            if line.strip()
+        }
     for ck in a.ckpt:
         if str(ck) in done:
             continue
@@ -81,13 +111,26 @@ def main() -> None:
         scores = ladder.adaptive_anchor_scores(play, picked, ratings)
         results = [(ratings[n], x) for n, s in scores.items() for x in s]
         elo, se = ladder.fit_rating(results, prior=estimate)
-        row = {"checkpoint": str(ck), "run": ck.parent.parent.name, "step": int(ck.stem.split("_")[1]),
-               "openings": a.openings, "elo": round(elo, 1), "elo_se": round(se, 1), "old_elo": old,
-               "anchors": {n: {"w": s.count(1.0), "d": s.count(0.5), "l": s.count(0.0)} for n, s in scores.items()},
-               "seconds": round(time.time() - t0, 1)}
+        row = {
+            "checkpoint": str(ck),
+            "run": ck.parent.parent.name,
+            "step": int(ck.stem.split("_")[1]),
+            "openings": a.openings,
+            "elo": round(elo, 1),
+            "elo_se": round(se, 1),
+            "old_elo": old,
+            "anchors": {
+                n: {"w": s.count(1.0), "d": s.count(0.5), "l": s.count(0.0)}
+                for n, s in scores.items()
+            },
+            "seconds": round(time.time() - t0, 1),
+        }
         with a.out.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
-        print(f"{row['run']} step {row['step']}: {row['elo']} ± {row['elo_se']} (old {old})", flush=True)
+        print(
+            f"{row['run']} step {row['step']}: {row['elo']} ± {row['elo_se']} (old {old})",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

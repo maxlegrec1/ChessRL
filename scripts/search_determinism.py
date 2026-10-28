@@ -20,9 +20,18 @@ def search(engine: str, positions: list[list[str]], noise: bool, sims: int, vlw:
     import _inference_cpp
 
     return _inference_cpp.small_mcts_search_batch_with_history(
-        histories=positions, fens=[""] * len(positions), simulations=sims, cpuct=0.65, temperature=1.3,
-        engine_path=engine, temperature_at_root=0.0, use_dirichlet=noise, dirichlet_alpha=0.3,
-        dirichlet_epsilon=0.25, virtual_loss_width=vlw)
+        histories=positions,
+        fens=[""] * len(positions),
+        simulations=sims,
+        cpuct=0.65,
+        temperature=1.3,
+        engine_path=engine,
+        temperature_at_root=0.0,
+        use_dirichlet=noise,
+        dirichlet_alpha=0.3,
+        dirichlet_epsilon=0.25,
+        virtual_loss_width=vlw,
+    )
 
 
 def best(res: list[dict]) -> list[str]:
@@ -44,9 +53,18 @@ def main() -> None:
     pos = json.loads(a.positions.read_text())[: a.n]
     out = {"positions": len(pos)}
     for vlw in (8, 1):
-        off1, off2 = search(a.engine, pos, False, a.sims, vlw), search(a.engine, pos, False, a.sims, vlw)
-        on1, on2 = search(a.engine, pos, True, a.sims, vlw), search(a.engine, pos, True, a.sims, vlw)
-        diff = lambda x, y: round(float(np.mean([i != j for i, j in zip(best(x), best(y), strict=True)])), 4)  # noqa: E731
+        off1, off2 = (
+            search(a.engine, pos, False, a.sims, vlw),
+            search(a.engine, pos, False, a.sims, vlw),
+        )
+        on1, on2 = (
+            search(a.engine, pos, True, a.sims, vlw),
+            search(a.engine, pos, True, a.sims, vlw),
+        )
+
+        def diff(x, y):
+            return round(float(np.mean([i != j for i, j in zip(best(x), best(y), strict=True)])), 4)
+
         # Where noise changed the move: how much worse is it, by the noise-free search's
         # own values (expected score for the side to move; q_values are in [-1, 1])?
         losses = []
@@ -62,7 +80,9 @@ def main() -> None:
             "move_changed_off_vs_off": diff(off1, off2),
             "move_changed_on_vs_off": diff(on1, off1),
             "move_changed_on_vs_on": diff(on1, on2),
-            "root_shift_off_vs_off_abs": round(float(np.abs(root_e(off1) - root_e(off2)).mean()), 4),
+            "root_shift_off_vs_off_abs": round(
+                float(np.abs(root_e(off1) - root_e(off2)).mean()), 4
+            ),
             "root_shift_on_vs_off_abs": round(float(np.abs(root_e(on1) - root_e(off1)).mean()), 4),
         }
     print(json.dumps(out, indent=1))

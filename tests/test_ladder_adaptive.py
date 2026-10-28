@@ -5,17 +5,21 @@ RATINGS = ladder.load_anchor_ratings()
 
 def fake_play(true_rating: float, games: int = 48, log: list | None = None):
     """Deterministic match: the model wins round(p * games) games against each anchor."""
+
     def play(name: str) -> list[float]:
         if log is not None:
             log.append(name)
         wins = round(ladder.expected(true_rating, RATINGS[name]) * games)
         return [1.0] * wins + [0.0] * (games - wins)
+
     return play
 
 
 def rate(true_rating: float, estimate: float, max_extra: int, log: list | None = None) -> float:
     picked = ladder.pick_anchors(estimate, RATINGS, k=2)
-    scores = ladder.adaptive_anchor_scores(fake_play(true_rating, log=log), picked, RATINGS, max_extra=max_extra)
+    scores = ladder.adaptive_anchor_scores(
+        fake_play(true_rating, log=log), picked, RATINGS, max_extra=max_extra
+    )
     results = [(RATINGS[n], x) for n, s in scores.items() for x in s]
     return ladder.fit_rating(results, prior=estimate)[0]
 
@@ -23,8 +27,12 @@ def rate(true_rating: float, estimate: float, max_extra: int, log: list | None =
 def test_original_ladder_trails_on_a_sweep():
     # The sims-400 run's real rating at step 10k: previous estimate 616, anchors greedy
     # and sf_s0_r25, no losses -> the two virtual draws at 616 decide the fit (1,082).
-    results = ([(RATINGS["greedy"], 1.0)] * 43 + [(RATINGS["greedy"], 0.5)] * 5
-               + [(RATINGS["sf_s0_r25"], 1.0)] * 36 + [(RATINGS["sf_s0_r25"], 0.5)] * 12)
+    results = (
+        [(RATINGS["greedy"], 1.0)] * 43
+        + [(RATINGS["greedy"], 0.5)] * 5
+        + [(RATINGS["sf_s0_r25"], 1.0)] * 36
+        + [(RATINGS["sf_s0_r25"], 0.5)] * 12
+    )
     assert abs(ladder.fit_rating(results, prior=616)[0] - 1082) < 5
 
 

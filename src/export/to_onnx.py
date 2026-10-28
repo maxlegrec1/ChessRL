@@ -19,8 +19,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda", help="Device for export (default: cuda).")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
     parser.add_argument("--batch", type=int, default=1, help="Dummy batch size.")
-    parser.add_argument("--search_heads", default=None, choices=sorted(ExportWrapper.MODES),
-                        help="Override the checkpoint's search_heads (see ExportWrapper).")
+    parser.add_argument(
+        "--search_heads",
+        default=None,
+        choices=sorted(ExportWrapper.MODES),
+        help="Override the checkpoint's search_heads (see ExportWrapper).",
+    )
     return parser.parse_args()
 
 
@@ -73,7 +77,9 @@ def export_model(args: argparse.Namespace) -> None:
     base_model = model_from_checkpoint(checkpoint, device)
     base_model.eval()
 
-    search_heads = args.search_heads or (checkpoint.get("config") or {}).get("search_heads", "search")
+    search_heads = args.search_heads or (checkpoint.get("config") or {}).get(
+        "search_heads", "search"
+    )
     print(f"[to_onnx] search_heads={search_heads}")
     model = ExportWrapper(base_model, search_heads).to(device)
     model.eval()

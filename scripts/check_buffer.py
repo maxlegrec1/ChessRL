@@ -60,15 +60,23 @@ def main() -> int:
         if [int(x) for x in rec["cur_bb"]] != bb:
             fails["cur_bb"] += 1
         cr = board.castling_rights
-        castling = (bool(cr & chess.BB_H1) | bool(cr & chess.BB_A1) << 1 | bool(cr & chess.BB_H8) << 2
-                    | bool(cr & chess.BB_A8) << 3)
+        castling = (
+            bool(cr & chess.BB_H1)
+            | bool(cr & chess.BB_A1) << 1
+            | bool(cr & chess.BB_H8) << 2
+            | bool(cr & chess.BB_A8) << 3
+        )
         if int(rec["castling"]) != castling:
             fails["castling"] += 1
         ep_field = fen.split()[3]
         if int(rec["ep"]) != (255 if ep_field == "-" else chess.parse_square(ep_field)):
             fails["ep"] += 1
-        ref = encode_record_planes(fen, past_bitboards=rec["past_bb"], past_repetitions=rec["past_rep"],
-                                   current_repetition=bool(rec["cur_rep"]))
+        ref = encode_record_planes(
+            fen,
+            past_bitboards=rec["past_bb"],
+            past_repetitions=rec["past_rep"],
+            current_repetition=bool(rec["cur_rep"]),
+        )
         if not np.array_equal(planes[i], ref):
             fails["planes"] += 1
         legal = legal_indices(board)
@@ -84,7 +92,10 @@ def main() -> int:
             fails["visit_mass_gt_1"] += 1
         if int(rec["played_idx"]) not in legal:
             fails["illegal_played"] += 1
-        if policy_index[int(rec["played_idx"])] not in (rec["played"].decode(), rec["played"].decode()[:-1]):
+        if policy_index[int(rec["played_idx"])] not in (
+            rec["played"].decode(),
+            rec["played"].decode()[:-1],
+        ):
             fails["played_mismatch"] += 1
         vo = rec["value_outcome"]
         if sorted(vo.tolist()) != [0.0, 0.0, 1.0]:
@@ -95,9 +106,11 @@ def main() -> int:
         stats["ply"] += int(rec["ply"])
     n = len(rows)
     print(f"checked {n} records from {a.buffer} ({len(mm):,} in buffer)")
-    print(f"  mean visited moves {stats['entries'] / n:.1f}, mean sims {stats['sims'] / n:.0f}, "
-          f"mean ply {stats['ply'] / n:.1f}, full-search {stats['full_search'] / n:.0%}, "
-          f"visit mass < 0.98 in {stats['visit_mass_lt_0.98'] / n:.1%} (top-20 truncation)")
+    print(
+        f"  mean visited moves {stats['entries'] / n:.1f}, mean sims {stats['sims'] / n:.0f}, "
+        f"mean ply {stats['ply'] / n:.1f}, full-search {stats['full_search'] / n:.0%}, "
+        f"visit mass < 0.98 in {stats['visit_mass_lt_0.98'] / n:.1%} (top-20 truncation)"
+    )
     if fails:
         print("  FAILURES:", dict(fails))
         return 1

@@ -13,7 +13,9 @@ from src.models.small.fen_encoder import fen_to_tensor
 @pytest.fixture(scope="module")
 def net():
     torch.manual_seed(0)
-    return Net.wrap(build_model({"arch": "encoder", "d_model": 32, "layers": 1, "heads": 4, "d_ff": 64}))
+    return Net.wrap(
+        build_model({"arch": "encoder", "d_model": 32, "layers": 1, "heads": 4, "d_ff": 64})
+    )
 
 
 def test_encode_without_history_matches_fen_encoder():
@@ -33,7 +35,7 @@ def test_encode_history_and_repetition_planes():
 
 def test_priors_are_a_distribution_over_legal_moves(net):
     b = chess.Board("8/4P1k1/8/8/8/8/8/4K3 w - - 0 1")
-    (priors, wdl, plies), = net.evaluate([b])
+    ((priors, wdl, plies),) = net.evaluate([b])
     assert set(priors) == set(b.legal_moves)
     assert sum(priors.values()) == pytest.approx(1.0)
     assert sum(wdl) == pytest.approx(1.0) and plies >= 0
@@ -41,10 +43,13 @@ def test_priors_are_a_distribution_over_legal_moves(net):
     assert policy_key(chess.Move.from_uci("e7e8q")) == "e7e8q"
 
 
-@pytest.mark.parametrize("fen,mate", [
-    ("6k1/5ppp/8/8/8/8/qr3PPP/3R2K1 w - - 0 1", "d1d8"),  # White down a queen and rook, mates
-    ("3r2k1/QR3ppp/8/8/8/8/5PPP/6K1 b - - 0 1", "d8d1"),  # the same, for Black
-])
+@pytest.mark.parametrize(
+    "fen,mate",
+    [
+        ("6k1/5ppp/8/8/8/8/qr3PPP/3R2K1 w - - 0 1", "d1d8"),  # White down a queen and rook, mates
+        ("3r2k1/QR3ppp/8/8/8/8/5PPP/6K1 b - - 0 1", "d8d1"),  # the same, for Black
+    ],
+)
 def test_search_finds_mate_in_one_with_an_untrained_net(net, fen, mate):
     res = analyse(net, chess.Board(fen), 300)
     assert res["best"] == mate

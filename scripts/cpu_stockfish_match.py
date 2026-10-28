@@ -61,15 +61,25 @@ def play(task: tuple[int, int, bool, int, int, int]) -> dict:
     game.headers["Event"] = "CPU Stockfish match"
     game.headers["Round"] = str(idx + 1)
     game.headers["White"], game.headers["Black"] = (me, sf) if model_white else (sf, me)
-    game.headers["Result"] = "1/2-1/2" if winner is None else ("1-0" if winner == chess.WHITE else "0-1")
-    return {"elo": elo, "score": score, "plies": board.ply(), "seconds": time.time() - t0, "pgn": str(game)}
+    game.headers["Result"] = (
+        "1/2-1/2" if winner is None else ("1-0" if winner == chess.WHITE else "0-1")
+    )
+    return {
+        "elo": elo,
+        "score": score,
+        "plies": board.ply(),
+        "seconds": time.time() - t0,
+        "pgn": str(game),
+    }
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True)
     p.add_argument("--elo", type=int, nargs="+", required=True)
-    p.add_argument("--games", type=int, default=40, help="per Stockfish level, half with each colour")
+    p.add_argument(
+        "--games", type=int, default=40, help="per Stockfish level, half with each colour"
+    )
     p.add_argument("--sims", type=int, default=800)
     p.add_argument("--movetime-ms", type=int, default=100)
     p.add_argument("--max-plies", type=int, default=400)
@@ -78,25 +88,45 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--pgn", type=Path, required=True)
     a = p.parse_args()
-    tasks = [(i, elo, i % 2 == 0, a.sims, a.movetime_ms, a.max_plies)
-             for elo in a.elo for i in range(a.games)]
+    tasks = [
+        (i, elo, i % 2 == 0, a.sims, a.movetime_ms, a.max_plies)
+        for elo in a.elo
+        for i in range(a.games)
+    ]
     per: dict[int, list[float]] = {elo: [] for elo in a.elo}
-    with mp.get_context("spawn").Pool(a.workers, initializer=init, initargs=(a.ckpt, a.stockfish)) as pool, \
-            a.pgn.open("a") as pgn:
+    with (
+        mp.get_context("spawn").Pool(
+            a.workers, initializer=init, initargs=(a.ckpt, a.stockfish)
+        ) as pool,
+        a.pgn.open("a") as pgn,
+    ):
         for r in pool.imap_unordered(play, tasks):
             per[r["elo"]].append(r["score"])
             pgn.write(r["pgn"] + "\n\n")
             pgn.flush()
             s = per[r["elo"]]
-            print(f"UCI_Elo {r['elo']}: game {len(s)}/{a.games} {r['score']} ({r['plies']} plies, "
-                  f"{r['seconds']:.0f} s), running score {sum(s)}/{len(s)}", flush=True)
+            print(
+                f"UCI_Elo {r['elo']}: game {len(s)}/{a.games} {r['score']} ({r['plies']} plies, "
+                f"{r['seconds']:.0f} s), running score {sum(s)}/{len(s)}",
+                flush=True,
+            )
     for elo, s in per.items():
         w, d, l = s.count(1.0), s.count(0.5), s.count(0.0)
         frac = sum(s) / len(s)
         implied = elo - 400 * math.log10(1 / frac - 1) if 0 < frac < 1 else None
-        row = {"ckpt": a.ckpt, "sf_elo": elo, "sims": a.sims, "movetime_ms": a.movetime_ms, "games": len(s),
-               "w": w, "d": d, "l": l, "score": round(frac, 4),
-               "implied_elo": round(implied, 1) if implied is not None else None, "where": "cpu"}
+        row = {
+            "ckpt": a.ckpt,
+            "sf_elo": elo,
+            "sims": a.sims,
+            "movetime_ms": a.movetime_ms,
+            "games": len(s),
+            "w": w,
+            "d": d,
+            "l": l,
+            "score": round(frac, 4),
+            "implied_elo": round(implied, 1) if implied is not None else None,
+            "where": "cpu",
+        }
         with a.out.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
