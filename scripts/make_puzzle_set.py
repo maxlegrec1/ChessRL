@@ -3,7 +3,7 @@
 Takes the first `--per-bin` puzzles (file order, so the set is deterministic)
 in each rating band that are well established (Popularity >= 80, NbPlays >= 500).
 
-  uv run python scripts/make_puzzle_set.py /path/lichess_db_puzzle.csv data/eval/puzzles_1k.csv
+  uv run python scripts/make_puzzle_set.py /path/lichess_db_puzzle.csv data/puzzles/lichess_1k.csv
 """
 
 from __future__ import annotations

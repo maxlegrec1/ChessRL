@@ -1,5 +1,0 @@
-# Leave-one-out ablation of the signal arm: root temperature 1.0 for the whole
-# game (main) instead of only the first 30 plies.
-extends: signal.yaml
-selfplay:
-  temperature_plies: -1

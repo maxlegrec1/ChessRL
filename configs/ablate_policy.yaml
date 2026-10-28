@@ -1,6 +1,0 @@
-# Leave-one-out ablation of the signal arm: policy trained on the played move
-# with weight 0.1 (main) instead of the visit distribution at weight 1.0.
-extends: signal.yaml
-policy_target: played
-loss_weights:
-  policy: 0.1

@@ -5,7 +5,7 @@ sees PyTorch. This checks that the two still agree.
 
     uv run python scripts/trt_parity.py ckpt.pt [ckpt.pt ...] [--n 256] [--fp32-norms]
 
-Builds each engine like scripts/build_trt.sh (fp16, batch profile 1/256/1024)
+Builds each engine exactly like scripts/build_trt.sh (FP16, batch profile 1/256/512)
 into a temp dir, runs it on the first --n puzzle positions with trtexec, and
 prints top-1 agreement, policy KL and value error against PyTorch.
 """
@@ -40,7 +40,7 @@ def trt_run(onnx: Path, x: np.ndarray, work: Path, fp32_norms: bool) -> dict[str
         "--fp16",
         "--minShapes=input:1x8x8x111",
         "--optShapes=input:256x8x8x111",
-        "--maxShapes=input:1024x8x8x111",
+        "--maxShapes=input:512x8x8x111",
         f"--shapes=input:{n}x8x8x111",
     ]
     if fp32_norms:
@@ -82,6 +82,8 @@ def main() -> None:
         "--fp32-norms", action="store_true", help="also test an engine with norm reductions in FP32"
     )
     a = p.parse_args()
+    if not 1 <= a.n <= 512:
+        p.error("--n must be between 1 and 512 (the engine profile's max batch)")
     with open(ROOT / "data/puzzles/lichess_1k.csv") as fh:
         fens = [row["FEN"] for row in csv.DictReader(fh)][: a.n]
     x = np.stack([fen_to_tensor(f) for f in fens])

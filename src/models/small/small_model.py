@@ -1,10 +1,7 @@
-import bulletchess
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .fen_encoder import INPUT_PLANES, fen_to_tensor
-from .vocab import policy_index, policy_to_idx
+from .fen_encoder import INPUT_PLANES
 
 
 class ResBlock(nn.Module):
@@ -28,7 +25,7 @@ class ResBlock(nn.Module):
 
 
 class SmallModel(nn.Module):
-    """AlphaZero-style ResNet with five heads. Default trunk = main's 4 blocks x 64.
+    """AlphaZero-style ResNet with five heads. Default trunk: 4 blocks x 64 channels.
 
     `blocks` / `channels` size the trunk; heads keep their fixed reduction widths
     so checkpoints of any trunk size share head layouts (see src/models/growth.py)."""
@@ -68,7 +65,8 @@ class SmallModel(nn.Module):
         #   mlh   ← true target: (game_total_plies - ply_index) / 25.
         #   mlh_q ← search-backed target: MCTS-backed-up plies / 25 at root.
         # Mirrors the value/value_q split: one unbiased anchor, one search-aware
-        # estimate. mlh_q is the one used for the tiebreaker.
+        # estimate. ExportWrapper picks which one feeds the engine (mlh under
+        # search_heads=outcome, mlh_q under search_heads=search).
         self.mlh_conv = nn.Conv2d(channels, 4, 1, bias=False)
         self.mlh_bn = nn.BatchNorm2d(4)
         self.mlh_fc1 = nn.Linear(4 * 8 * 8, 64)
@@ -82,13 +80,7 @@ class SmallModel(nn.Module):
     def spec(self) -> dict:
         return {"arch": "resnet", "blocks": self.num_blocks, "channels": self.channels}
 
-    def forward(self, inp, *, compute_loss: bool = False, return_all: bool = False, step=None):
-        # inp is a list/tuple: [x, targets, ...] OR just x
-        if isinstance(inp, (list, tuple)):
-            x = inp[0]
-        else:
-            x = inp
-
+    def forward(self, x, *, return_all: bool = False):
         # Permute to (B, C, H, W) for Conv2d
         x = x.permute(0, 3, 1, 2)
 
@@ -147,94 +139,3 @@ class SmallModel(nn.Module):
             return policy_logits, value_logits, value_q_logits, mlh, mlh_q
 
         return policy_logits
-
-    def get_move_from_fen_no_thinking(
-        self,
-        fen: str,
-        T: float = 0.0,
-        device: str = None,
-        return_probs: bool = False,
-        return_pre_probs: bool = False,
-    ):
-        if device is None:
-            device = next(self.parameters()).device
-
-        # Encode FEN
-        tensor = fen_to_tensor(fen)
-        x = torch.from_numpy(tensor).unsqueeze(0).to(device)  # [1, 8, 8, INPUT_PLANES]
-
-        self.eval()
-        with torch.no_grad():
-            logits = self(x)  # [1, 1929]
-
-        temp = T if T > 0 else 1.0
-        pre_probs = F.softmax(logits / temp, dim=-1) if return_pre_probs else None
-
-        # Mask illegal moves
-        board = bulletchess.Board.from_fen(fen)
-        legal_mask = torch.full((1, 1929), -float("inf"), device=device)
-
-        legal_moves_found = False
-        for move in board.legal_moves():
-            uci = move.uci()
-            if uci.endswith(
-                "n"
-            ):  # Promote to knight is just 'e7e8n' -> 'e7e8' in our vocab usually?
-                # Wait, vocab policy_to_idx handles 'e7e8n' if it's in there.
-                # Let's check how policy_to_idx is defined.
-                # Assuming standard behavior from previous model:
-                pass
-
-            # In previous model code:
-            # if u[-1] == 'n': u = u[:-1]
-            # This implies knight promotions are mapped to the base move or handled differently?
-            # Actually, standard UCI for promotion is e7e8q.
-            # If our vocab doesn't have specific promotion moves, we might need to strip.
-            # But let's stick to what the other model did.
-            if uci.endswith("n"):
-                uci = uci[:-1]
-
-            if uci in policy_to_idx:
-                idx = policy_to_idx[uci]
-                legal_mask[0, idx] = 0.0
-                legal_moves_found = True
-
-        if not legal_moves_found:
-            # Should not happen for valid FENs unless game over
-            return None if not return_probs else (None, None)
-
-        masked_logits = logits + legal_mask
-
-        # Softmax
-        probs = F.softmax(masked_logits / temp, dim=-1)
-
-        if T == 0:
-            # Greedy
-            move_idx = torch.argmax(probs, dim=-1).item()
-        else:
-            # Sample
-            move_idx = torch.multinomial(probs, 1).item()
-
-        move_uci = policy_index[move_idx]
-
-        if return_probs:
-            if return_pre_probs:
-                return move_uci, probs, pre_probs
-            return move_uci, probs
-
-        return move_uci
-
-    def get_position_value(self, fen: str, device: str = None):
-        if device is None:
-            device = next(self.parameters()).device
-
-        tensor = fen_to_tensor(fen)
-        x = torch.from_numpy(tensor).unsqueeze(0).to(device)
-
-        self.eval()
-        with torch.no_grad():
-            _, value_logits, _, _, _ = self(x, return_all=True)
-            value_probs = torch.softmax(value_logits, dim=-1)
-
-        # Return WDL
-        return value_probs[0].tolist()

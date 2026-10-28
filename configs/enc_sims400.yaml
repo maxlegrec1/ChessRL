@@ -1,8 +1,0 @@
-# Encoder HP search, from scratch: half the search per move.
-# 400-sim full searches / 50-sim fast moves: ~2x the records and games per
-# GPU-hour (self-play is GPU-bound for the encoder) at noisier visit targets.
-# Compare with the encoder arm at equal hours.
-extends: encoder.yaml
-selfplay:
-  simulations: 400
-  pcr_fast_simulations: 50

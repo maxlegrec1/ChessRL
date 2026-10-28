@@ -11,7 +11,9 @@ from src.models.small.fen_encoder import INPUT_PLANES
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export BT4 checkpoint to ONNX.")
+    parser = argparse.ArgumentParser(
+        description="Export a training checkpoint (ResNet or encoder) to ONNX."
+    )
     parser.add_argument(
         "--ckpt_path", required=True, type=Path, help="Path to training checkpoint."
     )
@@ -28,23 +30,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_state_dict(ckpt_path: Path, device: str) -> dict:
-    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if isinstance(checkpoint, dict) and "model" in checkpoint:
-        return checkpoint["model"]
-    return checkpoint
-
-
 class ExportWrapper(torch.nn.Module):
     """Picks which heads feed the engine's "value" and "mlh_q" outputs.
 
     The C++ MCTS reads "value" as the leaf WDL and "mlh_q" as the leaf
     plies-remaining estimate (depth-incremented backup + tiebreaker).
-      search_heads="search"  (main): value_q / mlh_q, trained on MCTS backups.
+      search_heads="search":         value_q / mlh_q, trained on MCTS backups.
       search_heads="outcome":        value / mlh, trained on game results and
                                      true plies remaining (AlphaZero-style).
     Value-only variants (moves-left stays on the outcome-trained mlh, so only the
-    value the search reads changes; used by scripts/head_ab.py):
+    value the search reads changes):
       search_heads="q_value":        value_q / mlh.
       search_heads="blend":          the average of the two WDLs / mlh."""
 

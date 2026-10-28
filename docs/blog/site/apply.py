@@ -1,7 +1,9 @@
 """Apply the two ChessRL posts and their native charts to a copy of mvdbk-site (idempotent).
 
-    python3 docs/blog/site/apply.py <site dir>             # preview: the follow-up post stays a draft
-    python3 docs/blog/site/apply.py <site dir> --publish   # the follow-up post goes live
+    python3 docs/blog/site/apply.py <site dir>             # posts marked True in POSTS stay drafts
+    python3 docs/blog/site/apply.py <site dir> --publish   # every post goes live
+
+Both posts are published (mvdbk.fr); a new post starts as a draft by adding it to POSTS with True.
 
 Copies components/charts/ and the follow-up post's extra author (authors/, images/), registers the
 chart and diagram components in components/MDXComponents.tsx, copies both posts into data/blog/,
@@ -23,7 +25,7 @@ GROUPS = {
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }
-POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "chessrl-next-round.mdx": True}  # name -> draft in preview
+POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "chessrl-next-round.mdx": False}  # name -> draft in preview
 
 
 def register(path: Path) -> None:
@@ -60,7 +62,13 @@ def main() -> None:
         (site / "data" / "blog" / name).write_text(text)
     for fix in ("fix_mobilenav.py", "fix_body.py"):
         subprocess.run([sys.executable, str(HERE / fix), str(site)], check=True)
-    print("applied to", site, "(published)" if publish else "(follow-up post as a draft)")
+    # Everything written above, in the site's Prettier format: `next build` lints with it, and the
+    # site's commit hook applies it, so a re-run with no changes leaves the site's git tree clean.
+    written = ["components/MDXComponents.tsx", "components/MobileNav.tsx", "app/layout.tsx", "components/charts",
+               *(f"data/authors/{f.name}" for f in (HERE / "authors").glob("*.mdx")),
+               *(f"data/blog/{name}" for name in POSTS)]
+    subprocess.run([str(site / "node_modules" / ".bin" / "prettier"), "--write", *written], cwd=site, check=True)
+    print("applied to", site, "(published)" if publish else "(drafts kept as drafts)")
 
 
 if __name__ == "__main__":

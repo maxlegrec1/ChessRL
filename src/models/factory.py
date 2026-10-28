@@ -40,7 +40,7 @@ def build_model(spec=None) -> torch.nn.Module:
 
 
 def model_from_checkpoint(ckpt: dict, device: str | torch.device = "cpu") -> torch.nn.Module:
-    """Rebuild the network a checkpoint was saved from (main-branch checkpoints = 4x64)."""
+    """Rebuild the network a checkpoint was saved from (no model_spec: the 4x64 ResNet)."""
     model = build_model(ckpt.get("model_spec")).to(device)
     state = ckpt["model"] if "model" in ckpt else ckpt
     model.load_state_dict(state, strict=False)

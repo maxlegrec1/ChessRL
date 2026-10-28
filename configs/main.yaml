@@ -1,9 +1,0 @@
-# Arm "main": the main-branch training recipe on the next-round code. Every
-# signal-fix flag stays at its main-behaviour default; the only differences
-# from main@128893c are infrastructure (in-place engine swaps, background
-# engine builds, vectorized loader), which is what this arm isolates.
-extends: ../src/train/config.yaml
-log_every: 5
-async_engine_build: true
-wandb:
-  enabled: false

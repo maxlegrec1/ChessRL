@@ -4,7 +4,7 @@
 # ChessRL for this GPU's architecture. Idempotent; safe to re-run.
 #   bash setup_box.sh [branch]
 set -euo pipefail
-BRANCH="${1:-worktree-next-round}"
+BRANCH="${1:-main}"
 REPO_URL="https://github.com/maxlegrec1/ChessRL.git"
 WORK=/workspace
 REPO="$WORK/ChessRL"

@@ -1,17 +1,15 @@
 """Run the SelfPlayWorker for a fixed wall-clock duration and dump a JSON
-perf snapshot. Used by the self-play throughput overhaul to establish a
-baseline and compare phases.
+perf snapshot (compare snapshots with scripts/perfreport.py).
 
-Default config matches the production self-play knob set: concurrency=1024,
-threads=256, sims=800, hash_size=0 (TT off), fp16 engine. The output buffer
-file is written into a scratch directory under artifacts/perf/scratch/ so
-the production buffer is never touched.
+The worker is built exactly as self-play builds it, from the selfplay section of
+--config (default: the training recipe); --concurrency/--threads/--sims/
+--virtual-loss-width/--hash-size override single knobs for sweeps. Records go to
+a scratch buffer under artifacts/bench/, so a run's buffer is never touched.
 
 Example:
   CUDA_VISIBLE_DEVICES=0 uv run python scripts/bench_selfplay.py \\
-      --engine artifacts/legal_ceiling_v7_history_arch/v7.trt \\
-      --duration-sec 90 \\
-      --out artifacts/perf/phase0.json
+      --engine artifacts/runs/<id>/engines/step_00010000.trt \\
+      --duration-sec 90 --out artifacts/bench/baseline.json
 """
 
 from __future__ import annotations
@@ -26,6 +24,21 @@ import time
 from typing import Any
 
 import _inference_cpp as cpp
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from src.self_play.__main__ import _CPP_FIELDS, build_cpp_config  # noqa: E402
+from src.train.config import load_config  # noqa: E402
+
+# Command-line overrides: flag -> SelfPlayConfig field.
+OVERRIDES = {
+    "concurrency": "boards",
+    "threads": "threads",
+    "sims": "simulations",
+    "virtual_loss_width": "virtual_loss_width",
+    "hash_size": "hash_size",
+}
 
 
 def gpu_name() -> str:
@@ -56,26 +69,15 @@ def parse_args() -> argparse.Namespace:
         default=10.0,
         help="Initial seconds excluded from the throughput average; lets stream/exec contexts warm up.",
     )
-    ap.add_argument("--concurrency", type=int, default=1024)
-    ap.add_argument("--threads", type=int, default=256)
-    ap.add_argument("--sims", type=int, default=800)
-    ap.add_argument("--hash-size", type=int, default=0)
-    ap.add_argument("--max-buffer-size", type=int, default=1_000_000)
-    ap.add_argument("--temperature", type=float, default=1.3)
-    ap.add_argument("--temperature-at-root", type=float, default=1.0)
-    ap.add_argument("--cpuct", type=float, default=0.65)
-    ap.add_argument("--use-dirichlet", action="store_true", default=True)
-    ap.add_argument("--no-dirichlet", dest="use_dirichlet", action="store_false")
-    ap.add_argument("--dirichlet-alpha", type=float, default=0.12)
-    ap.add_argument("--dirichlet-epsilon", type=float, default=0.05)
-    ap.add_argument("--random-opening-plies", type=int, default=0)
     ap.add_argument(
-        "--virtual-loss-width",
-        type=int,
-        default=1,
-        help="MCTS virtual-loss batched-descent width. 1 = legacy single-leaf descent.",
+        "--config",
+        type=pathlib.Path,
+        default=ROOT / "src" / "train" / "config.yaml",
+        help="Config whose selfplay section the worker uses.",
     )
-    ap.add_argument("--scratch-dir", default="artifacts/perf/scratch")
+    for flag in OVERRIDES:
+        ap.add_argument(f"--{flag.replace('_', '-')}", type=int, default=None)
+    ap.add_argument("--scratch-dir", default="artifacts/bench")
     ap.add_argument(
         "--label", default=None, help="Free-form label saved into the JSON (e.g. phase0, phase1)."
     )
@@ -100,34 +102,23 @@ def main() -> int:
     if buffer_path.exists():
         buffer_path.unlink()
 
+    sp = load_config(args.config).selfplay
+    for flag, name in OVERRIDES.items():
+        if getattr(args, flag) is not None:
+            setattr(sp, name, getattr(args, flag))
+    sp.save_pgn = False
+    settings = {"boards": sp.boards, **{name: getattr(sp, name) for name in _CPP_FIELDS}}
+
     label = args.label or pathlib.Path(args.out).stem
     print(f"[bench] engine={args.engine}")
     print(f"[bench] buffer={buffer_path}")
     print(
-        f"[bench] config: concurrency={args.concurrency} threads={args.threads} "
-        f"sims={args.sims} hash_size={args.hash_size}"
+        f"[bench] config: {args.config} boards={sp.boards} threads={sp.threads} "
+        f"sims={sp.simulations}/{sp.pcr_fast_simulations} vlw={sp.virtual_loss_width}"
     )
     print(f"[bench] warmup={args.warmup_sec}s measured={args.duration_sec}s")
 
-    worker = cpp.SelfPlayWorker(
-        engine_path=args.engine,
-        output_path=str(buffer_path),
-        batch_size=args.concurrency,
-        threads=args.threads,
-        hash_size=args.hash_size,
-        max_buffer_size=args.max_buffer_size,
-        simulations=args.sims,
-        cpuct=args.cpuct,
-        temperature=args.temperature,
-        temperature_at_root=args.temperature_at_root,
-        use_dirichlet=args.use_dirichlet,
-        dirichlet_alpha=args.dirichlet_alpha,
-        dirichlet_epsilon=args.dirichlet_epsilon,
-        random_opening_plies=args.random_opening_plies,
-        virtual_loss_width=args.virtual_loss_width,
-        max_games=-1,
-        save_pgn=False,
-    )
+    worker = cpp.SelfPlayWorker(build_cpp_config(sp, args.engine, buffer_path))
 
     # ---- Warmup ----------------------------------------------------------
     t0 = time.monotonic()
@@ -186,7 +177,7 @@ def main() -> int:
     # Encoder time charged to N MCTS worker threads in parallel; per-leaf wall-clock
     # is the relevant number for hot-path cost, while the *aggregate* time gives the
     # fraction of total wall-clock the threads spent encoding.
-    encode_thread_busy_frac = delta_encoder_ms / 1000.0 / max(1.0, elapsed * args.threads)
+    encode_thread_busy_frac = delta_encoder_ms / 1000.0 / max(1.0, elapsed * sp.threads)
     leaves_per_batch_target = delta_encoder_calls / delta_batches if delta_batches else 0.0
 
     print()
@@ -212,20 +203,8 @@ def main() -> int:
         "gpu": gpu_name(),
         "host": socket.gethostname(),
         "ts": time.time(),
-        "config": {
-            "concurrency": args.concurrency,
-            "threads": args.threads,
-            "sims": args.sims,
-            "hash_size": args.hash_size,
-            "max_buffer_size": args.max_buffer_size,
-            "temperature": args.temperature,
-            "temperature_at_root": args.temperature_at_root,
-            "cpuct": args.cpuct,
-            "use_dirichlet": args.use_dirichlet,
-            "dirichlet_alpha": args.dirichlet_alpha,
-            "dirichlet_epsilon": args.dirichlet_epsilon,
-            "random_opening_plies": args.random_opening_plies,
-        },
+        "config_file": str(args.config),
+        "config": settings,
         "wall_clock_sec": elapsed,
         "warmup_sec": args.warmup_sec,
         "steps": step_count,

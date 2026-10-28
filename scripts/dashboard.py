@@ -235,9 +235,9 @@ def run_label(path: Path) -> str:
     return f"{name} · {parts[2]}" if len(parts) > 3 else name
 
 
-# Runs shown by default: everything still running, plus these run names
-# (comma-separated, e.g. "enc-deep,signal"; overridable with $CHESSRL_PINNED).
-PINNED = {n.strip() for n in os.environ.get("CHESSRL_PINNED", "enc-deep").split(",") if n.strip()}
+# Runs shown by default: everything still running, plus the run names in $CHESSRL_PINNED
+# (comma-separated, e.g. "base-wd,my-run").
+PINNED = {n.strip() for n in os.environ.get("CHESSRL_PINNED", "").split(",") if n.strip()}
 RUNNING_WITHIN_S = 15 * 60  # self-play logs every 30 s; the home sync runs every 5 min
 
 

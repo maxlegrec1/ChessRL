@@ -12,15 +12,14 @@ struct SelfPlayConfig
     std::string engine_path;
     std::string output_path;
     int concurrency = 256;
-    int threads = 0;       // 0 = auto (legacy 256 MCTS workers)
+    int threads = 0;       // 0 = auto (256 MCTS worker threads)
     int hash_size = 4096;  // MB; transposition-table size shared across slots
     int simulations = 800;
     float cpuct = 0.65f;
     float temperature = 1.3f;
     float temperature_at_root = 1.0f;
-    // Virtual-loss batched-descent width. 1 = legacy single-leaf descent;
-    // >1 = up to N leaves collected per inference round, dramatically
-    // increasing GPU batch fill. Phase 2c of the throughput overhaul.
+    // Virtual-loss batched-descent width. 1 = single-leaf descent;
+    // >1 = up to N leaves collected per inference round (bigger GPU batches).
     int virtual_loss_width = 1;
     bool use_dirichlet = true;
     float dirichlet_alpha = 0.12f;
@@ -31,7 +30,8 @@ struct SelfPlayConfig
     std::string pgn_dir = "pgns";
     int random_opening_plies = 0; // 0 = always start from the standard startpos
 
-    // ---- Next-round signal fixes. Defaults reproduce the main-branch behaviour. ----
+    // ---- Game and record options. The defaults here switch them off; src/train/config.yaml
+    // sets the values the training recipe uses (self-play copies every field). ----
     // Root temperature_at_root applies to the first `temperature_plies` MCTS plies
     // of a game; afterwards `temperature_late` (0 = argmax). -1 = whole game.
     int temperature_plies = -1;

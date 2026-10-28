@@ -1,8 +1,0 @@
-# Encoder HP search, from scratch: a quarter of the search per move.
-# 400/50 sims beat 800/100 by 1-2 h to each Elo level (same Elo per record,
-# twice the records per hour). Does the trend continue at 200/25? Same box as
-# enc_sims400 (armA) for a like-for-like hours comparison.
-extends: encoder.yaml
-selfplay:
-  simulations: 200
-  pcr_fast_simulations: 25

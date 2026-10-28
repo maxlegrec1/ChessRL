@@ -23,8 +23,8 @@ Channel layout (kept absolute, not STM-canonicalized):
     [110]: halfmove clock / 100 (clamped to 1.0)
 
 Total: 111 channels. Per-slot piece planes use a tensor row index of
-`7 - rank` to put rank 1 at the bottom, matching the legacy convention
-that the rest of the codebase (and the C++ encoder) follow.
+`7 - rank` to put rank 1 at the bottom, the convention the rest of the
+codebase (and the C++ encoder) follow.
 
 When no history is provided, slots 1..7 are zero (all piece planes empty +
 repetition flag 0). Live positions always contain pieces, so an all-zero
@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import bulletchess
 import numpy as np
-import torch
 
 INPUT_PLANES = 111
 HISTORY_DEPTH = 8  # current + 7 past
@@ -154,103 +153,14 @@ def fen_to_tensor(
     return tensor
 
 
-def boards_to_tensor(
-    boards,
-    past_boards_per_position: list[list[bulletchess.Board] | None] | None = None,
-    past_repetitions_per_position: list[list[bool] | None] | None = None,
-    current_repetitions: list[bool] | None = None,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Batch-encode current boards (+ optional per-position history) into [B, 8, 8, 111]."""
-    if not boards:
-        return torch.empty((0, 8, 8, INPUT_PLANES), device=device, dtype=dtype)
-    B = len(boards)
-    out = np.zeros((B, 8, 8, INPUT_PLANES), dtype=np.float32)
-
-    for i, board in enumerate(boards):
-        # Slot 0: current pieces + globals.
-        _encode_piece_planes(board, out[i], base=0)
-        _encode_globals(board, out[i])
-        if (
-            current_repetitions is not None
-            and i < len(current_repetitions)
-            and current_repetitions[i]
-        ):
-            out[i, :, :, _PIECE_PLANES] = 1.0
-        # Historical slots.
-        if past_boards_per_position is None or i >= len(past_boards_per_position):
-            continue
-        pbs = past_boards_per_position[i] or []
-        prs = (past_repetitions_per_position[i] or []) if past_repetitions_per_position else []
-        for slot in range(1, HISTORY_DEPTH):
-            past_idx = slot - 1
-            if past_idx >= len(pbs):
-                break
-            b = pbs[past_idx]
-            if b is None:
-                continue
-            base = _slot_base(slot)
-            _encode_piece_planes(b, out[i], base=base)
-            if past_idx < len(prs) and prs[past_idx]:
-                out[i, :, :, base + _PIECE_PLANES] = 1.0
-
-    return torch.from_numpy(out).to(device=device, dtype=dtype)
-
-
-def batch_fen_to_tensor(
-    fens,
-    past_boards_per_position: list[list[bulletchess.Board] | None] | None = None,
-    past_repetitions_per_position: list[list[bool] | None] | None = None,
-    current_repetitions: list[bool] | None = None,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Batch FEN encoder. Equivalent to boards_to_tensor but takes FEN strings."""
-    if not fens:
-        return torch.empty((0, 8, 8, INPUT_PLANES), device=device, dtype=dtype)
-    boards = [bulletchess.Board.from_fen(f) for f in fens]
-    return boards_to_tensor(
-        boards,
-        past_boards_per_position=past_boards_per_position,
-        past_repetitions_per_position=past_repetitions_per_position,
-        current_repetitions=current_repetitions,
-        device=device,
-        dtype=dtype,
-    )
-
-
-def apply_move_to_tensor(
-    board_tensor: torch.Tensor,
-    move_uci: str,
-    board: bulletchess.Board,
-) -> torch.Tensor:
-    """Return a new tensor after applying `move_uci` to `board`.
-
-    History note: this helper does NOT carry old history forward — it
-    re-encodes from the post-move board only, so the result has all
-    historical slots zeroed. Callers that need rolling history must
-    construct the tensor themselves with `boards_to_tensor(..., past_boards_per_position=...)`.
-    """
-    mv = bulletchess.Move.from_uci(move_uci)
-    board.apply(mv)
-    try:
-        new_tensor = boards_to_tensor(
-            [board], device=board_tensor.device.type, dtype=board_tensor.dtype
-        )
-        return new_tensor[0]
-    finally:
-        board.undo()
-
-
 # --------------------------------------------------------------------------- #
-#                     Bitboard-based fast paths
+#                     Buffer records
 # --------------------------------------------------------------------------- #
 #
-# The trainer's dataset reader stores 7 past board snapshots as raw uint64
-# piece bitboards (12 per snapshot). Going through bulletchess.Board to
-# decode them per record would be wasteful. These helpers fill a tensor
-# directly from arrays of uint64.
+# Records store the 7 past positions as raw uint64 piece bitboards (12 per
+# position). This reference encoder (used by the tests and
+# scripts/check_buffer.py) fills the planes straight from those bitboards; the
+# trainer decodes records in bulk in src/train/dataset.py.
 
 
 def encode_piece_planes_from_bitboards(
@@ -260,10 +170,9 @@ def encode_piece_planes_from_bitboards(
 ) -> None:
     """Fill 12 piece planes from a (12,) uint64 array.
 
-    Bit-unpacking mirrors `cache_chessfens.fen_to_tensor_fast` (post-fix):
-    byte 0 of a uint64 holds bits for rank 1; we flip both rank and file
-    axes so the tensor matches the bulletchess loop convention
-    (`tensor[7-rank, file, ...]`).
+    Byte 0 of each little-endian uint64 holds rank 1; both the rank and file
+    axes are flipped after unpacking so the tensor matches the bulletchess
+    loop convention (`tensor[7-rank, file, ...]`).
     """
     bbs = np.asarray(bitboards, dtype=np.uint64)
     if bbs.shape != (_PIECE_PLANES,):
@@ -308,46 +217,3 @@ def encode_record_planes(
         if pr[past_idx]:
             tensor[:, :, base + _PIECE_PLANES] = 1.0
     return tensor
-
-
-def batch_encode_records(
-    current_fens: list[str],
-    past_bitboards_batch: np.ndarray,
-    past_repetitions_batch: np.ndarray,
-    current_repetitions: np.ndarray | None = None,
-) -> np.ndarray:
-    """Vectorized version of `encode_record_planes` over a batch.
-
-    Args:
-        current_fens: list[str] of length B.
-        past_bitboards_batch: (B, 7, 12) uint64.
-        past_repetitions_batch: (B, 7) uint8.
-        current_repetitions: (B,) uint8 or None (treated as zeros).
-    Returns:
-        (B, 8, 8, 111) float32.
-    """
-    B = len(current_fens)
-    out = np.zeros((B, 8, 8, INPUT_PLANES), dtype=np.float32)
-    pb = np.asarray(past_bitboards_batch, dtype=np.uint64).reshape(B, _PAST_SLOTS, _PIECE_PLANES)
-    pr = np.asarray(past_repetitions_batch, dtype=np.uint8).reshape(B, _PAST_SLOTS)
-    cr = (
-        np.asarray(current_repetitions, dtype=np.uint8).reshape(B)
-        if current_repetitions is not None
-        else np.zeros(B, dtype=np.uint8)
-    )
-    for i, fen in enumerate(current_fens):
-        board = bulletchess.Board.from_fen(fen)
-        _encode_piece_planes(board, out[i], base=0)
-        _encode_globals(board, out[i])
-        if cr[i]:
-            out[i, :, :, _PIECE_PLANES] = 1.0
-        for slot in range(1, HISTORY_DEPTH):
-            past_idx = slot - 1
-            bb = pb[i, past_idx]
-            if not bb.any():
-                continue
-            base = _slot_base(slot)
-            encode_piece_planes_from_bitboards(bb, out[i], base=base)
-            if pr[i, past_idx]:
-                out[i, :, :, base + _PIECE_PLANES] = 1.0
-    return out

@@ -29,10 +29,10 @@ LEDGER = STATE / "ledger.json"
 BUDGET = STATE / "budget.json"
 KNOWN_HOSTS = STATE / "known_hosts"
 RUNS_HOME = Path.home() / "chessrl-runs"
-CAP_USD = 250.0  # $200; +$15 for run C at 800 sims (2026-10-26); +$35 for the two 24 h baselines (2026-10-27)
-LAUNCH_CAP_USD = 230.0
+CAP_USD = 250.0  # total spend at which the guard destroys every box
+LAUNCH_CAP_USD = 230.0  # no new box if the projected spend would pass this
 IMAGE = "nvidia/cuda:12.8.1-devel-ubuntu24.04"
-BOX_RUNS = ("/workspace/ChessRL/artifacts/runs/", "/workspace/ChessRL-main/artifacts/runs/")
+BOX_RUNS = ("/workspace/ChessRL/artifacts/runs/",)
 DASHBOARD_PORT = 8501
 
 
@@ -571,7 +571,7 @@ def main() -> None:
     s.set_defaults(fn=cmd_ssh)
     b = sub.add_parser("bootstrap")
     b.add_argument("label")
-    b.add_argument("--branch", default="worktree-next-round")
+    b.add_argument("--branch", default="main")
     b.add_argument("--timeout", type=int, default=1200)
     b.set_defaults(fn=cmd_bootstrap)
     d = sub.add_parser("destroy")

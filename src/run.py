@@ -244,8 +244,7 @@ def main() -> int:
             (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
         resume_path = None
 
-    # On --resume without --config, keep the run's own settings (main fell back
-    # to src/train/config.yaml here, silently replacing an arm's config).
+    # On --resume without --config, reuse the run's own config.yaml.
     if args.config is None:
         own = run_dir / "config.yaml"
         args.config = own if (args.resume and own.is_file()) else DEFAULT_BASE_CONFIG
@@ -269,9 +268,7 @@ def main() -> int:
         print(f"\nRun directory: {run_dir}")
         print(f"Resolved config: {cfg_path}")
         print(f"Foreground: {name} (Ctrl-C to stop)\n", flush=True)
-        os.execvp(cmd[0], cmd)
-        # unreachable
-        return 0
+        os.execvp(cmd[0], cmd)  # does not return
 
     children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
