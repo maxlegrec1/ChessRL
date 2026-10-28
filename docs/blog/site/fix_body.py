@@ -14,7 +14,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1]) / "app" / "layout.tsx"
 s = path.read_text()
-tags = re.findall(r"<body [^>]*>", s)
+tags = re.findall(r"<body\s[^>]*>", s)  # Prettier may have split the tag over several lines
 if len(tags) != 1:
     sys.exit(f"unexpected layout.tsx: {len(tags)} <body> tags")
 if "suppressHydrationWarning" in tags[0]:

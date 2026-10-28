@@ -12,7 +12,7 @@ In 2017, DeepMind's AlphaZero learned chess from nothing but the rules, using ar
 
 **ChessRL** is a 1.29M-parameter chess agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
 
-The code is open source (MIT): **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**. This post covers the architecture, the training loop, the performance work that made a single GPU enough, and the bugs, which taught me the most.
+The code is open source (MIT): **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**. It has changed since this post; the version described here is commit [`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75). This post covers the architecture, the training loop, the performance work that made a single GPU enough, and the bugs, which taught me the most.
 
 ## Why everything depends on positions per second
 
@@ -177,4 +177,4 @@ Total cost: a 1.29M-parameter network, two weeks of one desktop RTX 4090, about 
 
 In a [follow-up post](/blog/chessrl-next-round), an AI agent and I made the training about 6 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
 
-The code, the docs (`docs/ARCHITECTURE.md`, `docs/CONFIG.md`), the Streamlit dashboard and all the diagnostic tools are at **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, under the MIT license. If you build your own, I would love to hear how it goes: [maxime.vanderbeken@mvdbk.fr](mailto:maxime.vanderbeken@mvdbk.fr).
+The code as this post describes it, with the docs (`docs/ARCHITECTURE.md`, `docs/CONFIG.md`), the Streamlit dashboard and all the diagnostic tools, is commit **[`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75)** of [github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL), under the MIT license. If you build your own, I would love to hear how it goes.
