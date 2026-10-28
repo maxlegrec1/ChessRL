@@ -1,6 +1,6 @@
 """The first post's Stockfish benchmark, for several checkpoints and Stockfish levels in parallel.
 
-Protocol (unchanged from scripts/sf1400_autobrawl.py, which called stockfish_match.py with its
+Protocol (the first post's, via stockfish_match.py with its
 defaults): Stockfish 16 with UCI_LimitStrength + UCI_Elo, 100 ms per move; the network searches
 800 simulations per move (cpuct 0.65, virtual-loss width 1, most-visited move); games from the
 initial position, alternating colours. The implied Elo is the Stockfish level plus the Elo

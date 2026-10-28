@@ -1,5 +1,5 @@
 [Unit]
-Description=ChessRL: Vast budget guard ($200 cap) + pull run metrics home
+Description=ChessRL: Vast budget guard (CAP_USD in vast.py) + pull run metrics home
 
 [Service]
 Type=oneshot

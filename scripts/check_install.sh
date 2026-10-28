@@ -73,6 +73,14 @@ if ! command -v trtexec >/dev/null 2>&1 && [ ! -x "$TENSORRT_ROOT/bin/trtexec" ]
   note "trtexec not on PATH; engine builds will need 'export PATH=\$TENSORRT_ROOT/bin:\$PATH'"
 fi
 
+# --- Stockfish (the rating ladder's reference opponents; training runs without it) ---
+SF=$(command -v stockfish || { [ -x /usr/games/stockfish ] && echo /usr/games/stockfish; } || true)
+if [ -n "$SF" ]; then
+  ok "Stockfish at $SF"
+else
+  note "Stockfish not found; the rating ladder needs it ('apt install stockfish', version 16 calibrated)"
+fi
+
 # --- CHESSRL_CUDA_ARCH sanity ----------------------------------------------
 ARCH=${CHESSRL_CUDA_ARCH:-sm_90}
 case "$ARCH" in

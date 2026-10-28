@@ -1,7 +1,7 @@
 """Render a side-by-side markdown summary of two bench_selfplay.json files.
 
 Usage:
-  uv run python scripts/perfreport.py artifacts/perf/phase0.json artifacts/perf/phase1.json
+  uv run python scripts/perfreport.py artifacts/bench/a.json artifacts/bench/b.json
 """
 
 from __future__ import annotations
@@ -64,10 +64,11 @@ def main() -> int:
     md.append(f"- GPU: {A.get('gpu', '?')} vs {B.get('gpu', '?')}")
     md.append(f"- Engine A: `{A['engine']}`  ({A['steps']} steps in {A['wall_clock_sec']:.1f}s)")
     md.append(f"- Engine B: `{B['engine']}`  ({B['steps']} steps in {B['wall_clock_sec']:.1f}s)")
+    a, b = A["config"], B["config"]
     md.append(
-        f"- Config: concurrency={A['config']['concurrency']}/{B['config']['concurrency']}  "
-        f"threads={A['config']['threads']}/{B['config']['threads']}  "
-        f"sims={A['config']['sims']}/{B['config']['sims']}"
+        f"- Config: boards={a['boards']}/{b['boards']}  threads={a['threads']}/{b['threads']}  "
+        f"sims={a['simulations']}/{b['simulations']}  "
+        f"vlw={a['virtual_loss_width']}/{b['virtual_loss_width']}"
     )
     md.append("")
     md.append(f"| metric | {A['label']} | {B['label']} | Δ |")

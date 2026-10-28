@@ -5,7 +5,7 @@ sees PyTorch. This checks that the two still agree.
 
     uv run python scripts/trt_parity.py ckpt.pt [ckpt.pt ...] [--n 256] [--fp32-norms]
 
-Builds each engine like scripts/build_trt.sh (fp16, batch profile 1/256/1024)
+Builds each engine in FP16 like scripts/build_trt.sh (batch profile 1/256/1024 here)
 into a temp dir, runs it on the first --n puzzle positions with trtexec, and
 prints top-1 agreement, policy KL and value error against PyTorch.
 """

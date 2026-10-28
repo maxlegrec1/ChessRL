@@ -73,29 +73,7 @@ case "$cmd" in
     echo "ladder for $dir"
     ;;
   dash)
-    tmux new -d -s dash "source /workspace/env.sh && CHESSRL_RUNS_ROOT=$RUNS:/workspace/ChessRL-main/artifacts/runs uv run streamlit run scripts/dashboard.py --server.port 8501 --server.headless true"
-    ;;
-  main-setup)
-    # The untouched original code (main@128893c) for the baseline arm.
-    if [ ! -d /workspace/ChessRL-main/.git ]; then
-      git clone -q https://github.com/maxlegrec1/ChessRL.git /workspace/ChessRL-main
-    fi
-    cd /workspace/ChessRL-main
-    git checkout -q 128893c
-    git submodule update -q --init
-    uv sync -q
-    uv run python -c "import _inference_cpp; print('main build ok')"
-    ;;
-  main-run)
-    # main-run <name> [gpu]: main's own launcher + config, W&B offline; the
-    # metrics adapter and the ladder daemon come from the next-round checkout.
-    name="$1"; gpu="${2:-0}"
-    tmux new -d -s "run-$name" "source /workspace/env.sh && cd /workspace/ChessRL-main && CUDA_VISIBLE_DEVICES=$gpu WANDB_MODE=offline $PIN uv run python -m src.run --name $name 2>&1 | tee -a /workspace/run-$name.log"
-    sleep 90
-    dir="$(ls -d /workspace/ChessRL-main/artifacts/runs/*_"$name" | sort | tail -1)"
-    tmux new -d -s "legacy-$name" "source /workspace/env.sh && uv run python scripts/legacy_metrics.py --run-dir $dir"
-    tmux new -d -s "ladder-$name" "source /workspace/env.sh && CUDA_VISIBLE_DEVICES=$gpu CHESSRL_MCTS_BATCH_SIZE=256 $PIN uv run python scripts/ladder_daemon.py --run-dir $dir 2>&1 | tee -a $dir/ladder.log"
-    echo "main run in $dir"
+    tmux new -d -s dash "source /workspace/env.sh && CHESSRL_RUNS_ROOT=$RUNS uv run streamlit run scripts/dashboard.py --server.port 8501 --server.headless true"
     ;;
   calibrate)
     tmux new -d -s calib "source /workspace/env.sh && uv run python scripts/ladder_daemon.py --calibrate 2>&1 | tee /workspace/calib.log"

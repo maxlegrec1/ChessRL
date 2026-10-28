@@ -26,9 +26,6 @@ from src.analysis.engine import Net, analyse, end_reason  # noqa: E402
 STATIC = Path(__file__).resolve().parent / "analysis" / "index.html"
 GAMES_PAGE = Path(__file__).resolve().parent / "analysis" / "games.html"
 MAX_SIMS = 3200
-# Ladder ratings of the encoder arm's late checkpoints measured through the
-# FP16-overflowing engine; re-rated with fixed engines (docs/NEXT_ROUND.md).
-RERATED = {("encoder", 30000): 1947, ("encoder", 40000): 1892, ("encoder", 45500): 1989}
 
 
 def run_name(run_dir: Path) -> str:
@@ -58,28 +55,21 @@ def discover(runs_root: Path, extra: list[Path]) -> list[dict]:
     for ck in cks:
         run = ck.parent.parent
         name = run_name(run)
-        if name == "baseline" or name.endswith("-v0"):  # main-branch checkpoint format
+        if name == "baseline" or name.endswith("-v0"):  # first-round checkpoint format
             continue
         step = int(ck.stem.split("_")[1])
         # The sync brings home every 500-step checkpoint of a live run: list every
         # 5k steps plus each run's newest, so the picker stays usable.
-        if step % 5000 and step != newest[ck.parent] and (name, step) not in RERATED:
+        if step % 5000 and step != newest[ck.parent]:
             continue
-        elo = RERATED.get((name, step), ladder_elo(run, step))
+        elo = ladder_elo(run, step)
         found.append(
             {"path": str(ck), "run": f"{name} ({run.parent.name})", "step": step, "elo": elo}
         )
     for d in extra:
         for ck in sorted(d.glob("**/step_*.pt")):
             step = int(ck.stem.split("_")[1])
-            found.append(
-                {
-                    "path": str(ck),
-                    "run": "encoder (armE)",
-                    "step": step,
-                    "elo": RERATED.get(("encoder", step)),
-                }
-            )
+            found.append({"path": str(ck), "run": d.name, "step": step, "elo": None})
     for m in found:
         m["id"] = m["path"]  # stable across rescans
         elo = f"{m['elo']:,.0f}" if m["elo"] is not None else "unrated"
