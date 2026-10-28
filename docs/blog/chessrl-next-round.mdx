@@ -49,14 +49,14 @@ The puzzles show the same gap, on a measure that does not depend on any rating s
 
 **Training targets**
 
-- The policy learns the search's visit counts: how many simulations went to each move. Before, it learned only the one move that was played. This matters most: without it, a run was 500 to 750 Elo behind.
+- The policy learns the search's visit counts: how many simulations went to each move. Before, it learned only the one move that was played. I consider this a bug of the first version: I thought it was learning the most visited move, not the move played, which was drawn at random in proportion to the visit counts. This matters most: without it, a run was 500 to 750 Elo behind.
 - The search uses the value output trained on game results. Before, it used the one trained on the search's own estimates, which went in circles early in training. I suspect that switching back to the search's own estimates later in training, once the network is strong, would help. I'll test that in the follow-ups.
 - Moves are picked at random, in proportion to the visit counts, only for the first 30 plies (half-moves). After that, the search's best move is played. Lost games can be resigned, and 10% of them are played to the end to check that resigning was right.
 - Only a quarter of the moves get a full search and are saved for training. The others get a quick search that only moves the game forward (playout-cap randomisation).
 
 **Network**
 
-- A small transformer (0.81M parameters) instead of the ResNet. Each square is a token, and attention lets any square read any other in one step, where a convolution only looks at neighbouring squares. After the same number of positions, it plays 370 to 590 Elo stronger than the ResNet.
+- A small transformer instead of the ResNet. Each square is a token, and attention lets any square read any other in one step, where a convolution only looks at neighbouring squares. It is smaller overall: 0.81M parameters against 1.29M. But most of the ResNet's parameters (0.76M) sit in one large layer that outputs the move probabilities, and only 0.36M in the layers that process the board. The transformer puts 0.66M in those layers, almost twice as many, and scores moves with a much lighter output. After the same number of positions, it plays 370 to 590 Elo stronger than the ResNet.
 
 <EncoderDiagram />
 
