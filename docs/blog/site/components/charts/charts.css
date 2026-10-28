@@ -90,3 +90,7 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+/* A click on a linked chart focuses the plot: no outline for the mouse, only for the keyboard. */
+.cr-chart .cr-plot:focus:not(:focus-visible) {
+  outline: none;
+}

@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import data from './chessrl-next-round.json'
 import boards from './chessrl-boards.json'
 import ChessBoard, { type BoardLine } from './ChessBoard'
@@ -52,22 +53,26 @@ export function ActivationChart() {
   )
 }
 
+// Charts under a game: x is the number of moves played (plies / 2); a click there moves the board.
+const toPly = (x: number) => Math.round(x * 2)
+
 export function SearchGame() {
   const game = boards.games.sf2000 as unknown as BoardLine
+  const [k, setK] = useState(0)
   const score: Series[] = [{
     name: "White's expected score, by the network's search", slot: 1,
-    points: [game.startScore ?? 0.5, ...game.plies.map((p) => p.whiteScore ?? 0.5)].map((s, k) => [k / 2, s]),
+    points: [game.startScore ?? 0.5, ...game.plies.map((p) => p.whiteScore ?? 0.5)].map((s, j) => [j / 2, s]),
   }]
   return (
     <Figure title="With search: the network against Stockfish limited to 2000 Elo"
-      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. For every position, the network's own 800-simulation search also gives White's expected score (a win counts 1, a draw half): 62% at the start, above 90% after the knight fork, and above 97% from move 18 on. Pieces by Colin M. L. Burnett.">
-      <ChessBoard line={game} />
+      caption="The network plays White and searches 800 simulations per move; Stockfish 16 is limited to 2000 Elo, at 100 ms per move. For every position, the network's own 800-simulation search also gives White's expected score (a win counts 1, a draw half): 62% at the start, above 90% after the knight fork, and above 97% from move 18 on. Click the chart to see a position. Pieces by Colin M. L. Burnett.">
+      <ChessBoard line={game} ply={k} onPly={setK} />
       <div className="mt-5">
         <Legend series={score} />
         <LineChart series={score} xLabel="moves played" yLabel="White's score" xDomain={[0, 40]}
-          yDomain={[0, 1]} xStep={5} yStep={0.25} height={220} snap={0.3}
+          yDomain={[0.5, 1]} xStep={5} yStep={0.1} height={220} snap={0.3}
           xFormat={(x) => `after move ${Math.floor(x)}`} yFormat={percent}
-          refLine={{ y: 0.5, label: 'even' }} />
+          onPick={(x) => setK(toPly(x))} marker={k / 2} />
       </div>
     </Figure>
   )
@@ -75,21 +80,23 @@ export function SearchGame() {
 
 export function ShowcaseGame() {
   const game = boards.games.sims0 as unknown as BoardLine
+  const [k, setK] = useState(0)
   const n = game.plies.length
   const est = [game.startMovesLeft ?? 0, ...game.plies.map((p) => p.movesLeft ?? 0)]
   const movesLeft: Series[] = [
-    { name: "network's estimate", slot: 1, points: est.map((e, k) => [k / 2, e]) },
-    { name: 'actual', slot: 4, points: est.map((_, k) => [k / 2, (n - k) / 2]) },
+    { name: "network's estimate", slot: 1, points: est.map((e, j) => [j / 2, e]) },
+    { name: 'actual', slot: 4, points: est.map((_, j) => [j / 2, (n - j) / 2]) },
   ]
   return (
     <Figure title="No search at all: the network against Stockfish limited to 1400 Elo"
-      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. The network also estimates how many moves the game has left (its moves-left output, read for every position): in the opening it guesses about 20 when 35 to 40 are left, and over the last 10 moves it follows the real count closely. Pieces by Colin M. L. Burnett.">
-      <ChessBoard line={game} />
+      caption="The network plays Black and picks the move it finds most likely, without any search. Stockfish 16 is limited to 1400 Elo, at 100 ms per move. The network also estimates how many moves the game has left (its moves-left output, read for every position): in the opening it guesses about 20 when 35 to 40 are left, and over the last 10 moves it follows the real count closely. Click the chart to see a position. Pieces by Colin M. L. Burnett.">
+      <ChessBoard line={game} ply={k} onPly={setK} />
       <div className="mt-5">
         <Legend series={movesLeft} />
         <LineChart series={movesLeft} xLabel="moves played" yLabel="moves left" xDomain={[0, 41]}
           yDomain={[0, 45]} xStep={5} yStep={10} height={220} snap={0.3}
-          xFormat={(x) => `after move ${Math.floor(x)}`} yFormat={(y) => y.toFixed(0)} />
+          xFormat={(x) => `after move ${Math.floor(x)}`} yFormat={(y) => y.toFixed(0)}
+          onPick={(x) => setK(toPly(x))} marker={k / 2} />
       </div>
     </Figure>
   )

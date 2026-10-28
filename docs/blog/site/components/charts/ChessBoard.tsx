@@ -75,8 +75,11 @@ function Icon({ d }: { d: string }) {
   )
 }
 
-export default function ChessBoard({ line }: { line: BoardLine }) {
-  const [i, setI] = useState(0) // plies played
+/** `ply` / `onPly` make the board controlled, so something outside (a linked chart) can move it. */
+export default function ChessBoard({ line, ply, onPly }: { line: BoardLine; ply?: number; onPly?: (k: number) => void }) {
+  const [own, setOwn] = useState(0)
+  const i = ply ?? own // plies played
+  const setI = onPly ?? setOwn
   const n = line.plies.length
   const listRef = useRef<HTMLDivElement>(null)
   const fenBefore = (k: number) => (k === 0 ? line.start : line.plies[k - 1].fen)

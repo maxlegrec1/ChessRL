@@ -27,6 +27,8 @@ type Props = {
   band?: { y0: number; y1: number; label: string } // shaded reference range
   snap: number // a series' value shows in the tooltip if its point is within this x distance
   endLabels?: boolean
+  onPick?: (x: number) => void // click (or Enter) on the plot: the nearest point's x
+  marker?: number // a solid vertical line at this x (e.g. the position shown on a linked board)
 }
 
 const M = { top: 14, right: 56, bottom: 44, left: 56 }
@@ -62,7 +64,7 @@ function nearest(points: [number, number][], x: number, snap: number) {
 
 export default function LineChart({
   series, xLabel, yLabel, xDomain, yDomain, xStep, yStep, height = 320,
-  xFormat = (x) => String(x), yFormat = fmtInt, refLine, xMarks = [], band, snap, endLabels = true,
+  xFormat = (x) => String(x), yFormat = fmtInt, refLine, xMarks = [], band, snap, endLabels = true, onPick, marker,
 }: Props) {
   const wrap = useRef<HTMLDivElement>(null)
   const clipId = `cr-clip-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
@@ -119,6 +121,10 @@ export default function LineChart({
     setPointer({ x: px, y: e.clientY - r.top })
   }
   const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' && onPick && hoverX !== null) {
+      onPick(hoverX)
+      return
+    }
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
     e.preventDefault()
     const i = hoverX === null ? xs.length - 1 : xs.indexOf(hoverX)
@@ -187,6 +193,10 @@ export default function LineChart({
             <text x={l.tx} y={l.y} dy="0.32em" className="cr-strong">{l.text}</text>
           </g>
         ))}
+        {marker !== undefined && (
+          <line x1={sx(marker)} x2={sx(marker)} y1={m.top} y2={m.top + ph} stroke="var(--cr-ink)" strokeWidth={1.5}
+            pointerEvents="none" />
+        )}
         {hoverX !== null && (
           <g pointerEvents="none">
             <line x1={sx(hoverX)} x2={sx(hoverX)} y1={m.top} y2={m.top + ph} stroke="var(--cr-axis)" />
@@ -197,8 +207,11 @@ export default function LineChart({
           </g>
         )}
         <rect className="cr-plot" x={m.left} y={m.top} width={pw} height={ph} fill="transparent" tabIndex={0}
-          aria-label="Chart: use the left and right arrow keys to read values"
-          onPointerMove={onMove} onPointerLeave={() => { setHoverX(null); setPointer(null) }}
+          aria-label={onPick ? 'Chart: arrow keys read values, Enter or a click shows that position'
+            : 'Chart: use the left and right arrow keys to read values'}
+          style={onPick ? { cursor: 'pointer' } : undefined}
+          onClick={onPick ? () => { if (hoverX !== null) onPick(hoverX) } : undefined}
+          onPointerDown={onMove} onPointerMove={onMove} onPointerLeave={() => { setHoverX(null); setPointer(null) }}
           onFocus={() => { if (hoverX === null) { setHoverX(xs[xs.length - 1]); setPointer({ x: sx(xs[xs.length - 1]), y: m.top + 20 }) } }}
           onBlur={() => { setHoverX(null); setPointer(null) }} onKeyDown={onKey} />
       </svg>
