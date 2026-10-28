@@ -48,7 +48,7 @@ The puzzles show the same gap, on a measure that does not depend on any rating s
 
 **Training targets**
 - The policy learns the search's visit counts: how many simulations went to each move. Before, it learned only the one move that was played. This matters most: without it, a run was 500 to 750 Elo behind.
-- The search uses the value output trained on game results. Before, it used the one trained on the search's own estimates, which went in circles early in training.
+- The search uses the value output trained on game results. Before, it used the one trained on the search's own estimates, which went in circles early in training. I suspect that switching back to the search's own estimates later in training, once the network is strong, would help. I'll test that in the follow-ups.
 - Moves are picked at random, in proportion to the visit counts, only for the first 30 plies (half-moves). After that, the search's best move is played. Lost games can be resigned, and 10% of them are played to the end to check that resigning was right.
 - Only a quarter of the moves get a full search and are saved for training. The others get a quick search that only moves the game forward (playout-cap randomisation).
 
