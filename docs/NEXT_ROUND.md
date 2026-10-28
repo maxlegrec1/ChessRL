@@ -1,7 +1,13 @@
 # Next round: faster, cleaner self-play learning
 
-Started 2026-10-21. Budget: **$200 of rented GPU time** (Vast.ai), tracked by
-`scripts/vast/budget_guard.py`. This file is the plan and the lab notebook —
+> **Historical log.** The experiment configs (`configs/*.yaml`) and the one-off study scripts
+> named below were removed from main once the round ended; the winning recipe became
+> `src/train/config.yaml`. They are all at commit
+> [`ff17fbf`](https://github.com/maxlegrec1/ChessRL/tree/ff17fbf260f0c09fea29615fb62b82d93ab95194),
+> the merge of this round.
+
+Started 2026-10-21. Budget: **$200 of rented GPU time** (Vast.ai), tracked by the
+`guard` command of `scripts/vast/vast.py`. This file is the plan and the lab notebook —
 results get appended to the log at the bottom as they land.
 
 ## Results summary (final, 2026-10-24 08:30 UTC)
