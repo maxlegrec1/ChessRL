@@ -29,6 +29,19 @@ PLAYERS = {"sf_s20_n1000 (ladder anchor)": "Stockfish 16, full strength, 1,000 p
            "sf_s20_n20000 (ladder anchor)": "Stockfish 16, full strength, 20,000 positions per move"}
 
 
+def player(name: str) -> str:
+    """A PGN player name (scripts/showcase_games.py, scripts/cpu_stockfish_match.py) for readers."""
+    if "ChessRL" in name:
+        sims = re.search(r"\((\d+) simulations", name)
+        if sims and sims.group(1) == "0":
+            return "ChessRL, network alone (no search)"
+        return f"ChessRL, {sims.group(1) if sims else 800} simulations per move"
+    m = re.match(r"Stockfish 16 UCI_Elo (\d+) \((\d+) ms\)", name)
+    if m:
+        return f"Stockfish 16 limited to {m.group(1)} Elo, {m.group(2)} ms per move"
+    return PLAYERS.get(name, name)
+
+
 def ply(board: chess.Board, move: chess.Move) -> dict:
     san = board.san(move)
     board.push(move)
@@ -66,9 +79,8 @@ def game_line(pgn_path: Path, index: int) -> dict:
     board = game.board()
     plies = [ply(board, m) for m in game.mainline_moves()]
     h = game.headers
-    name = lambda s: "ChessRL, 800 simulations per move" if "ChessRL" in s else PLAYERS.get(s, s)  # noqa: E731
     return {"start": game.board().fen(), "plies": plies, "orientation": "white" if "ChessRL" in h["White"] else "black",
-            "white": name(h["White"]), "black": name(h["Black"]), "result": h["Result"]}
+            "white": player(h["White"]), "black": player(h["Black"]), "result": h["Result"]}
 
 
 def write_pieces() -> None:
@@ -83,17 +95,18 @@ def write_pieces() -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--puzzles", type=Path, required=True)
-    p.add_argument("--puzzle", required=True)
+    p.add_argument("--puzzle", nargs="+", required=True, help="puzzle ids, in the order the post shows them")
     p.add_argument("--games", type=Path)
     p.add_argument("--game", type=int, default=1, help="1-based index in the PGN")
     a = p.parse_args()
     rows = {json.loads(line)["id"]: json.loads(line) for line in a.puzzles.read_text().splitlines() if line.strip()}
-    data = {"puzzle": puzzle_line(rows[a.puzzle])}
+    data: dict = {"puzzles": {pid: puzzle_line(rows[pid]) for pid in a.puzzle}}
     if a.games:
         data["game"] = game_line(a.games, a.game)
     OUT.write_text(json.dumps(data, indent=1) + "\n")
     write_pieces()
-    print("wrote", OUT.name, PIECES_TS.name, {k: len(v["plies"]) for k, v in data.items()})
+    print("wrote", OUT.name, PIECES_TS.name, {pid: len(v["plies"]) for pid, v in data["puzzles"].items()},
+          "game", len(data["game"]["plies"]) if "game" in data else None)
 
 
 if __name__ == "__main__":

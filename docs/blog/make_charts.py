@@ -267,43 +267,22 @@ CHART_JSON = Path(__file__).resolve().parent / "site" / "components" / "charts" 
 def export_json() -> None:
     """The same data for the blog's native SVG charts (docs/blog/site/components/charts/).
 
-    Elo: the kept checkpoints re-rated on the balanced openings (rerated()). Puzzles: the ladder
-    as it ran (they do not depend on the ladder's openings)."""
-    pts = lambda s, key="hours", y="elo": [[round(x, 2), round(v, 3 if y == "puzzles" else None)]  # noqa: E731
-                                           for x, v in zip(s[key], s[y]) if v is not None]
-    recipes = [("Original code (first post)", 4, "armA", "baseline", None),
-               ("+ better training targets", 3, "dev1", "signal", None),
-               # Its later steps ran on the broken FP16 engine (see the FP16 section).
-               ("+ small transformer", 2, "armE", "encoder", 40000),
-               ("+ half the search per move", 1, "armA", "enc-sims400", 60000)]
-    enc, s400 = rerated("armE", "encoder", 40000), rerated("armA", "enc-sims400", 60000)
-
-    def at(box: str, suffix: str, step_k: float) -> int:
-        s = rerated(box, suffix)
-        return round(s["elo"][s["steps_k"].index(step_k)])
-
+    The two 24 h baselines run side by side on 2026-10-27, both rated live on the balanced-opening
+    ladder (every ~30 min, 100 sims): the first post's code and the new recipe. Hours are training
+    hours (the move to new machines after ~5.5 h is not counted)."""
+    pts = lambda s, y="elo": [[round(x, 2), round(v, 3 if y == "puzzles" else None)]  # noqa: E731
+                              for x, v in zip(s["hours"], s[y]) if v is not None]
+    runs = [("Original code (first post)", 4, load("main-q", "base-main")),
+            ("New recipe", 1, load("wd-q", "base-wd"))]
     data = {
-        "speedup": [{"name": n, "slot": k, "dots": True, "points": pts(rerated(b, s, m))} for n, k, b, s, m in recipes],
-        "puzzles": [{"name": n, "slot": k, "points": pts(load(b, s, m), y="puzzles")} for n, k, b, s, m in recipes],
-        "searchBudget": [
-            {"name": "800 simulations, seed 1", "slot": 2, "dots": True, "points": pts(enc)},
-            {"name": "800 simulations, seed 2", "slot": 2, "dim": True, "dots": True,
-             "points": pts(rerated("armF", "encoder-s2"))},
-            {"name": "400 simulations", "slot": 1, "dots": True, "points": pts(s400)},
-        ],
+        "speedup": [{"name": n, "slot": k, "points": pts(s)} for n, k, s in runs],
+        "puzzles": [{"name": n, "slot": k, "points": pts(s, y="puzzles")} for n, k, s in runs],
         # Measured with artifacts/scratch/act_scale.py (fp32, 512 puzzle positions).
         "activation": [
             {"name": "no weight decay", "slot": 2,
              "points": [[10, 46.0], [20, 101.3], [30, 194.0], [40, 280.2], [45.5, 349.3]]},
             {"name": "weight decay 0.05", "slot": 7,
              "points": [[10, 24.9], [20, 35.7], [30, 45.8], [50, 64.4], [70, 79.9]]},
-        ],
-        # After 20k training steps (the ablation runs kept checkpoints at 10k and 20k only).
-        "ablations": [
-            {"label": "All three changes", "value": at("dev1", "signal", 20)},
-            {"label": "without the value-head change", "value": at("abl-value", "ablate-value", 20)},
-            {"label": "without limiting randomness to the opening", "value": at("abl-temp", "ablate-temp", 20)},
-            {"label": "without the visit-count policy target", "value": at("abl-policy", "ablate-policy", 20)},
         ],
     }
     CHART_JSON.parent.mkdir(parents=True, exist_ok=True)

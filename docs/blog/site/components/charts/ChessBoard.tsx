@@ -193,12 +193,25 @@ export default function ChessBoard({ line }: { line: BoardLine }) {
                     return `${m.n}${m.white ? '.' : '…'} ${solved.p.san}`
                   })()}
                 </p>
-                <Bar label="network alone" value={solved.p.net!.alone} />
-                <Bar label={`after ${line.sims ?? 800} simulations`} value={solved.p.net!.search} strong />
-                {solved.p.net!.favourite && (
-                  <p className="text-gray-600 dark:text-gray-400">
-                    Without the search, the network would have played {solved.p.net!.favourite} ({pct(solved.p.net!.favouriteAlone!)}).
-                  </p>
+                {line.sims === 0 ? (
+                  <>
+                    <Bar label="network's probability" value={solved.p.net!.alone} strong />
+                    <p className="text-gray-600 dark:text-gray-400">
+                      {solved.p.net!.favourite
+                        ? `Its first choice was ${solved.p.net!.favourite} (${pct(solved.p.net!.favouriteAlone!)}).`
+                        : 'Its first choice, with no search.'}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <Bar label="network alone" value={solved.p.net!.alone} />
+                    <Bar label={`after ${line.sims ?? 800} simulations`} value={solved.p.net!.search} strong />
+                    {solved.p.net!.favourite && (
+                      <p className="text-gray-600 dark:text-gray-400">
+                        Without the search, the network would have played {solved.p.net!.favourite} ({pct(solved.p.net!.favouriteAlone!)}).
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
             )}

@@ -16,7 +16,7 @@ build plays at ~Stockfish 1400 on a 100ms-per-move budget.
 - [ChessRL: training an AlphaZero from scratch on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu):
   the architecture, the self-play loop, the performance work, and the bugs
   that taught the most.
-- [ChessRL, continued: 9× faster self-play learning on a single RTX 4090](https://mvdbk.fr/blog/chessrl-next-round):
+- [ChessRL, continued: 6× faster self-play learning on a single RTX 4090](https://mvdbk.fr/blog/chessrl-next-round):
   better training targets, a small transformer and a cheaper search, an FP16
   bug that looked like a collapse, and a network that beats Stockfish limited
   to 2000 Elo.

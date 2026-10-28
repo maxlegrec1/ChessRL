@@ -17,8 +17,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BLOG = HERE.parent
 GROUPS = {
-    "ChessrlNextRound": ["SpeedupChart", "TacticsChart", "SearchBudgetChart", "ActivationChart", "AblationChart",
-                         "EncoderDiagram", "ShowcaseGame", "PuzzleBoard"],
+    "ChessrlNextRound": ["SpeedupChart", "TacticsChart", "ActivationChart", "EncoderDiagram", "ShowcaseGame",
+                         "PuzzleBoard"],
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }

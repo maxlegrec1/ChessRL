@@ -1,9 +1,9 @@
 ---
-title: 'ChessRL, continued: 9× faster self-play learning on a single RTX 4090'
-date: '2026-10-24'
+title: 'ChessRL, continued: 6× faster self-play learning on a single RTX 4090'
+date: '2026-10-28'
 tags: ['chess', 'machine-learning', 'reinforcement-learning']
 draft: true
-summary: 'Continued improvements to my from-scratch AlphaZero, done largely by an AI agent. Better training targets, a small transformer and a cheaper search cut the time to reach 1,000 Elo from 21 hours to under 2.5 hours on one RTX 4090, and the network now beats Stockfish limited to 2000 Elo. Also: an FP16 bug that made a healthy network look like it was getting worse.'
+summary: 'Continued improvements to my from-scratch AlphaZero, done largely by an AI agent. On the same GPU, in the same 24 hours, the original code reaches 1,170 Elo and the new recipe 2,230, and it gets to 1,000 Elo about 6 times faster. Also: an FP16 bug that made a healthy network look like it was getting worse.'
 ---
 
 In the [first post](/blog/chessrl-alphazero-single-gpu) I trained a small chess network (1.29M parameters) from nothing but the rules of chess, on the RTX 4090 in my desktop. It reached roughly the level of Stockfish limited to 1400 Elo, but it took two weeks. I suspected that most of that time was wasted.
@@ -12,109 +12,100 @@ In the [first post](/blog/chessrl-alphazero-single-gpu) I trained a small chess 
 
 Most of the work described here was done by an AI agent: Claude, Anthropic's model, running in Claude Code. I gave it a general task: make the Elo go up, and reduce the training time needed to get there. I also gave it the code. Open-ended tasks with a clear number to improve are something LLM agents have become very good at, and this shows how far that goes.
 
-The agent read through the training code and found the problems described below. It wrote the fixes, the transformer, and the tools to evaluate and monitor runs. It planned and ran the experiments, kept a lab log, and found the FP16 bug described later. My part was the goal, a few ideas to test (growing the network during training, switching to a transformer), and decisions along the way: which results to trust, when a question was answered and the experiments should move on, and which run to extend. The agent also wrote the first draft of this post. Below, "I" means me and "we" means the agent and me.
-
-One rule applied to every experiment: each change gets its own training run on a single RTX 4090, and every run is measured the same way. The question was how much faster the same setup can learn chess if we improve how it learns, and not only how fast the code runs.
+The agent read through the training code and found the problems described below. It wrote the fixes, the transformer, and the tools to evaluate and monitor runs. It planned and ran the experiments, kept a lab log, and found the FP16 bug described later. My part was the goal, a few ideas to test, and decisions along the way: which results to trust, when a question was answered, and which runs to make. The agent also wrote the first draft of this post. Below, "I" means me and "we" means the agent and me.
 
 ## How the system learns
 
 The program learns by playing against itself (self-play). To choose each move, it runs a search called Monte Carlo tree search (MCTS). The search is made of simulations: each simulation follows a promising line of moves one step deeper and asks the neural network about the position at the end of it. The network answers with a policy (how promising each legal move looks), a value (how likely a win, a draw or a loss is) and an estimate of how many moves are left. After a few hundred simulations, the search picks better moves than the network would alone.
 
-Every position played is saved with what the search found and the final result of the game. A separate process, the trainer, reads these saved positions in batches of 2,048 and trains the network to predict them. One batch is one training step. Every 500 steps the new network is converted with TensorRT, NVIDIA's library for running networks fast, into an "engine" that runs in 16-bit floating point (FP16). Self-play picks it up and keeps going. The trainer itself uses PyTorch.
+Every position played is saved with what the search found and the final result of the game. A separate process, the trainer, reads these saved positions in batches of 2,048 and trains the network to predict them. One batch is one training step. Every 500 steps the new network is converted with TensorRT, NVIDIA's library for running networks fast, into an "engine" that runs in 16-bit floating point (FP16). Self-play picks it up and keeps going.
 
 ## How we measure strength
 
 The first post measured strength against Stockfish limited to 1400 Elo, and against the network's own earlier versions. This post uses a rating ladder instead, so its numbers are not on the same scale. To compare the two, we also replayed the first post's Stockfish test (at the end of the results).
 
-The ladder rates a network with 96 games against reference opponents whose strength is known: the two closest to its level, 48 games each. The network always searches **100 simulations per move**, whatever its training run uses, so the rating measures the network and not the size of its search. The reference opponents are a player that moves at random, a player that always captures when it can, and Stockfish at several reduced strengths. Their ratings were set once, in a tournament among themselves, with random play fixed at 0 Elo. The network's rating is the one that best explains its results against them, about ±45 Elo.
+The ladder rates a network with 96 games against reference opponents of known strength: the two closest to its level, 48 games each. Every game starts from one of 24 balanced openings chosen by Stockfish: six half-moves after which neither side is ahead. The network always searches **100 simulations per move**, whatever its training run uses, so the rating measures the network and not the size of its search. The reference opponents are a player that moves at random, a player that always captures when it can, and Stockfish at several reduced strengths. Their ratings were set once, in a tournament among themselves, with random play fixed at 0 Elo. The network's rating is the one that best explains its results against them, about ±45 Elo. Each network also solves the same 1,000 Lichess puzzles.
 
-Each game starts from one of 24 openings chosen by Stockfish: six half-moves after which neither side is ahead. During the runs, the ladder started its games after 8 random moves instead. That was a mistake: random moves often decide a game before it really starts, which squeezes all the ratings together. So we rated again, on the balanced openings, every network we had kept (one every 10,000 training steps). The charts below use these ratings.
+## Results: two runs, same GPU, same 24 hours
 
-This scale is only comparable to itself: it is not a FIDE rating, and not the rating Stockfish reports for its limited settings. Each network also solves the same 1,000 Lichess puzzles, also with 100 simulations per move.
-
-## Results
+To measure what all the changes add up to, we ran the first post's code and the new recipe side by side, for 24 hours each, on the same kind of machine:
 
 <SpeedupChart />
 
-Each line adds one change to the line above. The original code needs about 21 hours to reach 1,000 Elo. The last recipe is already at about 1,500 at its first kept network, 2.4 hours in, so it gets to 1,000 about 9 times faster, and probably more. It reaches 2,000 at about 4.6 hours. The sections below explain each change.
+- The new recipe passes 1,000 Elo after about 2 hours. The original code needs 12, about **6 times longer**.
+- The new recipe reaches the original code's final level (1,170) after about 2.2 hours.
+- After 24 hours: **2,230 against 1,170**, more than 1,000 Elo apart.
+- The new recipe passes 2,000 at 5.6 hours, then levels off around 2,200 from about 14 hours.
+- These are single runs. An earlier run of the original code needed 21 hours to reach 1,000, so its speed varies a lot from one run to another.
 
-**Compared with the first post.** We replayed the first post's test: 100 games against Stockfish 16 limited to 1400 Elo, at 100 milliseconds per move, from the normal starting position, with the network searching 800 simulations per move. The first post's best network scored 55%, after about ten days of training. With the last recipe, the network scored 86.5% after 2.4 hours, and 98% after 5 hours. The final network of these runs scored 99.5%, and still 94.5% against Stockfish limited to 2000 Elo.
-
-The puzzles show the same thing, on a measure that does not depend on any rating scale. After 16 hours, the original code solves 17% of them, and the last recipe 73%:
+The puzzles show the same gap, on a measure that does not depend on any rating scale: after 24 hours, the new recipe solves 70% of them and the original code 27%.
 
 <TacticsChart />
 
-## Change 1: better training targets
+**Compared with the first post.** The first post's test is 100 games against Stockfish 16 limited to 1400 Elo, at 100 milliseconds per move, from the normal starting position, with the network searching 800 simulations per move. The first post's best network scored 55%, after about ten days of training.
 
-Reading through the original training loop, the agent found three problems.
+## What changed
 
-1. **The policy learned from the wrong target.** The policy was trained to predict the one move that was played. The search knows much more than that: how many simulations it spent on each move. Those visit counts form a probability distribution over all the moves, and AlphaZero trains the policy on that distribution, which is a better target than a single sampled move. The code threw it away. Now each saved position keeps the 84 most-visited moves with their counts (more than 99% of all visits), and the policy is trained to match them.
-2. **The search used the wrong value output.** The network has two value outputs: one trained on the final result of the game, the other on the search's own estimate of the position. The search used the second one. Early in training this goes in circles: an untrained network searches, the search produces estimates, and the network learns to copy them. The only real information comes from checkmates the search happens to find, and 98.7% of those targets were close to one third each for win, draw and loss, which says nothing. Switching the search to the output trained on game results fixed it.
-3. **Every move was played with randomness.** To explore, self-play picks moves at random in proportion to the search's visit counts, and the code did this for the whole game. Games were long and noisy, and their results said little about the quality of the moves. AlphaZero only does this in the opening. We now do it for the first 30 plies (half-moves) and play the search's best move after that. We also let the engine resign lost games, and check that this is safe by playing 10% of them to the end anyway. Finally, only a quarter of the moves get a full 800-simulation search and are saved for training. The others get a quick 100-simulation search that only moves the game forward, which makes games faster (this is called playout-cap randomisation).
+**Training targets**
+- The policy learns the search's visit counts: how many simulations went to each move. Before, it learned only the one move that was played. This matters most: without it, a run was 500 to 750 Elo behind.
+- The search uses the value output trained on game results. Before, it used the one trained on the search's own estimates, which went in circles early in training.
+- Moves are picked at random, in proportion to the visit counts, only for the first 30 plies (half-moves). After that, the search's best move is played. Lost games can be resigned, and 10% of them are played to the end to check that resigning was right.
+- Only a quarter of the moves get a full search and are saved for training. The others get a quick search that only moves the game forward (playout-cap randomisation).
 
-To see which change mattered, we ran the new recipe with each one removed:
-
-<AblationChart />
-
-The policy target matters most: without it the agent is more than 500 Elo behind. The value-output change mostly speeds up the start: 10,000 steps in, the run without it was 360 Elo behind, and it had caught up by 20,000. Limiting randomness to the opening made little difference.
-
-We also improved the infrastructure: new engines are loaded into the running self-play instead of restarting it (a restart threw away every game in progress), the trainer no longer waits 410 seconds before its first step, and engines are built in the background. A run with only these changes was faster in the first hours but ended at the same level as the original. Faster code produces more games, not better learning.
-
-## Change 2: a small transformer instead of a ResNet
-
-The original network is a ResNet: 4 blocks of 64-channel convolutions, the kind of network AlphaZero used, scaled down. We replaced it with a small transformer of 0.81M parameters. Each of the 64 squares becomes a token, and attention lets every square take information from any other square in one step, where a convolution only looks at neighbouring squares.
+**Network**
+- A small transformer (0.81M parameters) instead of the ResNet. Each square is a token, and attention lets any square read any other in one step, where a convolution only looks at neighbouring squares. After the same number of positions, it plays 370 to 590 Elo stronger than the ResNet.
 
 <EncoderDiagram />
 
-The transformer is 32% slower per self-play position, because attention over 64 tokens costs more than small convolutions at this size. It still wins clearly: after the same number of positions it plays 370 to 590 Elo stronger than the ResNet, and it solves far more puzzles. Chess has many long-range relations, like a rook and the far end of its file or a bishop and its diagonal, and attention handles them directly.
+**Search**
+- 400 simulations for saved moves and 50 for quick ones, instead of 800 and 100. That doubles the games per hour. For a run of about a day, it reaches every level first, though 800 ends a little higher after about 12 hours.
 
-## Change 3: a cheaper search
+**Training**
+- Weight decay (AdamW, 0.05). It keeps the values inside the network small enough for FP16 (see the bug below).
 
-With a stronger network, 800 simulations per saved move looked expensive. Halving the search used in training (400 simulations for saved moves, 50 for the quick ones) doubles the number of games per hour. Ratings are still measured with 100 simulations per move:
-
-<SearchBudgetChart />
-
-The cheaper search gets ahead first: it reaches 2,000 Elo at about 4.6 hours, where the 800-simulation run needs about 8.3. A second run of the 400-simulation recipe, with another random seed, confirms it. The cheaper search also levels off sooner, though: after about 12 hours the 800-simulation run passes it and ends higher. Its visit counts are less noisy targets, which seems to matter near the top. Halving the search again does not help: with 200 simulations, the run stopped improving at about 1,500 Elo. For a run of about a day, 400 is the right amount.
+**Infrastructure**
+- New engines are loaded into the running self-play instead of restarting it, the trainer starts right away, and engines are built in the background. This made the code faster, but not the learning: a run with only these changes ended at the same level as the original.
 
 ## The bug that looked like a collapse
 
-After about 17 hours, the transformer run started getting worse. Puzzles solved fell from 73% to 64%, there were more draws, games got longer, the training loss went up, and its rating dropped by about 150 Elo. Self-play training has a known failure where the network gets stuck learning from its own bad games, and this looked exactly like it.
+After about 17 hours, an early transformer run started getting worse. Puzzles solved fell from 73% to 64%, there were more draws, games got longer, the training loss went up, and its rating dropped by about 150 Elo. Self-play training has a known failure where the network gets stuck learning from its own bad games, and this looked exactly like it.
 
-The first suspects were a learning rate too high for this stage of training, a network too small, and badly calibrated resignations. The agent tested them by starting three copies of the run from the same checkpoint, each with one change: a decaying learning rate, a bigger network, and recalibrated resignations. All three kept getting worse, so the cause had to be something the three copies shared. The main candidate was the TensorRT engine, the converted copy of the network that self-play uses.
+The first suspects were a learning rate too high for this stage of training, a network too small, and badly calibrated resignations. The agent tested them by starting three copies of the run from the same checkpoint, each with one change. All three kept getting worse, so the cause had to be something the three copies shared. The main candidate was the TensorRT engine, the converted copy of the network that self-play uses.
 
-The trainer uses PyTorch with mixed precision, which computes squares and their sums in 32-bit floats. Self-play, the rating games and the puzzles all use the TensorRT engine built from the same weights, which runs in FP16, where the largest number is 65,504. The transformer uses a normalisation layer called RMSNorm: it divides each token by the square root of the mean of its squared values, `x / sqrt(mean(x²))`. Without weight decay (explained below), the values inside the network had been growing during the whole run:
+The trainer uses PyTorch with mixed precision, which computes squares and their sums in 32-bit floats. Self-play, the rating games and the puzzles all use the TensorRT engine, which runs in FP16, where the largest number is 65,504. The transformer uses a normalisation layer called RMSNorm: it divides each token by the square root of the mean of its squared values, `x / sqrt(mean(x²))`. Without weight decay, the values inside the network had been growing during the whole run:
 
 <ActivationChart />
 
-Once a value passes 256, its square passes 65,536, which is too large for FP16 and becomes infinity. Dividing by infinity gives zero, so that square's token is replaced by zeros, and no error is raised. We compared the TensorRT engine with PyTorch on the same 256 positions. Up to step 30,000, they picked the same best move in 99 to 100% of them. By step 45,500, they disagreed on 3.5% of the positions, and on some positions their move probabilities had drifted far apart.
+Once a value passes 256, its square passes 65,536, which is too large for FP16 and becomes infinity. Dividing by infinity gives zero, so that square's token is replaced by zeros, and no error is raised. By step 45,500, the engine and PyTorch disagreed on the best move in 3.5% of positions, and on some positions their move probabilities had drifted far apart. So a growing share of positions was played by a different policy from the one being trained.
 
-So from about step 40,000, a growing share of positions was played by a different policy from the one being trained, and every game, every training target and every rating came from that faulty copy. The fix is one line: divide each token by its largest value before squaring. RMSNorm gives the same result whatever the scale of its input, so this changes nothing except avoiding the overflow. Rated again with fixed engines, the checkpoints that seemed to decline were as strong as before, or stronger.
+The fix is one line: divide each token by its largest value before squaring. RMSNorm gives the same result whatever the scale of its input, so this changes nothing except avoiding the overflow. Rated again with fixed engines, the checkpoints that seemed to decline were as strong as before, or stronger. The network itself never got worse; only the copy used to play did. The first post ended on the same advice: test every boundary between two versions of the same computation. A script, `trt_parity.py`, now compares a checkpoint with its engine in a few seconds.
 
-The network itself never got worse; only the copy used to play did. The first post ended on the same advice: test every boundary between two versions of the same computation. Here the boundary was between the network we train and the engine that plays. A script, `trt_parity.py`, now compares a checkpoint with its TensorRT engine in a few seconds.
+Weight decay fixes the cause: it pulls every weight slightly toward zero at each step. With it (the violet line above), the largest value stays below 80, far from 256, and the rating is the same. It is now part of the recipe.
 
-The fix removes the overflow but not its cause. Nothing kept the weights small. The optimizer (Adam) had no weight decay, which is the usual term that pulls every weight slightly toward zero at each step. In the transformer run, the overall size of the weights (their norm) grew from 105 to 192, and the values inside the network grew with them. One last run added weight decay (AdamW, 0.05, on the weight matrices only) to the 400-simulation recipe. It is the violet line in the chart above. Over 18 hours its weight norm stayed around 105, while the same recipe without weight decay passed 220, and its largest value reached 80 at step 70,000 instead of passing 440. It ended at the same level, with the same puzzle accuracy.
+## What the network plays like
 
-Weight decay is still worth keeping, because it keeps the engine within FP16 range. It also rules out one explanation for the plateau. With normalisation layers everywhere, growing weights make each training step change the network less, so the network could have been slowly freezing. With the weights held at a constant size, it plateaus at the same level anyway.
+These come from the new recipe's network after 24 hours, with no search at all: it plays the move it finds most likely.
 
-## Going further: 800 simulations per move
+Even so, it solves 58 of the 286 puzzles of our set rated 2,000 or more. In this one, Black gives up a rook on h3 to open White's king, then wins the queen:
 
-We then kept training the 400-simulation recipe with two changes to how self-play games start. The 8 random opening moves were removed. And in the opening, the quick moves (the ones that only move the game forward) are now picked at random from the network's own move probabilities, instead of from a 50-simulation search, which blundered often. Its rating went from about 2,200 to about 2,400. We then continued the same run with 800 simulations per saved move. On the ladder, that continuation stayed about level so far.
+<PuzzleBoard id="01JEA" />
 
-Against Stockfish, the network is now far past the first post. In the first post's test, it won all 100 games against Stockfish-1400, and 99 of 100 against Stockfish limited to 2000 Elo. Raising Stockfish's setting until the games are even, the network scores 50% at about 2,600. The strongest opponents of the ladder are Stockfish at full strength, limited to a number of positions per move. In rating games, with 100 simulations per move, the network scores about 50% against the one limited to 1,000 positions. With 800 simulations, it won all 10 games we played against it:
+The hardest puzzle of the set it solves without search is a pawn endgame rated 2,742. White's king steps in front of the pawns, and an en passant capture decides it:
+
+<PuzzleBoard id="00RPk" />
+
+Without search, the network is about as strong as Stockfish limited to 1400 Elo, at 100 ms per move: it scored 42.5% over 20 games. The first post's best network needed 800 simulations per move to score 55% against the same opponent. Here is one of its wins, as Black: it wins material in the middlegame, promotes a pawn with check on move 29, and mates on move 41.
 
 <ShowcaseGame />
 
-The search matters in tactics too. In this puzzle, Black wins with a quiet queen move, then a king move instead of taking a knight. The network alone gives these two moves 7% and 2%. After its search, it plays both:
+## What's next
 
-<PuzzleBoard />
+More improvements are coming. Here is what I'm thinking about:
 
-The cost of these changes is in the openings. Sampling opening moves from the network's own probabilities, then the bigger search, made it play 1.e4 in 96% of its self-play games: its last 3,000 games reach only about 960 different positions after four moves each. The rating does not suffer yet, because rating games start from fixed openings. But the games it learns from get more and more alike, and it may slowly forget the openings it no longer plays.
-
-## Next steps
-
-1. **Keep the openings varied** without random moves or an opening book, while the network keeps sampling its own moves, also after the first 30 plies, and without the sampled moves throwing games away.
-2. **Scale up**: more simulations per move and a bigger transformer, in runs long enough for these slower steps to pay off. Ratings should then also be measured with more than 100 simulations, because a small search may hide differences between strong networks.
-3. **Growing the network during training.** We tried adding layers when progress slows down, with the new layers starting as pass-throughs. So far, a grown network does not beat one that was never grown, for the same training time.
-4. **Use weight decay by default.** It keeps the network within FP16 range at almost no cost.
+- **Continued scaling**: more simulations per move and a bigger network, in longer runs.
+- **Training in the opening**: letting the network learn its own openings, instead of starting every self-play game with 8 random moves.
+- **Progressive growing**: adding layers to the network during training. We tried it, and it does not beat a network trained at full size yet.
+- **Further architecture optimisations.**
+- **Quantisation**: running the network with fewer bits, to make each search cheaper.
 
 The code (the fixes, the transformer, the rating ladder and the dashboard) is on the `worktree-next-round` branch of **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**, with the agent's full lab log in `docs/NEXT_ROUND.md`.
