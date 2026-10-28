@@ -5,7 +5,8 @@
 
 Copies components/charts/ and the follow-up post's extra author (authors/, images/), registers the
 chart and diagram components in components/MDXComponents.tsx, copies both posts into data/blog/,
-and applies the mobile-menu hydration fix (fix_mobilenav.py).
+and applies the hydration fixes for the mobile menu (fix_mobilenav.py) and for attributes that
+browser extensions add to <body> (fix_body.py).
 """
 
 import re
@@ -57,7 +58,8 @@ def main() -> None:
         text = re.sub(r"^draft: (true|false)$", f"draft: {'true' if draft and not publish else 'false'}", text,
                       count=1, flags=re.M)
         (site / "data" / "blog" / name).write_text(text)
-    subprocess.run([sys.executable, str(HERE / "fix_mobilenav.py"), str(site)], check=True)
+    for fix in ("fix_mobilenav.py", "fix_body.py"):
+        subprocess.run([sys.executable, str(HERE / fix), str(site)], check=True)
     print("applied to", site, "(published)" if publish else "(follow-up post as a draft)")
 
 
