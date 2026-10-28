@@ -1,7 +1,7 @@
 """Small transformer encoder with the same inputs and five heads as SmallModel.
 
 A scaled-down version of the chess_speedrun recipe that fits the self-play
-budget (~1M params): 64 square tokens built from the 111-plane input,
+budget (0.81M parameters at d_model 128, 4 layers): 64 square tokens built from the 111-plane input,
 pre-RMSNorm blocks with QK-norm attention, one learned square-pair attention
 bias per head shared by all layers ("geom" bias), the input embedding
 re-injected before every layer, SwiGLU feed-forward, and an attention policy

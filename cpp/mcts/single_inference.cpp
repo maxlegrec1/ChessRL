@@ -1738,7 +1738,7 @@ struct SmallBatchRunner::Impl
     bool stop_worker_{false};
     std::deque<SmallPending> queue;
     // Smaller flush timeout = less GPU idle when the queue is partially filled.
-    // 100us is well under typical batch inference latency for the 1.2M-param model
+    // 100us is well under typical batch inference latency for the network
     // at any reasonable batch size, so this is mostly free latency reclaimed.
     // Override via CHESSRL_MCTS_FLUSH_US if needed.
     const std::chrono::microseconds flush_timeout_{[](){

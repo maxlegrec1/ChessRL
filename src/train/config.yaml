@@ -1,7 +1,8 @@
 # The training recipe: what `python -m src.run` uses for a new run. The run directory keeps a
-# copy (artifacts/runs/<id>/config.yaml), which --resume reads. Every setting is written out:
-# a key missing here falls back to the dataclass default in config.py, which is the original
-# (first post) recipe, not this one. Field-by-field reference: docs/CONFIG.md.
+# copy (artifacts/runs/<id>/config.yaml), which --resume reads. Every setting the recipe uses
+# is written out: a key missing here falls back to the dataclass default in config.py (older
+# values, not this recipe). The keys left out are optional features that stay off: growth,
+# the cosine schedule, resign-threshold calibration, torch.compile. Reference: docs/CONFIG.md.
 
 device: cuda
 batch_size: 2048
@@ -17,6 +18,7 @@ lr_schedule:
   kind: constant
   warmup_steps: 1000
 amp_dtype: float16
+mirror_prob: 0.5 # colour-flip augmentation
 log_every: 5
 
 model:

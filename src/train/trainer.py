@@ -296,7 +296,9 @@ class Trainer:
 
                 t0 = time.time()
                 batch = prefetch.get().to(self.device)
-                expensive = self.step % max(1, cfg.expensive_metrics_every) == 0
+                # On the step that ends at a multiple of expensive_metrics_every, so that a
+                # logged step (counted after the increment below) includes these metrics.
+                expensive = (self.step + 1) % max(1, cfg.expensive_metrics_every) == 0
                 metrics = self._train_step(batch, expensive)
                 t1 = time.time()
                 step_dt = t1 - t0

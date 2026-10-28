@@ -152,9 +152,9 @@ class ScheduleConfig:
 
 @dataclass
 class TrainingConfig:
-    """Defaults reproduce the original (first post) recipe; src/train/config.yaml sets the
-    current one. A run's config.yaml snapshot stores only the keys its YAML sets, so
-    changing a default here changes what resumed runs get."""
+    """The defaults are older values, not the recipe: src/train/config.yaml sets the recipe.
+    A run's config.yaml snapshot stores only the keys its YAML sets, so changing a default
+    here changes what resumed runs get."""
 
     device: str = "cuda"
     batch_size: int = 256
@@ -184,6 +184,7 @@ class TrainingConfig:
     # those targets are ~uniform (measured: 98.7% with max prob < 0.4), so the
     # search value only learns from mates found inside the tree. "outcome":
     # value and mlh, trained on game results / true plies left (AlphaZero).
+    # "q_value" and "blend" change only the value (see ExportWrapper in to_onnx.py).
     search_heads: str = "search"
     mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward

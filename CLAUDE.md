@@ -20,9 +20,9 @@ before starting anything that costs money.
 
 - A run lives in `artifacts/runs/<id>/`: `config.yaml` (the resolved config), `buffer/`,
   `engines/` (+ `.iteration`), `checkpoints/`, `metrics/*.jsonl`, `ladder/`, logs.
-- The default config `src/train/config.yaml` is the recipe. Every key is explicit: a missing
-  key falls back to the dataclass default in `src/train/config.py`, which is the original
-  (first post) recipe.
+- The default config `src/train/config.yaml` is the recipe, with every setting it uses
+  written out: a missing key falls back to the dataclass default in `src/train/config.py`
+  (older values, not the recipe).
 - The trainer saves `checkpoints/step_NNNNNNNN.pt` every `checkpoint.every_steps` (500) and
   builds an engine from it; self-play swaps engines in place.
 - Strength: `scripts/ladder_daemon.py --run-dir <run>` (ladder Elo + puzzles, every 30 min).

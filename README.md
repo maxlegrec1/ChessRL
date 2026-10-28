@@ -150,7 +150,8 @@ uv run python scripts/ladder_daemon.py --run-dir artifacts/runs/<id>
 
 Each rating is 96 games at 100 simulations per move against the two reference opponents nearest the
 network's level (a random player, a player that always captures, and Stockfish 16 at several reduced
-strengths, rated once among themselves with random play at 0). Every game starts from one of 24
+strengths, rated once among themselves with random play at 0), plus 48 more against the next one up
+(or down) each time the network scores 85% or more (or 15% or less), up to three times. Every game starts from one of 24
 openings that Stockfish judges balanced. Each rating also solves 1,000 Lichess puzzles. Results go to
 `<run>/ladder/ladder.jsonl`; a rating is about ±45 Elo.
 
