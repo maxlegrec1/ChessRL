@@ -21,9 +21,13 @@ and reads the training metrics from `docs/blog/data/round1_wandb.json` (exported
 
 ```bash
 python3 docs/blog/site/apply.py ~/mvdbk-site --publish   # charts, component registry, both posts, MobileNav fix
-git -C ~/mvdbk-site diff --stat                          # review, then commit and push
-mvdbk-deploy
+git -C ~/mvdbk-site diff --stat                          # review, then commit
+git -C ~/mvdbk-site push origin main                     # publishing: mvdbk.fr follows main
 ```
+
+Pushing to main is publishing: on the host, a timer (`mvdbk-deploy.timer`) builds each new
+origin/main commit and switches the live site to it about a minute after the build. A local
+checkout is never served.
 
 `apply.py` is idempotent. The old images in `public/static/images/chessrl/` are no longer used by
 either post and can be deleted.
