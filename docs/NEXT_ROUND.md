@@ -56,7 +56,7 @@ What mattered and what didn't:
 Tooling added on the way: Vast launch/deadline/guard/sync CLI (`chessrl-vast`),
 per-run anchor ladder, combined dashboard with run toggles, keep-alive resume
 on boxes, and a CPU analysis board (`scripts/analysis_server.py`, dashboard
-page "Analysis"). Blog draft: `docs/blog/chessrl-next-round.mdx`.
+page "Analysis"). Blog draft: `docs/blog/alphazero-from-scratch-rtx-4090.mdx`.
 
 ## Why (audit of `main` @ 128893c)
 
