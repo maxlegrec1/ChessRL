@@ -39,6 +39,71 @@ const LIGHT = '#f0d9b5'
 const DARK = '#b58863'
 const LAST = 'rgba(155, 199, 0, 0.41)'
 
+/** Board coordinates of a square index (a8 = 0, ..., h1 = 63), with the board seen from `flip`. */
+function place(idx: number, flip: boolean) {
+  const file = idx % 8
+  const rank = 7 - Math.floor(idx / 8) // 0 = rank 1
+  return { x: flip ? 7 - file : file, y: flip ? rank : 7 - rank, name: `${FILES[file]}${rank + 1}` }
+}
+
+/** The position as SVG markup in an 8 x 8 viewBox: squares, last move, coordinates, pieces. */
+function boardMarkup(sq: (string | null)[], last: Ply | null, flip: boolean): string {
+  const out: string[] = []
+  sq.forEach((_, idx) => {
+    const { x, y, name } = place(idx, flip)
+    out.push(`<rect x="${x}" y="${y}" width="1" height="1" fill="${(x + y) % 2 ? DARK : LIGHT}"/>`)
+    if (last && (last.from === name || last.to === name))
+      out.push(`<rect x="${x}" y="${y}" width="1" height="1" fill="${LAST}"/>`)
+  })
+  for (let k = 0; k < 8; k++) {
+    const file = FILES[flip ? 7 - k : k]
+    const rank = flip ? k + 1 : 8 - k
+    out.push(
+      `<text x="${k + 0.95}" y="7.93" text-anchor="end" fill="${(k + 7) % 2 ? LIGHT : DARK}">${file}</text>`,
+      `<text x="0.05" y="${k + 0.22}" fill="${k % 2 ? LIGHT : DARK}">${rank}</text>`
+    )
+  }
+  sq.forEach((p, idx) => {
+    if (!p) return
+    const { x, y } = place(idx, flip)
+    out.push(`<svg x="${x}" y="${y}" width="1" height="1" viewBox="0 0 45 45">${PIECES[p]}</svg>`)
+  })
+  return `<g font-family="sans-serif" font-size="0.2" font-weight="600">${out.join('')}</g>`
+}
+
+/** Draws board markup on a canvas, at the screen's pixel size. A canvas, not inline SVG: the
+ *  forced dark modes of phone browsers recolour inline SVG and images (the black pieces turn
+ *  white) but leave a canvas's pixels alone. */
+function BoardCanvas({ markup }: { markup: string }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    let latest = 0
+    const draw = () => {
+      const size = Math.round(canvas.clientWidth * window.devicePixelRatio)
+      if (!size) return
+      const token = ++latest
+      const img = new Image()
+      img.onload = () => {
+        if (token !== latest) return // a newer draw has started
+        canvas.width = size
+        canvas.height = size
+        canvas.getContext('2d')?.drawImage(img, 0, 0, size, size)
+      }
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 8 8">${markup}</svg>`
+      img.src = `data:image/svg+xml,${encodeURIComponent(svg)}`
+    }
+    const resized = new ResizeObserver(draw) // also fires once when observing starts
+    resized.observe(canvas)
+    return () => {
+      latest = -1
+      resized.disconnect()
+    }
+  }, [markup])
+  return <canvas ref={ref} className="block aspect-square w-full" aria-hidden="true" />
+}
+
 function board(fen: string): (string | null)[] {
   const out: (string | null)[] = [] // a8, b8, ..., h1
   for (const row of fen.split(' ')[0].split('/'))
@@ -127,16 +192,6 @@ export default function ChessBoard({
       go(k)
     }
   }
-  const place = (idx: number) => {
-    const file = idx % 8
-    const rank = 7 - Math.floor(idx / 8) // 0 = rank 1
-    return {
-      x: flip ? 7 - file : file,
-      y: flip ? rank : 7 - rank,
-      name: `${FILES[file]}${rank + 1}`,
-    }
-  }
-
   // Move list rows: [number, white ply index or null, black ply index or null].
   const rows: [number, number | null, number | null][] = []
   line.plies.forEach((_, k) => {
@@ -186,48 +241,7 @@ export default function ChessBoard({
           className="overflow-hidden rounded-md shadow-sm ring-1 ring-black/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           aria-label="Chess board; the arrow keys step through the moves"
         >
-          <svg viewBox="0 0 8 8" className="block w-full" role="img">
-            {sq.map((_, idx) => {
-              const { x, y, name } = place(idx)
-              const hl = last && (last.from === name || last.to === name)
-              return (
-                <g key={name}>
-                  <rect x={x} y={y} width={1} height={1} fill={(x + y) % 2 ? DARK : LIGHT} />
-                  {hl && <rect x={x} y={y} width={1} height={1} fill={LAST} />}
-                </g>
-              )
-            })}
-            {[...Array(8)].map((_, k) => (
-              <g key={k} style={{ fontSize: 0.2, fontWeight: 600 }}>
-                <text
-                  x={k + 0.95}
-                  y={7.93}
-                  textAnchor="end"
-                  style={{ fill: (k + 7) % 2 ? LIGHT : DARK, fontSize: 0.2 }}
-                >
-                  {FILES[flip ? 7 - k : k]}
-                </text>
-                <text x={0.05} y={k + 0.22} style={{ fill: k % 2 ? LIGHT : DARK, fontSize: 0.2 }}>
-                  {flip ? k + 1 : 8 - k}
-                </text>
-              </g>
-            ))}
-            {sq.map((p, idx) => {
-              if (!p) return null
-              const { x, y } = place(idx)
-              return (
-                <svg
-                  key={idx}
-                  x={x}
-                  y={y}
-                  width={1}
-                  height={1}
-                  viewBox="0 0 45 45"
-                  dangerouslySetInnerHTML={{ __html: PIECES[p] }}
-                />
-              )
-            })}
-          </svg>
+          <BoardCanvas markup={boardMarkup(sq, last, flip)} />
         </div>
         <div className="mt-3 flex items-center justify-center gap-2">
           <button
