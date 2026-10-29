@@ -1,16 +1,16 @@
 ---
-title: 'ChessRL: training an AlphaZero from scratch on a single consumer GPU'
+title: 'AlphaZero from scratch: training a chess AI on a single consumer GPU'
 date: '2026-08-07'
-tags: ['chess', 'machine-learning', 'reinforcement-learning']
+tags: ['alphazero', 'chess', 'machine-learning', 'reinforcement-learning']
 draft: false
-summary: 'How I trained a 1.29M-parameter chess agent only by playing against itself, with no human games and no opening book, to about the strength of Stockfish limited to 1400 Elo, mostly on the RTX 4090 in my desktop. The architecture, the training loop, the performance work, and the bugs that taught me the most.'
+summary: 'Reproducing AlphaZero for chess at home: a 1.29M-parameter network trained only by playing against itself, with no human games and no opening book, mostly on the RTX 4090 in my desktop, up to about the strength of Stockfish limited to 1400 Elo. The architecture, the training loop, the performance work, and the bugs that taught me the most.'
 ---
 
 In 2017, DeepMind's AlphaZero learned chess from nothing but the rules, using around **5,000 TPUs** to generate its self-play games. I wanted to know how far the same recipe can go on hardware one person can own. The answer: further than I expected.
 
 > Since then, [continued improvements](/blog/chessrl-next-round) made the training about 6 times faster on the same kind of GPU, with an AI agent doing most of the work.
 
-**ChessRL** is a 1.29M-parameter chess agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
+**ChessRL** is my small-scale reproduction of AlphaZero for chess, a 1.29M-parameter agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
 
 The code is open source (MIT): **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**. It has changed since this post; the version described here is commit [`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75). This post covers the architecture, the training loop, the performance work that made a single GPU enough, and the bugs, which taught me the most.
 
