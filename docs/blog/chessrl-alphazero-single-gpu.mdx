@@ -1,16 +1,16 @@
 ---
-title: 'ChessRL: training an AlphaZero from scratch on a single consumer GPU'
+title: 'AlphaZero from scratch: training a chess AI on a single consumer GPU'
 date: '2026-08-07'
-tags: ['chess', 'machine-learning', 'reinforcement-learning']
+tags: ['alphazero', 'chess', 'machine-learning', 'reinforcement-learning']
 draft: false
-summary: 'How I trained a 1.29M-parameter chess agent only by playing against itself, with no human games and no opening book, to about the strength of Stockfish limited to 1400 Elo, mostly on the RTX 4090 in my desktop. The architecture, the training loop, the performance work, and the bugs that taught me the most.'
+summary: 'Reproducing AlphaZero for chess at home: a 1.29M-parameter network trained only by playing against itself, with no human games and no opening book, mostly on the RTX 4090 in my desktop, up to about the strength of Stockfish limited to 1400 Elo. The architecture, the training loop, the performance work, and the bugs that taught me the most.'
 ---
 
 In 2017, DeepMind's AlphaZero learned chess from nothing but the rules, using around **5,000 TPUs** to generate its self-play games. I wanted to know how far the same recipe can go on hardware one person can own. The answer: further than I expected.
 
-> Since then, [continued improvements](/blog/chessrl-next-round) made the training about 6 times faster on the same kind of GPU, with an AI agent doing most of the work.
+> Since then, [continued improvements](/blog/alphazero-from-scratch-rtx-4090) made the training about 6 times faster on the same kind of GPU, with an AI agent doing most of the work.
 
-**ChessRL** is a 1.29M-parameter chess agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
+**ChessRL** is my small-scale reproduction of AlphaZero for chess, a 1.29M-parameter agent trained only by playing against itself: no human games, no opening book, no endgame tables. I ran the full recipe twice. The first run took two weeks on the RTX 4090 in my desktop. After a round of performance work and bug fixes, I ran it again for about ten days on a rented H200, this time with more measurements (I call it the instrumented run). Both runs reached roughly the strength of **Stockfish limited to 1400 Elo, at 100 ms per move**, and won more than half of their games against it at their best. Measured against its own earlier versions, the instrumented run gained **1,314 Elo**.
 
 The code is open source (MIT): **[github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL)**. It has changed since this post; the version described here is commit [`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75). This post covers the architecture, the training loop, the performance work that made a single GPU enough, and the bugs, which taught me the most.
 
@@ -61,7 +61,7 @@ The trunk is deliberately simple: a 3×3 convolution to 64 channels, then **four
 - **MLH** (moves-left head): predicts how many plies (half-moves) remain until the end of the game, divided by 25.
 - **MLH_q**: the same, trained on the search's estimate.
 
-Why two versions of each? The game result is **unbiased but noisy**: a winning position is labelled as a loss whenever the game was later thrown away. The search's estimate is **less noisy but biased**: it reflects what the current, possibly wrong, network believes. Training both gives one reference and one smoother estimate. The search uses the search-based versions (`value_q`, `mlh_q`), while the outcome-based ones keep training tied to real results. (The [second round](/blog/chessrl-next-round) found that this choice badly slows down early training; the search now reads the outcome-based heads.) The `mlh_q` head has a concrete chess purpose: when several moves win, it makes the engine prefer the one that wins faster, instead of shuffling pieces in a won position, a well-known problem of self-play engines. I also logged how often the two value targets disagree (the game result says White won, the search says Black is winning). Those positions, usually blunders and reversals, turned out to carry the most useful training signal.
+Why two versions of each? The game result is **unbiased but noisy**: a winning position is labelled as a loss whenever the game was later thrown away. The search's estimate is **less noisy but biased**: it reflects what the current, possibly wrong, network believes. Training both gives one reference and one smoother estimate. The search uses the search-based versions (`value_q`, `mlh_q`), while the outcome-based ones keep training tied to real results. (The [second round](/blog/alphazero-from-scratch-rtx-4090) found that this choice badly slows down early training; the search now reads the outcome-based heads.) The `mlh_q` head has a concrete chess purpose: when several moves win, it makes the engine prefer the one that wins faster, instead of shuffling pieces in a won position, a well-known problem of self-play engines. I also logged how often the two value targets disagree (the game result says White won, the search says Black is winning). Those positions, usually blunders and reversals, turned out to carry the most useful training signal.
 
 **Inputs** are AlphaZero's **111 planes** of 8 × 8: which piece stands on each square in the current position and the 7 before it, plus castling rights, side to move and move counters. The history matters even for a small model, because without it the network cannot know about repetitions. (It also caused one of my favourite bugs, see below.)
 
@@ -175,6 +175,6 @@ If you want to try this yourself (I recommend it: it is the most instructive ML 
 
 Total cost: a 1.29M-parameter network, two weeks of one desktop RTX 4090, about ten days of a rented H200 for the instrumented run, and a 1.7 GB buffer file. Next to that, AlphaZero's 5,000 TPUs look less like a requirement of the algorithm and more like a statement about deadlines. The recipe itself (self-play, a search that improves the policy, and a few settings that matter) fits on a desk.
 
-In a [follow-up post](/blog/chessrl-next-round), an AI agent and I made the training about 6 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
+In a [follow-up post](/blog/alphazero-from-scratch-rtx-4090), an AI agent and I made the training about 6 times faster on the same kind of GPU, with better training targets, a small transformer and a cheaper search.
 
 The code as this post describes it, with the docs (`docs/ARCHITECTURE.md`, `docs/CONFIG.md`), the Streamlit dashboard and all the diagnostic tools, is commit **[`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75)** of [github.com/maxlegrec1/ChessRL](https://github.com/maxlegrec1/ChessRL), under the MIT license. If you build your own, I would love to hear how it goes.

@@ -25,7 +25,7 @@ GROUPS = {
     "ChessrlRoundOne": ["LoopDiagram", "ResNetDiagram", "LegalMoveChart", "CastleChart", "SfEloChart",
                         "EloChainChart", "BrawlChart", "KqrkChart"],
 }
-POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "chessrl-next-round.mdx": False}  # name -> draft in preview
+POSTS = {"chessrl-alphazero-single-gpu.mdx": False, "alphazero-from-scratch-rtx-4090.mdx": False}  # name -> draft in preview
 
 
 def register(path: Path) -> None:

@@ -1,13 +1,13 @@
 ---
-title: 'ChessRL, continued: 6× faster self-play learning on a single RTX 4090'
+title: 'AlphaZero from scratch, continued: 6× faster on a single RTX 4090'
 date: '2026-10-28'
-tags: ['chess', 'machine-learning', 'reinforcement-learning']
+tags: ['alphazero', 'chess', 'machine-learning', 'reinforcement-learning']
 authors: ['default', 'claude']
 draft: false
-summary: 'Continued improvements to my from-scratch AlphaZero, done largely by an AI agent. On the same GPU, in the same 24 hours, the original code reaches 1,170 Elo and the new recipe 2,230, and it gets to 1,000 Elo about 6 times faster. Also: an FP16 bug that made a healthy network look like it was getting worse.'
+summary: 'Making my from-scratch chess AlphaZero learn about 6 times faster, trained locally on one RTX 4090, with most of the work done by an AI agent. In the same 24 hours, the original code reaches 1,170 Elo and the new recipe 2,230. Also: an FP16 bug that made a healthy network look like it was getting worse.'
 ---
 
-In the [first post](/blog/chessrl-alphazero-single-gpu) I trained a small chess network (1.29M parameters) from nothing but the rules of chess, on the RTX 4090 in my desktop. It reached roughly the level of Stockfish limited to 1400 Elo, but it took two weeks. I suspected that most of that time was wasted.
+In the [first post](/blog/chessrl-alphazero-single-gpu) I reproduced AlphaZero at a small scale: a chess network (1.29M parameters) trained from nothing but the rules of chess, on the RTX 4090 in my desktop. It reached roughly the level of Stockfish limited to 1400 Elo, but it took two weeks. I suspected that most of that time was wasted.
 
 ## How this work was done
 

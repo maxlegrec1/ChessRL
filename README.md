@@ -37,10 +37,10 @@ The charts are drawn by `docs/blog/make_charts.py --readme` from the data of the
 
 ## Write-ups
 
-- [ChessRL: training an AlphaZero from scratch on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu):
+- [AlphaZero from scratch: training a chess AI on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu):
   the architecture, the self-play loop, the performance work, and the bugs that taught the most.
   It describes commit `128893c`.
-- [ChessRL, continued: 6× faster self-play learning on a single RTX 4090](https://mvdbk.fr/blog/chessrl-next-round):
+- [AlphaZero from scratch, continued: 6× faster on a single RTX 4090](https://mvdbk.fr/blog/alphazero-from-scratch-rtx-4090):
   better training targets, a small transformer and a cheaper search, an FP16 bug that looked like a
   collapse, and a network that beats Stockfish limited to 2000 Elo. The lab log behind it is
   [`docs/NEXT_ROUND.md`](docs/NEXT_ROUND.md).
