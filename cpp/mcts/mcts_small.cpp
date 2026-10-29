@@ -225,7 +225,8 @@ public:
               shared_runner ? std::move(shared_runner)
                             : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
         , cache_(std::move(cache))
-        , rng_(std::random_device{}())
+        , rng_(options_.seed != 0 ? static_cast<std::uint32_t>(options_.seed ^ (options_.seed >> 32))
+                                  : std::random_device{}())
     {
         const bool ph = mcts_phases_on();
         const std::uint64_t t_ctor = ph ? now_ns() : 0;

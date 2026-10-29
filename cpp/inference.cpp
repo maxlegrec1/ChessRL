@@ -29,6 +29,7 @@
 #include "chess-library/include/chess.hpp"
 #include "cuda_fp16.h"
 #include "include/trt_utils.hpp"
+#include "include/policy_vocab.hpp"
 
 namespace chessrl
 {
@@ -217,62 +218,9 @@ EngineContext& getEngineContext(const std::string& engine_path)
     return *it->second;
 }
 
-class PolicyVocab
-{
-public:
-    PolicyVocab()
-    {
-        std::ifstream file(kVocabPath);
-        if (!file)
-        {
-            throw std::runtime_error(std::string("Failed to open policy vocab file: ") + kVocabPath);
-        }
-
-        std::string line;
-        while (std::getline(file, line))
-        {
-            if (!line.empty() && line.back() == '\r')
-            {
-                line.pop_back();
-            }
-            tokens.emplace_back(line);
-            if (!line.empty())
-            {
-                toIndex[line] = static_cast<int>(tokens.size() - 1);
-            }
-        }
-
-        if (tokens.size() != kSmallPolicySize)
-        {
-            throw std::runtime_error("Unexpected small policy vocab size: " + std::to_string(tokens.size()));
-        }
-    }
-
-    const std::string& at(int idx) const { return tokens.at(static_cast<size_t>(idx)); }
-
-    std::optional<int> indexOf(const std::string& token) const
-    {
-        auto it = toIndex.find(token);
-        if (it == toIndex.end())
-        {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-
-    const std::vector<std::string>& tokensRef() const { return tokens; }
-
-private:
-    static constexpr const char* kVocabPath = "cpp/policy_index.txt";
-    std::vector<std::string> tokens;
-    std::unordered_map<std::string, int> toIndex;
-};
-
-PolicyVocab& getPolicyVocab()
-{
-    static PolicyVocab vocab;
-    return vocab;
-}
+// The vocabulary is in policy_vocab.cpp (no TensorRT there).
+using chessrl::vocab::PolicyVocab;
+using chessrl::vocab::getPolicyVocab;
 
 size_t encodeIndex(int batch, int row, int col, int plane)
 {
@@ -762,16 +710,6 @@ SmallInferenceResult small_generate_moves(
     lastResult.timings.totalMs = cumulative.totalMs / static_cast<double>(iterations);
 
     return lastResult;
-}
-
-size_t small_policy_size()
-{
-    return kSmallPolicySize;
-}
-
-const std::vector<std::string>& small_policy_vocabulary()
-{
-    return small_impl::getPolicyVocab().tokensRef();
 }
 
 } // namespace chessrl

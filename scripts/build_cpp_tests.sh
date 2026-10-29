@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the doctest-based C++ test binary at cpp/build/tests/cpp_tests.
-# Mirrors the compile flags used by cpp/setup.py.
+# Mirrors the compile flags used by cpp/setup.py. Needs only g++: the tested code has no
+# TensorRT or CUDA dependency (the policy vocabulary is in policy_vocab.cpp).
 
 set -euo pipefail
 
@@ -10,8 +11,6 @@ CPP="$ROOT/cpp"
 OUT_DIR="$CPP/build/tests"
 OUT_BIN="$OUT_DIR/cpp_tests"
 
-TENSORRT_ROOT="${TENSORRT_ROOT:-/usr/local/TensorRT-10.14.1.48}"
-CUDA_ROOT="${CUDA_ROOT:-/usr/local/cuda}"
 CXX="${CXX:-g++}"
 
 mkdir -p "$OUT_DIR"
@@ -19,35 +18,19 @@ mkdir -p "$OUT_DIR"
 SOURCES=(
     "$CPP/mcts/tests.cpp"
     "$CPP/mcts/common.cpp"
-    "$CPP/inference.cpp"
+    "$CPP/policy_vocab.cpp"
 )
 
 INCLUDES=(
     "-I$CPP"
     "-I$CPP/include"
     "-I$CPP/chess-library/include"
-    "-I$CUDA_ROOT/include"
-    # System (apt) fallback for TensorRT — matches cpp/setup.py's logic so the
-    # build works on machines without the tarball layout under /usr/local.
-    "-I/usr/include/x86_64-linux-gnu"
-    "-I/usr/include"
 )
-if [ -f "$TENSORRT_ROOT/include/NvInfer.h" ]; then
-    INCLUDES+=("-I$TENSORRT_ROOT/include")
-fi
 
-LIB_DIRS=(
-    "-L$CUDA_ROOT/lib64"
-    "-L/usr/lib/x86_64-linux-gnu"
-)
-if [ -d "$TENSORRT_ROOT/lib" ]; then
-    LIB_DIRS+=("-L$TENSORRT_ROOT/lib")
-fi
-
-LIBS=(-lnvinfer -lcudart -lpthread)
+LIBS=(-lpthread)
 
 CXXFLAGS=(-std=c++17 -O2 -DCHESSRL_MCTS_NO_STANDALONE -Wall -Wno-unknown-pragmas)
 
 echo "[build_cpp_tests] -> $OUT_BIN"
-"$CXX" "${CXXFLAGS[@]}" "${INCLUDES[@]}" "${SOURCES[@]}" "${LIB_DIRS[@]}" "${LIBS[@]}" -o "$OUT_BIN"
+"$CXX" "${CXXFLAGS[@]}" "${INCLUDES[@]}" "${SOURCES[@]}" "${LIBS[@]}" -o "$OUT_BIN"
 echo "[build_cpp_tests] OK"

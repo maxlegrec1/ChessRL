@@ -183,7 +183,8 @@ checkpoint's search on the CPU for any position.
 |---|---|
 | `check_install.sh` | Checks uv, the GPU, `nvcc`, TensorRT, Stockfish and the target architecture. Run it first. |
 | `build_trt.sh` | Converts a checkpoint to a TensorRT engine (PyTorch → ONNX → TensorRT FP16). |
-| `build_cpp_tests.sh` | Builds the C++ tests (`cpp/build/tests/cpp_tests`). |
+| `build_cpp_tests.sh` | Builds the C++ tests (`cpp/build/tests/cpp_tests`). Needs only g++. |
+| `bench_cpu_search.sh` | CPU benchmark of the self-play search with a fake network, no GPU: CPU time per evaluation and a digest of the search results (built by `build_cpu_bench.sh`; positions from `make_bench_positions.py`). |
 | `ladder_daemon.py` | Rates a run's newest engine on the ladder, every 30 minutes. |
 | `rerate.py` | Re-rates saved checkpoints on a chosen opening set. |
 | `calibrate_finish.py` | Finishes an interrupted calibration of the ladder's reference opponents. |

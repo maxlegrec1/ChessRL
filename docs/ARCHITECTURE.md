@@ -277,15 +277,15 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
 | Self-play process | `src/self_play/__main__.py`, `engine_watch.py` (`.iteration`), `calibration.py` (resign threshold) |
 | Self-play worker and record writer | `cpp/selfplay.cpp`, `cpp/selfplay.hpp` |
 | MCTS | `cpp/mcts/mcts_small.cpp`, `cpp/mcts/common.cpp`, `cpp/mcts/common.hpp`, `cpp/mcts/cache.hpp` (transposition table) |
-| Batched inference, packed positions, CUDA graphs | `cpp/mcts/single_inference.cpp`, `cpp/mcts/packed_position.hpp`, `cpp/mcts/expand_kernel.cu` |
-| TensorRT helpers, C++ policy vocabulary | `cpp/inference.cpp`, `cpp/include/`, `cpp/policy_index.txt` |
+| Batched inference, CUDA graphs; input layout, packed positions, CPU encoders | `cpp/mcts/single_inference.cpp`, `cpp/mcts/expand_kernel.cu`; `cpp/mcts/small_layout.hpp`, `cpp/mcts/packed_position.hpp`, `cpp/mcts/small_encoding.cpp` |
+| TensorRT helpers; C++ policy vocabulary | `cpp/inference.cpp`, `cpp/include/`; `cpp/policy_vocab.cpp`, `cpp/policy_index.txt` |
 | Python bindings (`_inference_cpp`), build, chess rules | `cpp/bindings.cpp`, `cpp/setup.py`, `cpp/pyproject.toml`, `cpp/chess-library` (submodule) |
 | Networks, input planes, policy vocabulary | `src/models/encoder.py`, `src/models/small/small_model.py`, `src/models/factory.py`, `src/models/growth.py`; `src/models/small/fen_encoder.py`, `src/models/small/vocab.py` |
 | Export and engine build | `src/export/to_onnx.py`, `scripts/build_trt.sh` |
 | Rating ladder | `src/rating/ladder.py`, `src/rating/anchors.json`, `src/rating/anchors_sf.json`, `scripts/ladder_daemon.py`, `scripts/rerate.py`, `scripts/calibrate_finish.py`; data in `data/openings/`, `data/puzzles/` (built by `scripts/make_sf_openings.py`, `scripts/make_puzzle_set.py`) |
 | Stockfish test | `scripts/stockfish_match.py`, `scripts/sf_benchmark.py`, `scripts/cpu_stockfish_match.py` |
 | CPU search, dashboard, analysis board | `src/analysis/engine.py`, `scripts/puzzle_scan.py`; `scripts/dashboard.py`, `scripts/pages/1_Analysis.py`, `scripts/analysis_server.py`, `scripts/analysis/` |
-| Diagnostics and benchmarks | `scripts/trt_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py` |
+| Diagnostics and benchmarks | `scripts/trt_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py`; CPU search benchmark (fake network, no GPU): `cpp/bench/`, `scripts/build_cpu_bench.sh`, `scripts/bench_cpu_search.sh`, `scripts/make_bench_positions.py`, `data/bench/positions.txt`; results in `docs/PERF.md` |
 | Rented GPUs | `scripts/vast/` |
 | Tests | `tests/` (Python); `cpp/mcts/tests.cpp`, built by `scripts/build_cpp_tests.sh` (C++) |
 | Lab log and blog posts | `docs/NEXT_ROUND.md`, `docs/blog/` |

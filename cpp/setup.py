@@ -55,9 +55,11 @@ ext_modules = [
         sources=[
             "bindings.cpp",
             "inference.cpp",
+            "policy_vocab.cpp",
             "mcts/common.cpp",
             "mcts/mcts_small.cpp",
             "mcts/single_inference.cpp",
+            "mcts/small_encoding.cpp",
             "selfplay.cpp",
         ],
         include_dirs=[
