@@ -284,7 +284,7 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
 | Export and engine build | `src/export/to_onnx.py`, `scripts/build_trt.sh` |
 | Rating ladder | `src/rating/ladder.py`, `src/rating/anchors.json`, `src/rating/anchors_sf.json`, `scripts/ladder_daemon.py`, `scripts/rerate.py`, `scripts/calibrate_finish.py`; data in `data/openings/`, `data/puzzles/` (built by `scripts/make_sf_openings.py`, `scripts/make_puzzle_set.py`) |
 | Stockfish test | `scripts/stockfish_match.py`, `scripts/sf_benchmark.py`, `scripts/cpu_stockfish_match.py` |
-| CPU search, dashboard, analysis board | `src/analysis/engine.py`, `scripts/puzzle_scan.py`; `scripts/dashboard.py`, `scripts/pages/1_Analysis.py`, `scripts/analysis_server.py`, `scripts/analysis/` |
+| CPU search (PUCT; Gumbel root search), dashboard, analysis board | `src/analysis/engine.py`, `src/analysis/gumbel.py`, `scripts/puzzle_scan.py`, `scripts/search_quality.py`; `scripts/dashboard.py`, `scripts/pages/1_Analysis.py`, `scripts/analysis_server.py`, `scripts/analysis/` |
 | Diagnostics and benchmarks | `scripts/trt_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py`; CPU search benchmark (fake network, no GPU): `cpp/bench/`, `scripts/build_cpu_bench.sh`, `scripts/bench_cpu_search.sh`, `scripts/make_bench_positions.py`, `data/bench/positions.txt`; results in `docs/PERF.md` |
 | Rented GPUs | `scripts/vast/` |
 | Tests | `tests/` (Python); `cpp/mcts/tests.cpp`, built by `scripts/build_cpp_tests.sh` (C++) |

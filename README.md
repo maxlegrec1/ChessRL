@@ -194,6 +194,7 @@ checkpoint's search on the CPU for any position.
 | `cpu_stockfish_match.py` | The same test with the network searching on the CPU (no TensorRT needed). |
 | `puzzle_scan.py`, `showcase_games.py` | Hard puzzles solved by a checkpoint, and games against one ladder opponent (PGN). |
 | `trt_parity.py` | TensorRT engine against PyTorch, per checkpoint. |
+| `search_quality.py`, `search_quality_report.py` | Training-target quality per network evaluation on the CPU: self-play's PUCT search against Gumbel root search, judged by Stockfish (results in `docs/PERF.md`). |
 | `check_buffer.py` | Checks buffer records against python-chess. |
 | `bench_selfplay.py`, `perfreport.py` | Self-play speed benchmark with the training config, and a side-by-side report of two benchmarks. |
 | `dashboard.py`, `pages/1_Analysis.py`, `analysis_server.py` | The dashboard and the analysis board. |

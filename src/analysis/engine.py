@@ -17,6 +17,10 @@ move) is an automatic draw, both inside the tree and as the game's end.
   When winning it prefers shorter wins; when losing, longer games.
 - twofold_draw (off by default): also score a position's second occurrence as a
   draw inside the tree, Leela-style.
+- prior_temperature (1 by default): priors softmax(logit / T) at every node; self-play
+  uses 1.3.
+- root_noise (off by default): (alpha, epsilon, rng) mixes Dirichlet noise into the root
+  priors, as self-play does on its full searches.
 """
 
 from __future__ import annotations
@@ -164,6 +168,8 @@ def search(
     batch: int = 8,
     twofold_draw: bool = False,
     mlh_eps: float = 0.05,
+    prior_temperature: float = 1.0,
+    root_noise: tuple[float, float, np.random.Generator] | None = None,
 ) -> dict:
     """PUCT search from `board`. Returns the root, its evaluation and timing."""
     t0 = time.time()
@@ -171,7 +177,12 @@ def search(
     root.terminal = terminal_value(root.board)
     if root.terminal is None:
         ((priors, wdl, plies),) = net.evaluate([root.board])
-        _expand(root, priors, wdl, plies, twofold_draw)
+        _expand(root, _tempered(priors, prior_temperature), wdl, plies, twofold_draw)
+        if root_noise is not None and root.children:
+            alpha, eps, rng = root_noise
+            noise = rng.dirichlet([alpha] * len(root.children))
+            for c, x in zip(root.children.values(), noise, strict=True):
+                c.prior = (1 - eps) * c.prior + eps * float(x)
     done = 0
     while done < sims and root.terminal is None:
         leaves, paths = [], []
@@ -194,7 +205,7 @@ def search(
             for l, (priors, wdl, plies) in zip(
                 pending, net.evaluate([l.board for l in pending]), strict=True
             ):
-                _expand(l, priors, wdl, plies, twofold_draw)
+                _expand(l, _tempered(priors, prior_temperature), wdl, plies, twofold_draw)
         for leaf, path in zip(leaves, paths, strict=True):
             for nd in path[1:]:
                 nd.vloss -= 1
@@ -209,6 +220,15 @@ def search(
                 plies += 1.0
         done += len(leaves)
     return {"root": root, "sims": done, "seconds": time.time() - t0}
+
+
+def _tempered(priors: dict[chess.Move, float], temperature: float) -> dict[chess.Move, float]:
+    """softmax(logit / T) from softmax(logit): p^(1/T), renormalised."""
+    if temperature == 1.0 or not priors:
+        return priors
+    w = {m: p ** (1.0 / temperature) for m, p in priors.items()}
+    s = sum(w.values()) or 1.0
+    return {m: v / s for m, v in w.items()}
 
 
 def _expand(
