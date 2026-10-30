@@ -191,6 +191,8 @@ struct BoardSlot
     bool curriculum = false;                  // started from a curriculum position
     std::array<int, 2> low_streak{{0, 0}};    // consecutive below-threshold moves (0 = white)
     std::array<bool, 2> would_resign{{false, false}};
+    // tree_reuse: the subtree of the move just played, for this game's next search.
+    std::shared_ptr<chessrl::mcts::SearchTree> tree;
 };
 
 struct SelfPlayWorker::Impl
@@ -294,6 +296,7 @@ struct SelfPlayWorker::Impl
     void reset_slot(BoardSlot& slot)
     {
         slot.board = chess::Board();
+        slot.tree.reset();
         slot.history.clear();
         slot.pending_records.clear();
         slot.ply_count = 0;
@@ -484,6 +487,8 @@ struct SelfPlayWorker::Impl
            << ", \"curriculum_games\": " << stats.curriculum_games
            << ", \"full_searches\": " << stats.full_searches
            << ", \"fast_searches\": " << stats.fast_searches
+           << ", \"simulations_run\": " << stats.simulations_run
+           << ", \"reused_visits\": " << stats.reused_visits
            << ", \"policy_moves\": " << stats.policy_moves
            << ", \"records_written\": " << stats.records_written
            << ", \"engine_swaps\": " << stats.engine_swaps
@@ -703,7 +708,7 @@ SelfPlayMetrics SelfPlayWorker::step()
 
     for (size_t i = 0; i < n_slots; ++i)
     {
-        const auto& slot = impl_->slots[i];
+        auto& slot = impl_->slots[i];
         chessrl::mcts::MctsOptions opt;
         opt.request.fen = slot.board.getFen();
         opt.request.history = slot.history;
@@ -752,6 +757,14 @@ SelfPlayMetrics SelfPlayWorker::step()
         opt.dirichlet_alpha = cfg.dirichlet_alpha;
         opt.dirichlet_epsilon = cfg.dirichlet_epsilon;
         opt.small_engine_path = cfg.engine_path;
+        // Tree reuse: continue the subtree the previous search kept for the move played (not
+        // for policy-sampled moves, which play from the priors without searching).
+        if (cfg.tree_reuse && !policy_move)
+        {
+            opt.keep_tree = true;
+            opt.reuse_tree = std::move(slot.tree);
+        }
+        slot.tree.reset();
 
         options.push_back(std::move(opt));
     }
@@ -779,7 +792,9 @@ SelfPlayMetrics SelfPlayWorker::step()
     {
         auto& slot = impl_->slots[i];
         const auto& summary = summaries[i];
-        metrics.nodes_evaluated += sims_used[i];
+        metrics.nodes_evaluated += summary.new_simulations;
+        impl_->stats.simulations_run += summary.new_simulations;
+        impl_->stats.reused_visits += summary.reused_visits;
 
         if (summary.action.empty())
         {
@@ -843,6 +858,7 @@ SelfPlayMetrics SelfPlayWorker::step()
                 slot.board.makeMove(m);
                 slot.history.push_back(summary.action);
                 slot.ply_count++;
+                slot.tree = summary.tree;  // set only with tree_reuse
                 move_found = true;
                 break;
             }

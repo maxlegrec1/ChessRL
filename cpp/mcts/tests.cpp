@@ -412,6 +412,62 @@ TEST_CASE("detail::refine_wdl_node leaves unvisited subtrees alone")
     CHECK(refined[2] == doctest::Approx(0.3F));
 }
 
+TEST_CASE("extract_subtree re-roots a played move's subtree for the next search")
+{
+    mcts::SearchTree tree;
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    const int root = tree.add_root(startpos, {});
+    chess::Board after_e4 = startpos;
+    const chess::Move e2e4 = chess::uci::uciToMove(after_e4, "e2e4");
+    after_e4.makeMove(e2e4);
+    const int a = tree.add_child(root, e2e4, 0.6F, after_e4);
+    chess::Board after_d4 = startpos;
+    const chess::Move d2d4 = chess::uci::uciToMove(after_d4, "d2d4");
+    after_d4.makeMove(d2d4);
+    tree.add_child(root, d2d4, 0.4F, after_d4);
+    chess::Board after_e5 = after_e4;
+    const chess::Move e7e5 = chess::uci::uciToMove(after_e5, "e7e5");
+    after_e5.makeMove(e7e5);
+    const int c = tree.add_child(a, e7e5, 0.7F, after_e5);
+    chess::Board after_c5 = after_e4;
+    const chess::Move c7c5 = chess::uci::uciToMove(after_c5, "c7c5");
+    after_c5.makeMove(c7c5);
+    const int d = tree.add_child(a, c7c5, 0.3F, after_c5);
+
+    tree.nodes[a].expanded = true;
+    tree.nodes[a].visit_count = 3;
+    tree.nodes[a].wdl_sum = {1.5F, 0.9F, 0.6F};
+    tree.nodes[a].wdl = {0.9F, 0.05F, 0.05F};  // as refine_wdl_node leaves it
+    tree.nodes[a].virtual_loss = 2.0F;
+    tree.nodes[c].visit_count = 2;
+    tree.nodes[c].wdl_sum = {0.4F, 0.6F, 1.0F};
+    tree.nodes[c].value_sum = -0.3F;
+
+    const mcts::SearchTree sub = mcts::extract_subtree(tree, a, after_e4.zobrist());
+    REQUIRE(sub.nodes.size() == 3);
+    CHECK(sub.root_hash == after_e4.zobrist());
+    const auto& r = sub.nodes[0];
+    CHECK(r.parent == -1);
+    CHECK(r.move_from_parent == chess::Move::NO_MOVE);
+    CHECK(r.visit_count == 3);
+    CHECK(r.virtual_loss == 0.0F);
+    CHECK(r.wdl[0] == doctest::Approx(0.5F));  // wdl_sum / visits, not the refined value
+    CHECK(r.history == tree.nodes[a].history);
+    REQUIRE(r.children.size() == 2);
+    CHECK(r.child_moves[0] == e7e5);
+    CHECK(r.child_priors[1] == doctest::Approx(0.3F));
+    const auto& sc = sub.nodes[static_cast<size_t>(r.children[0])];
+    CHECK(sc.parent == 0);
+    CHECK(sc.move_from_parent == e7e5);
+    CHECK(sc.visit_count == 2);
+    CHECK(sc.value_sum == doctest::Approx(-0.3F));
+    CHECK(sc.wdl[2] == doctest::Approx(0.5F));
+    CHECK(sub.nodes[static_cast<size_t>(r.children[1])].move_from_parent == c7c5);
+    (void)d;
+
+    CHECK(mcts::extract_subtree(tree, 99, 0).nodes.empty());  // out of range: empty tree
+}
+
 // -----------------------------------------------------------------------------
 // AlphaZero history stack
 // -----------------------------------------------------------------------------

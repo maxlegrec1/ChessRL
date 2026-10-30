@@ -72,6 +72,9 @@ selfplay:
   simulations: 400
   pcr_full_prob: 0.25
   pcr_fast_simulations: 50
+  # Tree reuse (off until measured on a GPU): keep the played move's subtree for the next
+  # search, which then runs only the simulations its root is missing.
+  tree_reuse: false
   cpuct: 0.65
   temperature: 1.3 # prior temperature inside the tree
   # Moves are sampled from the visit counts for the first 30 searched plies; after that the

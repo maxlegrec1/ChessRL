@@ -232,7 +232,19 @@ public:
         const std::uint64_t t_ctor = ph ? now_ns() : 0;
         // Phase B: Store root board for state reconstruction during traversal
         root_board_ = apply_history(options_.request);
-        tree_.add_root(root_board_, options_.request.history);
+        // Tree reuse (MctsOptions::reuse_tree): continue the kept subtree when it is rooted at
+        // this position; otherwise start a fresh tree.
+        auto& reuse = options_.reuse_tree;
+        if (reuse && options_.simulations > 0 && reuse->root_hash == root_board_.zobrist()
+            && !reuse->nodes.empty() && reuse->nodes.front().expanded)
+        {
+            tree_ = std::move(*reuse);
+        }
+        else
+        {
+            tree_.add_root(root_board_, options_.request.history);
+        }
+        reuse.reset();
         // AlphaZero-style 8-board history stack (per-simulation seed). When
         // the caller supplies it (self-play tracks the rolling snapshots) we
         // use it directly. Otherwise — non-self-play callers (brawl /
@@ -255,12 +267,29 @@ public:
 
     MctsSummary run()
     {
-        // The root is evaluated synchronously (single-leaf inference call)
-        // because every subsequent descent depends on its expansion.
-        evaluate_node(0, root_board_, root_history_stack_);
+        // A reused root is already expanded and its moves already have visits: run only the
+        // missing simulations, after mixing fresh root noise into its priors. A fresh root is
+        // evaluated synchronously (single-leaf inference call) because every subsequent
+        // descent depends on its expansion.
+        int reused_visits = 0;
+        if (tree_.nodes.front().expanded && !tree_.nodes.front().children.empty())
+        {
+            for (const int child : tree_.nodes.front().children)
+            {
+                reused_visits += tree_.nodes[static_cast<size_t>(child)].visit_count;
+            }
+            if (options_.use_dirichlet)
+            {
+                noise_reused_root();
+            }
+        }
+        else
+        {
+            evaluate_node(0, root_board_, root_history_stack_);
+        }
 
         const int width = std::max(1, options_.virtual_loss_width);
-        const int total_sims = options_.simulations;
+        const int total_sims = std::max(0, options_.simulations - reused_visits);
 
         std::vector<DescentState> pending;
         pending.reserve(static_cast<size_t>(width));
@@ -366,6 +395,12 @@ public:
         refine_wdl_recursive();
 
         MctsSummary summary = summarize();
+        summary.new_simulations = total_sims;
+        summary.reused_visits = reused_visits;
+        if (options_.keep_tree)
+        {
+            keep_played_subtree(summary);
+        }
 
         if (small_batch_config_.enable_telemetry)
         {
@@ -800,6 +835,53 @@ private:
         {
             const float dirichlet = dirichlet_noise_[i] / sum;
             priors[i].prior = (1.0F - epsilon) * priors[i].prior + epsilon * dirichlet;
+        }
+    }
+
+    // A reused root was expanded by an earlier search as an inner node, without root noise:
+    // mix fresh noise into its moves' priors, as a newly expanded root gets.
+    void noise_reused_root()
+    {
+        TreeNode& root = tree_.nodes.front();
+        std::vector<MovePrior> priors(root.child_priors.size());
+        for (size_t i = 0; i < priors.size(); ++i)
+        {
+            priors[i].prior = root.child_priors[i];
+        }
+        apply_dirichlet_noise(priors);
+        for (size_t i = 0; i < priors.size(); ++i)
+        {
+            root.child_priors[i] = priors[i].prior;
+            tree_.nodes[static_cast<size_t>(root.children[i])].prior = priors[i].prior;
+        }
+    }
+
+    // MctsOptions::keep_tree: hand back the subtree under the move to play, as a tree of its
+    // own rooted at the position after that move. Nothing when that move was never searched.
+    void keep_played_subtree(MctsSummary& summary) const
+    {
+        if (summary.action.empty())
+        {
+            return;
+        }
+        const TreeNode& root = tree_.nodes.front();
+        const bool chess960 = root_board_.chess960();
+        for (size_t i = 0; i < root.children.size(); ++i)
+        {
+            if (chess::uci::moveToUci(root.child_moves[i], chess960) != summary.action)
+            {
+                continue;
+            }
+            const int child = root.children[i];
+            const TreeNode& node = tree_.nodes[static_cast<size_t>(child)];
+            if (node.visit_count == 0 || !node.expanded || node.terminal || node.children.empty())
+            {
+                return;
+            }
+            chess::Board after = root_board_;
+            after.makeMove(root.child_moves[i]);
+            summary.tree = std::make_shared<SearchTree>(extract_subtree(tree_, child, after.zobrist()));
+            return;
         }
     }
 

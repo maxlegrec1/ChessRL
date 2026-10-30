@@ -194,3 +194,32 @@ at most 4% more speed on today's network.
   tree reuse (about 23% fewer evaluations) on the search side.
 - Bigger networks cost much less than their size: the engine's efficiency rises from about 33
   to 83 TFLOP/s between 0.8M and 16M parameters.
+
+## Tree reuse (2026-10-30)
+
+`selfplay.tree_reuse` (off in the recipe until a GPU run measures it): a search hands back the
+subtree of the move it plays (`MctsOptions::keep_tree`), and the game's next search continues it
+(`reuse_tree`): `simulations` becomes the number of visits the root's moves end up with, so only
+the missing ones are run. A full search mixes fresh Dirichlet noise into a reused root. With the
+option off, searches are unchanged (same benchmark digests).
+
+Checks with the CPU benchmark (fake network, sharpness 3):
+
+- `bench_search --mode reusecheck` (412 positions, no root noise, most visited move): after a
+  400-simulation search and its move, a search continuing the kept subtree (400 visits in all)
+  picks the same move as a fresh 400-simulation search in 89.6% of positions, where a fresh
+  800-simulation search does in 72.8%; value gap to the fresh 400 search 0.0063 against 0.0100.
+  The root's moves end with exactly max(400, inherited) visits in every position. On average
+  such a search inherits 161 of its 400 visits.
+- `bench_search --mode selfplay` (the real `SelfPlayWorker`, recipe settings, 256 games, 150 to
+  300 steps, three runs each): 137 to 139 network evaluations per move without reuse, 100 to
+  102 with it (-27%), close to the -23% estimated with run C's network. CPU time per move rises
+  by about 8% (subtree extraction, bigger trees to summarise). Games get longer (145 to 153 plies
+  against 130 to 133): a fast move after a full search now has about 200 visits instead of 50,
+  and a control without reuse but with 200-simulation fast moves also gives 146. The share of
+  games drawn by repetition (10 to 16% with reuse, 15 to 16% without) varies as much between
+  runs as between settings.
+
+Not measured yet: the effect on training. Records from reused searches include visits gathered
+before the root noise was mixed in, and games are longer. A GPU A/B at equal hours decides
+whether `tree_reuse` goes into the recipe.

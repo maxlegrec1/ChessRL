@@ -21,6 +21,7 @@ SOURCES=(
     "$CPP/mcts/common.cpp"
     "$CPP/mcts/small_encoding.cpp"
     "$CPP/policy_vocab.cpp"
+    "$CPP/selfplay.cpp"
 )
 
 "$CXX" -O3 -march=native -DNDEBUG -std=c++17 -DCHESSRL_MCTS_NO_STANDALONE -g -pthread \

@@ -38,6 +38,7 @@ _CPP_FIELDS = (
     "pcr_full_prob",
     "pcr_fast_simulations",
     "quick_policy_temperature",
+    "tree_reuse",
     "fifo_buffer",
 )
 
@@ -53,6 +54,8 @@ _STAT_FIELDS = (
     "full_searches",
     "fast_searches",
     "policy_moves",
+    "simulations_run",
+    "reused_visits",
     "records_written",
     "playthrough_games",
     "playthrough_would_resign",

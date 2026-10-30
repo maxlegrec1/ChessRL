@@ -66,6 +66,8 @@ HistoryStack build_root_history_stack(
     const std::vector<std::string>& moves,
     const chess::Board& root_board);
 
+struct SearchTree;
+
 struct MctsOptions
 {
     SearchInput request;
@@ -92,6 +94,13 @@ struct MctsOptions
     // Seed of the search's random numbers (Dirichlet noise, root move sampling).
     // 0 = a fresh random seed per search.
     std::uint64_t seed{0};
+    // Tree reuse. reuse_tree: the subtree a previous search kept for the move that was
+    // played (MctsSummary::tree), whose root is this search's position. The search continues
+    // it: `simulations` is then the number of visits the root's moves end up with, so only the
+    // missing ones are run. Ignored unless its root_hash is this position's, and when
+    // `simulations` is 0. keep_tree: return the subtree under the move this search plays.
+    std::shared_ptr<SearchTree> reuse_tree;
+    bool keep_tree{false};
 };
 
 MctsOptions parse_cli(int argc, char** argv);
@@ -138,6 +147,8 @@ struct TreeNode
 struct SearchTree
 {
     std::vector<TreeNode> nodes;
+    // Zobrist hash of the root position, set by extract_subtree (0 for a fresh tree).
+    std::uint64_t root_hash{0};
 
     int add_root(const chess::Board& board, const std::vector<std::string>& history);
     void reserve(size_t count);
@@ -147,6 +158,12 @@ struct SearchTree
         float prior,
         const chess::Board& child_board);
 };
+
+// The subtree under `new_root` as a tree of its own (new_root becomes node 0), so the next
+// search can continue it once its move is played. Visits and values are kept; each node's wdl
+// is reset to the running average of its backups (refine_wdl_node overwrites it after a
+// search) and virtual losses to 0. `root_hash` is the zobrist hash of the new root position.
+SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t root_hash);
 
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
 std::vector<std::string> history_to_vector(const HistoryHandle& tail);

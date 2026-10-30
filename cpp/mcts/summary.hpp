@@ -1,12 +1,15 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace chessrl::mcts
 {
+
+struct SearchTree;
 
 struct RolloutDetail
 {
@@ -28,6 +31,11 @@ struct MctsSummary
     // root) so callers can write a "no target" sentinel into the buffer.
     float backed_plies{-1.0F};
     std::vector<RolloutDetail> rollouts;
+    // Simulations this search ran, and visits it inherited from a reused tree.
+    int new_simulations{0};
+    int reused_visits{0};
+    // With MctsOptions::keep_tree: the subtree under the move played, for the next search.
+    std::shared_ptr<SearchTree> tree;
 };
 
 } // namespace chessrl::mcts

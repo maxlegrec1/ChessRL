@@ -88,6 +88,9 @@ class SelfPlayConfig:
     # > 0: while moves are sampled (temperature_plies), cheap moves sample the raw
     # policy at this temperature instead of a pcr_fast_simulations search. 0 = off.
     quick_policy_temperature: float = 0.0
+    # Keep the played move's subtree for the game's next search, which then runs only the
+    # simulations its root is missing.
+    tree_reuse: bool = False
     fifo_buffer: bool = False  # ring buffer instead of random replacement when full
 
 

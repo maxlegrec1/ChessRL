@@ -49,6 +49,9 @@ struct SelfPlayConfig
     // root noise whose position is not written to the buffer. 1.0 = off.
     float pcr_full_prob = 1.0f;
     int pcr_fast_simulations = 100;
+    // Keep the played move's subtree for the game's next search, which then runs only the
+    // simulations its root is missing (MctsOptions::reuse_tree).
+    bool tree_reuse = false;
     // > 0: while the played move is sampled (the first `temperature_plies`), a cheap
     // move skips its search and samples the raw policy at this temperature (one
     // network evaluation). Sampling the visit counts of a 50-sim search played far
@@ -86,6 +89,8 @@ struct SelfPlayStats
     int64_t policy_moves = 0;  // cheap moves sampled from the raw policy (no search)
     int64_t records_written = 0;
     int64_t engine_swaps = 0;
+    int64_t simulations_run = 0;  // simulations searches actually ran
+    int64_t reused_visits = 0;    // visits inherited from reused trees (tree_reuse)
 };
 
 struct SelfPlayMetrics

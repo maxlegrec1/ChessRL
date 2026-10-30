@@ -522,6 +522,48 @@ int SearchTree::add_child(
     return child_index;
 }
 
+SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t root_hash)
+{
+    SearchTree out;
+    out.root_hash = root_hash;
+    if (new_root < 0 || new_root >= static_cast<int>(tree.nodes.size()))
+    {
+        return out;
+    }
+    // Breadth first: a node's new index is its discovery order, so parents precede children.
+    std::vector<int> order{new_root};
+    std::vector<int> new_index(tree.nodes.size(), -1);
+    new_index[static_cast<size_t>(new_root)] = 0;
+    for (size_t k = 0; k < order.size(); ++k)
+    {
+        for (const int child : tree.nodes[static_cast<size_t>(order[k])].children)
+        {
+            new_index[static_cast<size_t>(child)] = static_cast<int>(order.size());
+            order.push_back(child);
+        }
+    }
+    out.nodes.reserve(order.size());
+    for (const int old : order)
+    {
+        TreeNode node = tree.nodes[static_cast<size_t>(old)];
+        node.parent = old == new_root ? -1 : new_index[static_cast<size_t>(node.parent)];
+        for (int& child : node.children)
+        {
+            child = new_index[static_cast<size_t>(child)];
+        }
+        node.virtual_loss = 0.0F;
+        if (node.visit_count > 0)
+        {
+            const float inv = 1.0F / static_cast<float>(node.visit_count);
+            node.wdl = {node.wdl_sum[0] * inv, node.wdl_sum[1] * inv, node.wdl_sum[2] * inv};
+        }
+        out.nodes.push_back(std::move(node));
+    }
+    out.nodes.front().move_from_parent = chess::Move::NO_MOVE;
+    out.nodes.front().prior = 1.0F;
+    return out;
+}
+
 std::optional<float> terminal_value(const chess::Board& board)
 {
     const auto result = board.isGameOver().second;
