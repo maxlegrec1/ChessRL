@@ -192,6 +192,7 @@ class TrainingConfig:
     mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward
     async_engine_build: bool = False  # export networks in the background
+    mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS, trainer low priority
     metrics_path: Path | None = None  # JSONL metrics for the dashboard
     expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 

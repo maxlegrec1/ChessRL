@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -202,7 +203,7 @@ def _open_log(path: Path):
     return fh
 
 
-def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
+def _spawn(cmd: list[str], log_path: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
     log_fh = _open_log(log_path)
     return subprocess.Popen(
         cmd,
@@ -210,7 +211,62 @@ def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        env=env,
     )
+
+
+def mps_child_env(
+    base: dict[str, str], pipe_dir: str, log_dir: str, trainer: bool
+) -> dict[str, str]:
+    """Environment of a process under the run's MPS daemon; the trainer at below-normal priority."""
+    env = dict(base, CUDA_MPS_PIPE_DIRECTORY=pipe_dir, CUDA_MPS_LOG_DIRECTORY=log_dir)
+    if trainer:
+        env["CUDA_MPS_CLIENT_PRIORITY"] = "1"
+    else:
+        env.pop("CUDA_MPS_CLIENT_PRIORITY", None)
+    return env
+
+
+def _start_mps() -> tuple[str, str] | None:
+    """Start an MPS daemon with its own pipe directory (other GPU processes on the box keep
+    their own contexts) and check that a client can connect. Returns (pipe_dir, log_dir), or
+    None after a warning when MPS is unavailable."""
+    control = shutil.which("nvidia-cuda-mps-control")
+    if control is None:
+        print("[launcher] mps: nvidia-cuda-mps-control not found; running without MPS", flush=True)
+        return None
+    base = Path(f"/tmp/chessrl-mps-{os.getpid()}")  # short: the pipe path has a length limit
+    pipe_dir, log_dir = str(base / "pipe"), str(base / "log")
+    Path(pipe_dir).mkdir(parents=True, exist_ok=True)
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    env = mps_child_env(dict(os.environ), pipe_dir, log_dir, trainer=False)
+    if subprocess.run([control, "-d"], env=env).returncode != 0:
+        print("[launcher] mps: the daemon did not start; running without MPS", flush=True)
+        return None
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch; torch.zeros(1, device='cuda'); torch.cuda.synchronize()",
+        ],
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    if probe.returncode != 0:
+        print("[launcher] mps: a test client failed; running without MPS", flush=True)
+        _stop_mps((pipe_dir, log_dir))
+        return None
+    print(f"[launcher] mps: daemon up ({pipe_dir}), trainer at below-normal priority", flush=True)
+    return pipe_dir, log_dir
+
+
+def _stop_mps(mps: tuple[str, str]) -> None:
+    control = shutil.which("nvidia-cuda-mps-control")
+    if control is None:
+        return
+    env = mps_child_env(dict(os.environ), mps[0], mps[1], trainer=False)
+    subprocess.run([control], input=b"quit\n", env=env)
 
 
 def _terminate_group(proc: subprocess.Popen, sig: int) -> None:
@@ -278,9 +334,15 @@ def main() -> int:
         print(f"Foreground: {name} (Ctrl-C to stop)\n", flush=True)
         os.execvp(cmd[0], cmd)  # does not return
 
+    from src.train.config import load_config
+
+    mps = _start_mps() if len(plan) == 2 and load_config(cfg_path).mps else None
     children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
-        children.append((name, _spawn(cmd, log), log))
+        env = None
+        if mps is not None:
+            env = mps_child_env(dict(os.environ), mps[0], mps[1], trainer=name == "training")
+        children.append((name, _spawn(cmd, log, env), log))
 
     print(f"\nRun directory: {run_dir}")
     print(f"Resolved config: {cfg_path}")
@@ -337,6 +399,8 @@ def main() -> int:
     finally:
         for name, proc, _ in children:
             print(f"[launcher] {name} final rc={proc.poll()}", flush=True)
+        if mps is not None:
+            _stop_mps(mps)
 
     return exit_code
 
