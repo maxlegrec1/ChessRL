@@ -197,7 +197,7 @@ at most 4% more speed on today's network.
 
 ## Tree reuse (2026-10-30)
 
-`selfplay.tree_reuse` (off in the recipe until a GPU run measures it): a search hands back the
+`selfplay.tree_reuse` (in the recipe since 2026-10-30): a search hands back the
 subtree of the move it plays (`MctsOptions::keep_tree`), and the game's next search continues it
 (`reuse_tree`): `simulations` becomes the number of visits the root's moves end up with, so only
 the missing ones are run. A full search mixes fresh Dirichlet noise into a reused root. With the
@@ -236,6 +236,6 @@ single-position network call. The GPU does the same work per batch (1.05 ms) but
 batches per second, so it was waiting on the search part of the time. Games per second rise
 less (+39%) because games are longer.
 
-Not measured yet: the effect on training. Records from reused searches include visits gathered
-before the root noise was mixed in, and games are longer. A training A/B at equal hours decides
-whether `tree_reuse` goes into the recipe.
+Not measured: the effect on training. Records from reused searches include visits gathered
+before the root noise was mixed in, and games are longer. The recipe turned it on without a
+training A/B (2026-10-30), for the self-play speed.

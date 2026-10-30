@@ -47,7 +47,7 @@ Between steps the Python loop looks for a new engine and, every 30 s, appends to
 - *Playout-cap randomisation* (KataGo's idea: vary the search size from move to move): a move gets
   a full, recorded search of `simulations` (400) with probability `pcr_full_prob` (0.25), else an
   unrecorded `pcr_fast_simulations` (50) search without noise that only moves the game forward.
-- *Tree reuse* (`tree_reuse`, off in the recipe): the search keeps the subtree of the move played
+- *Tree reuse* (`tree_reuse`, on in the recipe): the search keeps the subtree of the move played
   and the game's next search continues it, so `simulations` is the number of visits the root's
   moves end up with and only the missing ones are run (a fast move after a full search is
   usually free). A full search mixes fresh Dirichlet noise into a reused root.

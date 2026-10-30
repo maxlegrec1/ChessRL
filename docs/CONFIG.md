@@ -149,7 +149,7 @@ ply.
 | `simulations` | 400 | 800 | Simulations of a full search. |
 | `pcr_full_prob` | 0.25 | 1.0 | Playout-cap randomisation: probability that a move gets a full search, which is recorded and gets Dirichlet noise. 1.0 = every move. |
 | `pcr_fast_simulations` | 50 | 100 | Simulations of the other moves (not recorded, no noise). |
-| `tree_reuse` | false | false | Keep the subtree of the move played for the game's next search, which continues it: `simulations` (or `pcr_fast_simulations`) is then the number of visits the root's moves end up with, and only the missing ones are run. A full search mixes fresh Dirichlet noise into a reused root. Not for policy-sampled moves. |
+| `tree_reuse` | true | false | Keep the subtree of the move played for the game's next search, which continues it: `simulations` (or `pcr_fast_simulations`) is then the number of visits the root's moves end up with, and only the missing ones are run. A full search mixes fresh Dirichlet noise into a reused root. Not for policy-sampled moves. |
 | `quick_policy_temperature` | *unset* | 0.0 | Optional. When > 0, fast moves during the sampling phase (`temperature_plies`, root temperature > 0) skip the search and sample the raw policy at this temperature (one network call). 0 = off. |
 | `cpuct` | 0.65 | 0.65 | PUCT exploration constant. |
 | `temperature` | 1.3 | 1.3 | Prior temperature: priors are softmax(logits / `temperature`) at every node. 0 puts the whole prior on the top move. |
