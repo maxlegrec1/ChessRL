@@ -37,6 +37,7 @@
 #include "include/trt_utils.hpp"
 #include "mcts/expand_kernel.hpp"
 #include "mcts/small_layout.hpp"
+#include "net/encoder_net.hpp"
 
 namespace chessrl::mcts::single
 {
@@ -59,6 +60,23 @@ using chessrl::trt::volume;
 using chessrl::trt::resolve_engine_path;
 
 constexpr float kIllegalScore = -1e9F;
+
+void halfs_to_floats(const std::uint16_t* src, float* dst, size_t n)
+{
+    size_t i = 0;
+#if defined(__F16C__)
+    for (; i + 8 <= n; i += 8)
+    {
+        _mm256_storeu_ps(dst + i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i))));
+    }
+#endif
+    for (; i < n; ++i)
+    {
+        __half h;
+        std::memcpy(&h, src + i, sizeof(h));
+        dst[i] = __half2float(h);
+    }
+}
 
 // Volume excluding the batch dimension (works for both static and dynamic shapes).
 size_t normalized_tensor_volume(const nvinfer1::Dims& dims)
@@ -777,6 +795,8 @@ struct SmallBatchRunner::Impl
         PinnedBuffer hostValue;
         PinnedBuffer hostMlh;
         PinnedBuffer hostMlhQ;
+        ResizableDeviceBuffer outDevice;     // fused network: one record per position
+        PinnedBuffer hostOut;
         // CUDA-graph state. One frozen-shape IExecutionContext + one captured
         // graph per bucket. The contexts are shape-pinned (created once at
         // their bucket size, never reshaped) so the kernels/internal device
@@ -790,7 +810,11 @@ struct SmallBatchRunner::Impl
 
     explicit Impl(SmallBatchConfig cfg)
         : config(std::move(cfg))
-        , ctx(getSmallEngineContext(config.engine_path))
+        , ctx(chessrl::net::is_cnet_path(config.engine_path) ? nullptr
+                                                              : &getSmallEngineContext(config.engine_path))
+        , fused_(chessrl::net::is_cnet_path(config.engine_path)
+                     ? std::make_unique<chessrl::net::EncoderNet>(config.engine_path)
+                     : nullptr)
         , flush_threshold_(static_cast<size_t>(config.max_batch_size))
     {
         if (config.max_batch_size <= 0)
@@ -932,9 +956,14 @@ struct SmallBatchRunner::Impl
         try
         {
             auto start_time = std::chrono::steady_clock::now();
+            if (fused_)
+            {
+                process_fused(w, work, start_time);
+                return;
+            }
             if (!w.exec)
             {
-                w.exec.reset(ctx.engine().createExecutionContext());
+                w.exec.reset(ctx->engine().createExecutionContext());
                 if (!w.exec)
                 {
                     throw std::runtime_error("Failed to create small-model batch execution context.");
@@ -945,17 +974,17 @@ struct SmallBatchRunner::Impl
                 w.stream = std::make_unique<CudaStream>();
             }
 
-            auto& engine = ctx.engine();
-            const auto inputType = engine.getTensorDataType(ctx.inputName().c_str());
-            const auto policyType = engine.getTensorDataType(ctx.policyName().c_str());
-            const auto valueType = engine.getTensorDataType(ctx.valueName().c_str());
-            const bool hasMlh = ctx.hasMlh();
-            const bool hasMlhQ = ctx.hasMlhQ();
+            auto& engine = ctx->engine();
+            const auto inputType = engine.getTensorDataType(ctx->inputName().c_str());
+            const auto policyType = engine.getTensorDataType(ctx->policyName().c_str());
+            const auto valueType = engine.getTensorDataType(ctx->valueName().c_str());
+            const bool hasMlh = ctx->hasMlh();
+            const bool hasMlhQ = ctx->hasMlhQ();
             const auto mlhType = hasMlh
-                ? engine.getTensorDataType(ctx.mlhName().c_str())
+                ? engine.getTensorDataType(ctx->mlhName().c_str())
                 : nvinfer1::DataType::kFLOAT;
             const auto mlhQType = hasMlhQ
-                ? engine.getTensorDataType(ctx.mlhQName().c_str())
+                ? engine.getTensorDataType(ctx->mlhQName().c_str())
                 : nvinfer1::DataType::kFLOAT;
 
             const size_t actualCount = work.size();
@@ -965,7 +994,7 @@ struct SmallBatchRunner::Impl
             const size_t valueElements = static_cast<size_t>(kSmallValueSize);
             const size_t mlhElements = 1;
 
-            nvinfer1::Dims inputDims = engine.getTensorShape(ctx.inputName().c_str());
+            nvinfer1::Dims inputDims = engine.getTensorShape(ctx->inputName().c_str());
             if (inputDims.nbDims <= 0)
             {
                 throw std::runtime_error("Small-model input tensor has unexpected rank.");
@@ -1045,13 +1074,13 @@ struct SmallBatchRunner::Impl
             }
 
             auto bind_addresses = [&](nvinfer1::IExecutionContext* ex) -> bool {
-                bool ok = ex->setTensorAddress(ctx.inputName().c_str(), w.inputDevice.data())
-                    && ex->setTensorAddress(ctx.policyName().c_str(), w.policyDevice.data())
-                    && ex->setTensorAddress(ctx.valueName().c_str(), w.valueDevice.data());
+                bool ok = ex->setTensorAddress(ctx->inputName().c_str(), w.inputDevice.data())
+                    && ex->setTensorAddress(ctx->policyName().c_str(), w.policyDevice.data())
+                    && ex->setTensorAddress(ctx->valueName().c_str(), w.valueDevice.data());
                 if (ok && hasMlh)
-                    ok = ex->setTensorAddress(ctx.mlhName().c_str(), w.mlhDevice.data());
+                    ok = ex->setTensorAddress(ctx->mlhName().c_str(), w.mlhDevice.data());
                 if (ok && hasMlhQ)
-                    ok = ex->setTensorAddress(ctx.mlhQName().c_str(), w.mlhQDevice.data());
+                    ok = ex->setTensorAddress(ctx->mlhQName().c_str(), w.mlhQDevice.data());
                 return ok;
             };
 
@@ -1077,12 +1106,12 @@ struct SmallBatchRunner::Impl
                 auto& gctx = w.graph_ctx[bucket];
                 if (!gctx)
                 {
-                    gctx.reset(ctx.engine().createExecutionContext());
+                    gctx.reset(ctx->engine().createExecutionContext());
                     if (!gctx)
                         throw std::runtime_error("Failed to create graph exec context.");
-                    nvinfer1::Dims gd = engine.getTensorShape(ctx.inputName().c_str());
+                    nvinfer1::Dims gd = engine.getTensorShape(ctx->inputName().c_str());
                     gd.d[0] = bucket;
-                    if (!gctx->setInputShape(ctx.inputName().c_str(), gd))
+                    if (!gctx->setInputShape(ctx->inputName().c_str(), gd))
                         throw std::runtime_error("Failed to set graph context input shape.");
                     if (!bind_addresses(gctx.get()))
                         throw std::runtime_error("Failed to bind graph context addresses.");
@@ -1159,7 +1188,7 @@ struct SmallBatchRunner::Impl
             if (!use_graph)
             {
                 // Original dynamic-shape path (graphs disabled).
-                if (!w.exec->setInputShape(ctx.inputName().c_str(), inputDims))
+                if (!w.exec->setInputShape(ctx->inputName().c_str(), inputDims))
                     throw std::runtime_error("Failed to set small-model batch input shape.");
                 if (!submit_input(w.stream->get()))
                     throw std::runtime_error("submit_input (no-graph) failed.");
@@ -1306,6 +1335,67 @@ struct SmallBatchRunner::Impl
         }
     }
 
+    // The fused network (cpp/net): the packed positions in, one kernel, one record per
+    // position out (FP16 policy logits, FP32 WDL, mlh, mlh_q). Batches run at their exact
+    // size, so there are no padded graph buckets.
+    void process_fused(Worker& w, std::vector<SmallPending>& work,
+                       std::chrono::steady_clock::time_point start_time)
+    {
+        using chessrl::net::kAuxOffset;
+        using chessrl::net::kRecordBytes;
+        if (!w.stream) w.stream = std::make_unique<CudaStream>();
+        const size_t n = work.size();
+        const size_t cap = static_cast<size_t>(config.max_batch_size);
+        w.packedDevice.ensure(cap * sizeof(SmallPackedPosition));
+        w.hostPacked.ensure(cap * sizeof(SmallPackedPosition));
+        w.outDevice.ensure(cap * kRecordBytes);
+        w.hostOut.ensure(cap * kRecordBytes);
+        auto* hp = static_cast<SmallPackedPosition*>(w.hostPacked.data());
+        for (size_t i = 0; i < n; ++i) hp[i] = *work[i].position;
+
+        const cudaStream_t s = w.stream->get();
+        cudaError_t err = cudaMemcpyAsync(w.packedDevice.data(), hp, n * sizeof(SmallPackedPosition),
+                                          cudaMemcpyHostToDevice, s);
+        if (err == cudaSuccess)
+        {
+            err = fused_->forward(static_cast<const SmallPackedPosition*>(w.packedDevice.data()), nullptr,
+                                  static_cast<int>(n), w.outDevice.data(), s);
+        }
+        if (err == cudaSuccess)
+        {
+            err = cudaMemcpyAsync(w.hostOut.data(), w.outDevice.data(), n * kRecordBytes,
+                                  cudaMemcpyDeviceToHost, s);
+        }
+        if (err == cudaSuccess) err = cudaStreamSynchronize(s);
+        if (err != cudaSuccess)
+        {
+            throw std::runtime_error(std::string("fused network batch failed: ") + cudaGetErrorString(err));
+        }
+        if (telemetry_enabled_)
+        {
+            const double infer_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - start_time)
+                                        .count();
+            std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+            batches_ += 1;
+            positions_ += n;
+            total_infer_ms_ += infer_ms;
+        }
+        const auto* rec = static_cast<const unsigned char*>(w.hostOut.data());
+        for (size_t i = 0; i < n; ++i, rec += kRecordBytes)
+        {
+            SmallPolicyValue result;
+            result.policy_logits.resize(kSmallPolicySize);
+            halfs_to_floats(reinterpret_cast<const std::uint16_t*>(rec), result.policy_logits.data(),
+                            kSmallPolicySize);
+            const auto* aux = reinterpret_cast<const float*>(rec + kAuxOffset);
+            result.wdl = {aux[0], aux[1], aux[2]};
+            result.mlh = aux[3];
+            result.mlh_q = aux[4];
+            work[i].promise->set_value(std::move(result));
+        }
+    }
+
     size_t pending_size() const
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1367,7 +1457,8 @@ struct SmallBatchRunner::Impl
     }
 
     SmallBatchConfig config;
-    SmallEngineContext& ctx;
+    SmallEngineContext* ctx;                          // TensorRT engine (.trt), or null
+    std::unique_ptr<chessrl::net::EncoderNet> fused_;  // fused network (.cnet), or null
     size_t flush_threshold_{0};
     // Per-worker IExecutionContext + CUDA stream + buffers. See Worker struct.
     // Stable storage via unique_ptr so worker threads can hold raw references.

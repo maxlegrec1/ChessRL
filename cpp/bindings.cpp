@@ -1,9 +1,12 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <cstring>
 
 #include "chess-library/include/chess.hpp"
 #include "inference.hpp"
+#include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
 #include "mcts/common.hpp"
@@ -11,6 +14,7 @@
 #include "mcts/expand_kernel.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
+#include "net/encoder_net.hpp"
 #include "selfplay.hpp"
 
 namespace py = pybind11;
@@ -33,6 +37,44 @@ py::dict summary_to_python(const chessrl::mcts::MctsSummary& summary)
     result["q_values"] = std::move(q_values);
 
     return result;
+}
+
+// Fused-network output records as numpy arrays: policy logits [B, 1929], value WDL
+// [B, 3], mlh [B], mlh_q [B] (the four outputs of the old TensorRT engine).
+py::dict records_to_python(const std::vector<unsigned char>& records, int batch)
+{
+    using chessrl::net::kAuxOffset;
+    using chessrl::net::kPolicySize;
+    using chessrl::net::kRecordBytes;
+    py::array_t<float> policy({batch, kPolicySize});
+    py::array_t<float> wdl({batch, 3});
+    py::array_t<float> mlh(batch);
+    py::array_t<float> mlh_q(batch);
+    auto p = policy.mutable_unchecked<2>();
+    auto v = wdl.mutable_unchecked<2>();
+    auto m = mlh.mutable_unchecked<1>();
+    auto q = mlh_q.mutable_unchecked<1>();
+    for (int b = 0; b < batch; ++b)
+    {
+        const unsigned char* rec = records.data() + static_cast<size_t>(b) * kRecordBytes;
+        for (int i = 0; i < kPolicySize; ++i)
+        {
+            __half h;
+            std::memcpy(&h, rec + 2 * i, sizeof(h));
+            p(b, i) = __half2float(h);
+        }
+        float aux[5];
+        std::memcpy(aux, rec + kAuxOffset, sizeof(aux));
+        for (int j = 0; j < 3; ++j) v(b, j) = aux[j];
+        m(b) = aux[3];
+        q(b) = aux[4];
+    }
+    py::dict out;
+    out["policy"] = policy;
+    out["value"] = wdl;
+    out["mlh"] = mlh;
+    out["mlh_q"] = mlh_q;
+    return out;
 }
 
 } // namespace
@@ -159,6 +201,72 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("fen"),
         py::arg("moves"),
         "Pack + GPU-expand (fp32); must match encode_position_packed_roundtrip.");
+
+    m.def(
+        "fused_forward_dense",
+        [](const std::string& path, py::array_t<float, py::array::c_style | py::array::forcecast> planes) {
+            using chessrl::mcts::single::kPackElems;
+            if (planes.size() % kPackElems != 0)
+                throw std::runtime_error("fused_forward_dense: expected [B, 8, 8, 111] planes");
+            const int batch = static_cast<int>(planes.size() / kPackElems);
+            std::vector<unsigned char> records;
+            {
+                py::gil_scoped_release release;
+                records = chessrl::net::EncoderNet(path).run_dense(planes.data(), batch);
+            }
+            return records_to_python(records, batch);
+        },
+        py::arg("path"),
+        py::arg("planes"),
+        "Run a .cnet network on dense planes [B, 8, 8, 111]: policy, value, mlh, mlh_q.");
+
+    m.def(
+        "fused_forward_positions",
+        [](const std::string& path, const std::vector<std::string>& fens,
+           const std::vector<std::vector<std::string>>& moves) {
+            if (fens.size() != moves.size())
+                throw std::runtime_error("fused_forward_positions: one move list per FEN");
+            std::vector<chessrl::mcts::single::SmallPackedPosition> packed;
+            packed.reserve(fens.size());
+            for (size_t i = 0; i < fens.size(); ++i)
+            {
+                const std::string start = fens[i].empty() ? std::string(chess::constants::STARTPOS) : fens[i];
+                chess::Board board(start);
+                for (const auto& mv_uci : moves[i])
+                {
+                    chess::Move mv = chess::uci::uciToMove(board, mv_uci);
+                    if (mv == chess::Move::NO_MOVE)
+                        throw std::runtime_error("fused_forward_positions: bad move " + mv_uci);
+                    board.makeMove(mv);
+                }
+                const auto stack = chessrl::mcts::build_root_history_stack(start, moves[i], board);
+                packed.push_back(chessrl::mcts::single::pack_small_position(board, stack));
+            }
+            const int batch = static_cast<int>(packed.size());
+            std::vector<unsigned char> records;
+            {
+                py::gil_scoped_release release;
+                records = chessrl::net::EncoderNet(path).run_packed(packed.data(), batch);
+            }
+            return records_to_python(records, batch);
+        },
+        py::arg("path"),
+        py::arg("fens"),
+        py::arg("moves"),
+        "Run a .cnet network on packed positions (FEN + moves, as self-play packs them).");
+
+    m.def(
+        "fused_benchmark",
+        [](const std::string& path, int batch, int iterations, int streams) {
+            py::gil_scoped_release release;
+            const chessrl::net::EncoderNet net(path);
+            return chessrl::net::benchmark(net, batch, iterations, streams);
+        },
+        py::arg("path"),
+        py::arg("batch"),
+        py::arg("iterations") = 200,
+        py::arg("streams") = 1,
+        "Fused-network throughput (positions/s) on the start position.");
 
     m.def(
         "small_generate_moves",

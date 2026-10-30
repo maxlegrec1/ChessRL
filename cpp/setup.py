@@ -60,6 +60,7 @@ ext_modules = [
             "mcts/mcts_small.cpp",
             "mcts/single_inference.cpp",
             "mcts/small_encoding.cpp",
+            "net/encoder_net.cpp",
             "selfplay.cpp",
         ],
         include_dirs=[
@@ -84,7 +85,7 @@ ext_modules = [
     )
 ]
 
-CU_SOURCES = ["mcts/expand_kernel.cu"]
+CU_SOURCES = ["mcts/expand_kernel.cu", "net/encoder_kernel.cu"]
 
 
 class build_ext(_pybind_build_ext):
