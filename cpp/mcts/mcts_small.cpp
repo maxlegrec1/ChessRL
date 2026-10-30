@@ -293,7 +293,7 @@ public:
 
         std::vector<DescentState> pending;
         pending.reserve(static_cast<size_t>(width));
-        std::vector<single::BatchTicket<SmallPolicyValue>> tickets;
+        std::vector<single::SmallBatchRunner::Ticket> tickets;
         tickets.reserve(static_cast<size_t>(width));
         std::vector<SmallPolicyValue> cached_evals;
         cached_evals.reserve(static_cast<size_t>(width));
@@ -350,11 +350,17 @@ public:
                     }
                 }
                 tickets.push_back(small_batch_runner_->enqueue(
-                    acquire_small_encoding(d.leaf_history, d.leaf_board)));
+                    acquire_small_encoding(d.leaf_history, d.leaf_board), evals_));
             }
             if (ph) g_ph_enqueue_ns.fetch_add(now_ns() - t_p2, std::memory_order_relaxed);
 
             // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----
+            if (!tickets.empty())
+            {
+                const std::uint64_t t_w = ph ? now_ns() : 0;
+                evals_.wait();  // one wake-up when all this round's evaluations are back
+                if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
+            }
             size_t ticket_idx = 0;
             for (size_t i = 0; i < pending.size(); ++i)
             {
@@ -366,9 +372,7 @@ public:
                 }
                 else
                 {
-                    const std::uint64_t t_w = ph ? now_ns() : 0;
                     eval = tickets[ticket_idx++].get();
-                    if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
                     if (cache_)
                     {
                         const uint64_t hash = compute_cache_key(
@@ -620,7 +624,8 @@ private:
         if (!cache_hit)
         {
             auto ticket = small_batch_runner_->enqueue(
-                acquire_small_encoding(history, board_state));
+                acquire_small_encoding(history, board_state), evals_);
+            evals_.wait();
             eval = ticket.get();
             if (cache_)
             {
@@ -1159,6 +1164,7 @@ private:
     const std::unordered_map<std::string, int>& vocab_index_;
     single::SmallBatchConfig small_batch_config_;
     std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
+    single::EvalGroup evals_;  // this search's evaluations in flight
     std::shared_ptr<TranspositionTable> cache_;
     std::mt19937 rng_;
     std::vector<int> path_buffer_;

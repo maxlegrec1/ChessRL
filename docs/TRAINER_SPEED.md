@@ -18,6 +18,7 @@ fused network and tree reuse, 12 minutes each, the last 8 measured; `docs/PERF.m
 | both under MPS | 1,662 | 4.06 | 0.22 s | 5.0 | 9% | 98% |
 | MPS, trainer at below-normal priority | 1,964 | 3.46 | 0.28 s | 3.65 | 0% | 99% |
 | same, through the launcher, FP16 accumulation in self-play (today's recipe) | 1,994 | 4.86 | 0.17 s | 5.0 | 16% | 93% |
+| + zero-copy hand-back in self-play (today's recipe) | 2,347 | 4.65 | 0.21 s | 4.1 | 0% | 98% |
 
 Without MPS the trainer keeps up (it reaches the recipe's 5 samples per record, `data.target_k`,
 and waits half the time), but the two processes take turns on the GPU and self-play makes a
@@ -25,9 +26,9 @@ third fewer records. Under MPS their kernels share the GPU; with the trainer at 
 self-play loses only 2% and the trainer gets what is left, 3.46 steps/s, not enough for 5
 samples per record at 1,964 records/s (that needs 4.8). From there every GPU-second taken off a
 step is more training at no cost to self-play. FP16 accumulation in the self-play kernel freed
-enough (last row): the recipe now reaches 5 samples per record with the trainer waiting 16% of
-the time. The items below are for when self-play gets faster again or the network bigger: the
-goal stays fewer GPU-seconds per step.
+enough: the recipe reached 5 samples per record with the trainer waiting 16% of the time. Then the
+zero-copy hand-back made self-play 18% faster (last row), and the trainer is the limit again at
+4.1 samples per record: it needs 5.7 steps/s to keep up. The items below are how to get there.
 
 The step is not compute-bound. The network is small (0.81M parameters, about 0.6 TFLOP per
 step of 2,048 positions, forward and backward), and at 0.14 s (sharing the GPU in turns) that

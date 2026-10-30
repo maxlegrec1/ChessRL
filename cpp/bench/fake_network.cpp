@@ -133,7 +133,7 @@ struct SmallBatchRunner::Impl
     struct Request
     {
         std::shared_ptr<const SmallPackedPosition> position;
-        std::promise<SmallPolicyValue> promise;
+        std::shared_ptr<EvalSlot> slot;
     };
 
     std::mutex mutex;
@@ -182,7 +182,9 @@ struct SmallBatchRunner::Impl
             std::this_thread::sleep_for(std::chrono::microseconds(cfg.delay_us));
             for (auto& r : batch)
             {
-                r.promise.set_value(bench::detail::evaluate(*r.position));
+                r.slot->value = bench::detail::evaluate(*r.position);
+                r.slot->delivered = true;
+                r.slot->group->done();
             }
             bench::detail::network().batches.fetch_add(1, std::memory_order_relaxed);
             lock.lock();
@@ -202,18 +204,23 @@ SmallBatchRunner::SmallBatchRunner(SmallBatchConfig /*config*/)
     }
 }
 
-SmallBatchRunner::Ticket SmallBatchRunner::enqueue(std::shared_ptr<const SmallPackedPosition> position)
+SmallBatchRunner::Ticket SmallBatchRunner::enqueue(std::shared_ptr<const SmallPackedPosition> position,
+                                                  EvalGroup& group)
 {
-    std::promise<SmallPolicyValue> promise;
-    Ticket ticket(promise.get_future().share());
+    auto slot = std::make_shared<EvalSlot>();
+    slot->group = &group;
+    group.add();
+    Ticket ticket(slot);
     if (bench::detail::network().config.delay_us <= 0)
     {
-        promise.set_value(bench::detail::evaluate(*position));
+        slot->value = bench::detail::evaluate(*position);
+        slot->delivered = true;
+        group.done();
         return ticket;
     }
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
-        impl_->queue.push_back({std::move(position), std::move(promise)});
+        impl_->queue.push_back({std::move(position), std::move(slot)});
     }
     impl_->cv.notify_one();
     return ticket;

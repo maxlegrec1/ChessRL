@@ -400,3 +400,24 @@ hand-back per position grows to 4 µs). A first fix, the search thread allocatin
 the worker only fills it, was slower (1,851 against 1,999) and was dropped. What should work:
 each search thread reads its record directly from the worker's pinned output buffer (the worker
 writes nothing per position), and is woken once per batch rather than once per position.
+
+**Zero-copy hand-back** (the next commit): each search thread reads its record straight from the
+worker's pinned output buffer and converts it on its own core, and the worker wakes each search
+once, when the last of its positions is back (`EvalGroup`), instead of once per position. The
+worker never waits for a buffer to be read (a search holds the records already back while it
+waits for the rest of its round, so waiting deadlocked the first version); with no free buffer
+among its 16 it hands that batch back by value. Same digests on the CPU benchmark, in the
+threaded mode too (128 threads, batches answered from another thread). Same box, today's recipe,
+4 minutes per run:
+
+| | recorded positions/s | evaluations/s | GPU and copies | handed back | waiting | cores |
+|---|---|---|---|---|---|---|
+| previous hand-back | 2,010.3, 2,062.0 | 802k | 0.168 ms | 0.31 ms | 0.06 ms | 15.5 |
+| **zero-copy** | **2,373.6, 2,410.2** | 942k | 0.197 ms | 0.06 ms | 0.11 ms | 21.6 |
+| zero-copy, 6 workers | 2,217.0, 2,210.2 | 870k | 0.199 ms | 0.05 ms | 0.22 ms | 22.2 |
+
++17.5%, ×4.47 the round-2 recipe on this box. The workers now wait 30% of the time; the GPU is
+busier (more batches overlap, 0.197 ms per batch) and the search threads use more CPU (they
+convert their own records). In a real run through the launcher self-play makes 2,347 records/s
+(1,994 before), and the trainer is the limit again: 4.65 steps/s, 4.1 samples per record instead
+of 5 (`docs/TRAINER_SPEED.md`).

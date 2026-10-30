@@ -2,6 +2,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -21,12 +22,6 @@
 #include <utility>
 #include <vector>
 
-#include "cuda_fp16.h"
-
-#if defined(__F16C__)
-#include <immintrin.h>
-#endif
-
 #include "mcts/small_layout.hpp"
 #include "net/encoder_net.hpp"
 
@@ -44,23 +39,6 @@ std::string resolve_path(const std::string& path)
     catch (...)
     {
         return path;
-    }
-}
-
-void halfs_to_floats(const std::uint16_t* src, float* dst, size_t n)
-{
-    size_t i = 0;
-#if defined(__F16C__)
-    for (; i + 8 <= n; i += 8)
-    {
-        _mm256_storeu_ps(dst + i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i))));
-    }
-#endif
-    for (; i < n; ++i)
-    {
-        __half h;
-        std::memcpy(&h, src + i, sizeof(h));
-        dst[i] = __half2float(h);
     }
 }
 
@@ -226,9 +204,11 @@ void fulfillWithException(std::vector<Pending>& work, const std::exception_ptr& 
 {
     for (auto& item : work)
     {
-        if (item.promise)
+        if (item.slot && !item.slot->delivered)
         {
-            item.promise->set_exception(ep);
+            item.slot->error = ep;
+            item.slot->delivered = true;
+            item.slot->group->done();
         }
     }
 }
@@ -245,8 +225,20 @@ struct SmallBatchRunner::Impl
         // (the measured 2.2× regression). A pointer keeps enqueue/drain
         // pointer-sized, like the original dense vector-handle path.
         std::shared_ptr<const SmallPackedPosition> position;
-        std::shared_ptr<std::promise<SmallPolicyValue>> promise;
+        std::shared_ptr<EvalSlot> slot;
     };
+
+    // A pinned buffer the GPU copies a batch's records into; the search threads read their
+    // records from it directly. `readers` counts the records not yet taken: the worker reuses
+    // the buffer only once it is back to 0. It never waits for one: a search holds the records
+    // already back while it waits for the rest of its round, so waiting could deadlock. When no
+    // buffer is free, the batch goes through `spill` and its results are handed back by value.
+    struct OutputBuffer
+    {
+        PinnedBuffer host;
+        std::atomic<int> readers{0};
+    };
+    static constexpr int kOutputBuffers = 16;  // per worker
 
     // Per-worker state: a CUDA stream and the staging buffers. Workers pop sub-batches
     // from the shared queue independently, so while one batch runs on the GPU the next
@@ -258,7 +250,9 @@ struct SmallBatchRunner::Impl
         ResizableDeviceBuffer packedDevice;  // ~776 B per position
         PinnedBuffer hostPacked;
         ResizableDeviceBuffer outDevice;     // one kRecordBytes record per position
-        PinnedBuffer hostOut;
+        std::array<OutputBuffer, kOutputBuffers> outputs;
+        int next_output{0};
+        PinnedBuffer spill;                  // a batch's records when no output buffer is free
         cudaEvent_t done{nullptr};           // blocking-sync event (CHESSRL_BLOCKING_SYNC)
     };
 
@@ -309,26 +303,50 @@ struct SmallBatchRunner::Impl
                 cudaEventDestroy(w->done);
             }
         }
+        // Results still referring to the output buffers must be taken (or dropped) first; the
+        // searches do so before the runner goes away. If one never is, leak the buffers rather
+        // than free memory a result still points to.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (auto& w : workers_)
+        {
+            for (auto& out : w->outputs)
+            {
+                while (out.readers.load(std::memory_order_acquire) > 0)
+                {
+                    if (std::chrono::steady_clock::now() > deadline)
+                    {
+                        std::cerr << "[runner] results still pending at shutdown; keeping their buffers\n";
+                        w.release();
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+                if (!w) break;
+            }
+        }
         if (telemetry_enabled_ && batches_ > 0)
         {
             const double b = static_cast<double>(batches_);
             std::cerr << "[runner] " << batches_ << " batches, " << static_cast<double>(positions_) / b
                       << " positions each; per batch: GPU and copies " << total_infer_ms_ / b
                       << " ms, results handed back " << total_handback_ms_ / b << " ms, waiting for work "
-                      << total_wait_ms_ / b << " ms (" << workers_.size() << " workers)\n";
+                      << total_wait_ms_ / b << " ms (" << workers_.size() << " workers, " << spilled_
+                      << " batches handed back by value)\n";
         }
     }
 
-    BatchTicket<SmallPolicyValue> enqueue(std::shared_ptr<const SmallPackedPosition> position)
+    EvalTicket enqueue(std::shared_ptr<const SmallPackedPosition> position, EvalGroup& group)
     {
-        auto promise = std::make_shared<std::promise<SmallPolicyValue>>();
-        auto future = promise->get_future().share();
+        auto slot = std::make_shared<EvalSlot>();
+        slot->group = &group;
+        group.add();
+        EvalTicket ticket(slot);
         {
             std::lock_guard<std::mutex> lock(mutex);
-            queue.emplace_back(SmallPending{std::move(position), std::move(promise)});
+            queue.emplace_back(SmallPending{std::move(position), std::move(slot)});
         }
         cv.notify_one();
-        return BatchTicket<SmallPolicyValue>(std::move(future));
+        return ticket;
     }
 
     void process(Worker& w)
@@ -371,7 +389,18 @@ struct SmallBatchRunner::Impl
         w.packedDevice.ensure(cap * sizeof(SmallPackedPosition));
         w.hostPacked.ensure(cap * sizeof(SmallPackedPosition));
         w.outDevice.ensure(cap * kRecordBytes);
-        w.hostOut.ensure(cap * kRecordBytes);
+        OutputBuffer* out = nullptr;
+        for (int k = 0; k < kOutputBuffers && !out; ++k)
+        {
+            OutputBuffer& candidate = w.outputs[static_cast<size_t>((w.next_output + k) % kOutputBuffers)];
+            if (candidate.readers.load(std::memory_order_acquire) == 0)
+            {
+                out = &candidate;
+                w.next_output = (w.next_output + k + 1) % kOutputBuffers;
+            }
+        }
+        PinnedBuffer& dst = out ? out->host : w.spill;
+        dst.ensure(cap * kRecordBytes);
         auto* hp = static_cast<SmallPackedPosition*>(w.hostPacked.data());
         for (size_t i = 0; i < n; ++i) hp[i] = *work[i].position;
 
@@ -385,7 +414,7 @@ struct SmallBatchRunner::Impl
         }
         if (err == cudaSuccess)
         {
-            err = cudaMemcpyAsync(w.hostOut.data(), w.outDevice.data(), n * kRecordBytes,
+            err = cudaMemcpyAsync(dst.data(), w.outDevice.data(), n * kRecordBytes,
                                   cudaMemcpyDeviceToHost, s);
         }
         if (err == cudaSuccess)
@@ -418,19 +447,32 @@ struct SmallBatchRunner::Impl
             batches_ += 1;
             positions_ += n;
             total_infer_ms_ += infer_ms;
+            if (!out) spilled_ += 1;
         }
-        const auto* rec = static_cast<const unsigned char*>(w.hostOut.data());
+        const auto* rec = static_cast<const unsigned char*>(dst.data());
+        if (out) out->readers.store(static_cast<int>(n), std::memory_order_relaxed);
         for (size_t i = 0; i < n; ++i, rec += kRecordBytes)
         {
-            SmallPolicyValue result;
-            result.policy_logits.resize(kSmallPolicySize);
-            halfs_to_floats(reinterpret_cast<const std::uint16_t*>(rec), result.policy_logits.data(),
-                            kSmallPolicySize);
+            EvalSlot& slot = *work[i].slot;
+            const auto* policy = reinterpret_cast<const std::uint16_t*>(rec);
             const auto* aux = reinterpret_cast<const float*>(rec + kAuxOffset);
-            result.wdl = {aux[0], aux[1], aux[2]};
-            result.mlh = aux[3];
-            result.mlh_q = aux[4];
-            work[i].promise->set_value(std::move(result));
+            if (out)
+            {
+                slot.policy_fp16 = policy;
+                slot.aux = aux;
+                slot.policy_size = kSmallPolicySize;
+                slot.readers = &out->readers;
+            }
+            else
+            {
+                slot.value.policy_logits.resize(kSmallPolicySize);
+                fp16_to_float(policy, slot.value.policy_logits.data(), kSmallPolicySize);
+                slot.value.wdl = {aux[0], aux[1], aux[2]};
+                slot.value.mlh = aux[3];
+                slot.value.mlh_q = aux[4];
+            }
+            slot.delivered = true;
+            slot.group->done();  // wakes the search only when this was its last position
         }
         if (telemetry_enabled_)
         {
@@ -500,7 +542,7 @@ struct SmallBatchRunner::Impl
             }
             catch (...)
             {
-                // Exceptions are delivered via promises; keep worker alive.
+                // Exceptions are delivered through the result slots; keep the worker alive.
             }
         }
     }
@@ -539,6 +581,7 @@ struct SmallBatchRunner::Impl
     double total_infer_ms_{0.0};
     double total_handback_ms_{0.0};  // from the batch's sync to its last result handed back
     double total_wait_ms_{0.0};      // a worker waiting for a batch (idle and flush windows)
+    size_t spilled_{0};              // batches that found no free output buffer
 };
 
 SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
@@ -571,9 +614,9 @@ SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)
 }
 
 SmallBatchRunner::Ticket SmallBatchRunner::enqueue(
-    std::shared_ptr<const SmallPackedPosition> position)
+    std::shared_ptr<const SmallPackedPosition> position, EvalGroup& group)
 {
-    return impl_->enqueue(std::move(position));
+    return impl_->enqueue(std::move(position), group);
 }
 
 void SmallBatchRunner::process_pending()
