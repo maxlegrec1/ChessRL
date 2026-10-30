@@ -100,3 +100,97 @@ Two things the run also shows:
   move after a full search is free 96% of the time, and with self-play's 25% full / 75% fast
   mix the expected evaluations per move fall from 137.5 to about 106 (-23%). The reused root
   needs fresh Dirichlet noise on full searches.
+
+## GPU session: where self-play time goes (2026-10-30)
+
+A rented RTX 4090 with an EPYC 7742 (32 cores), TensorRT 10.14, branch `perf/cpu-bench`, run C's
+network at step 92.5k (encoder 128 x 4, FP16 engine built as `scripts/build_trt.sh` does).
+Self-play numbers are `scripts/bench_selfplay.py` with the recipe (90 s after 15 s of warm-up);
+engine numbers are `trtexec` with CUDA graphs and no host copies. Scripts: `scripts/perf/`
+(`perf_session.sh`, then `perf_quant.sh`); the logs are kept on the home machine in
+`~/chessrl-runs/perf-2026-10-30/`.
+
+The branch builds there, and its C++ tests (26) and GPU parity tests (20) pass.
+
+**Self-play is GPU-bound.** With the recipe it makes 232,502 evaluations/s (422.8 recorded
+positions/s) in batches averaging 113 positions, 0.95 ms each. The search threads spend 86% of
+their time waiting for the network; the rest (selection, packing, expansion and backup, about
+45 µs of thread time per evaluation on this CPU) keeps about 10 of the 32 cores busy.
+
+**The engine alone** (positions/s by batch size): 124k at 32, 203k at 64, 275k at 128, 331k at
+256, 312k at 512. Self-play gets 84% of the engine's speed at its batch size. At its best the
+engine does about 33 TFLOP/s of useful work (about 0.1 GFLOP per position).
+
+**Batching is already at its best:**
+
+| setting | evaluations/s | mean batch | ms per batch |
+|---|---|---|---|
+| recipe: 128 threads, 4 inference workers | 232,502 | 113 | 0.95 |
+| 2 inference workers | 154,301 | 123 | 0.69 |
+| 64 threads | 212,378 | 60 | 0.60 |
+| 256 threads | 228,139 | 193 | 1.86 |
+| 512 threads (graph bucket 512 added) | 175,662 | 356 | 5.01 |
+
+**Where the engine's time goes** (`trtexec --dumpProfile`, batch 128): 143 kernels per forward
+pass, median 4.9 µs. Matrix multiplies (25 kernels, attention included) take 31% of the time;
+fused elementwise kernels (norms, softmax, SwiGLU, reshapes; 118 kernels) take 69%. The
+max-abs RMSNorm's reduction kernels alone are about 8%. Per-layer profiling inflates small
+kernels, so the elementwise share is an upper bound, but the engine is bound by many small
+kernels, not by arithmetic: faster matrix multiplies (INT8, FP8) can only speed up the 31%,
+while fusing the elementwise work into the matrix multiplies (a fused kernel) addresses the 69%.
+
+**Engine builds:** ONNX export 3.5 s, `trtexec` 82 s; with a timing cache reused, 11 s (14 s
+while self-play runs). During a full build self-play slows by about 7% (97 s of build in a
+150 s window: 222k evaluations/s over the window); one build per 500 training steps makes that
+under 1% overall.
+
+**Sharing the GPU with the trainer:** a synthetic trainer (the checkpoint's network, batch 1024,
+AdamW) busy 15% of the time, about the real trainer's pace, cuts self-play to 207k evaluations/s
+(-11%); busy 100% of the time, to 101k (-57%). NVIDIA MPS does not speed up self-play (229k
+alone, 204k next to the 15% trainer) but runs the trainer's steps 31% faster next to self-play
+(61 ms instead of 89 ms), which in a paced run would leave the GPU free sooner; a paced run
+would show by how much.
+
+**Precision and network size** (`scripts/perf/perf_quant.sh`): INT8 and FP8 engines from NVIDIA
+ModelOpt 0.47 post-training quantization, calibrated on the 414 benchmark positions; the bigger
+encoders have random weights, so only their speed means anything. Positions/s at each engine's
+best batch size, and the useful arithmetic rate in FP16 (from an estimate of each network's
+FLOPs):
+
+| network | parameters | FP16 | INT8 | FP8 | FP16 TFLOP/s |
+|---|---|---|---|---|---|
+| 128 x 4 (today's) | 0.81M | 332k | 306k | 346k | ~33 |
+| 192 x 6 | 2.51M | 146k | 118k | 162k | ~46 |
+| 256 x 8 | 5.72M | 80k | 77k | 87k | ~58 |
+| 384 x 10 | 15.8M | 42k | 44k | 47k | ~83 |
+
+FP8 gains 4 to 14%, more on bigger networks; INT8 is slower at three of the four sizes (its
+quantize and dequantize steps add kernels). Bigger networks use the GPU much better: 3x the
+parameters (192 x 6) cost 2.3x the speed, 19x (384 x 10) cost 8x.
+
+Accuracy of today's network quantized, on the 600 positions of the gap study, with the C++ search
+at the gap study's settings (value errors in expected score; the FP16 row reproduces the gap
+study's numbers):
+
+| engine | value error vs Stockfish | 400-sim search loss | top move as FP16 | search value error |
+|---|---|---|---|---|
+| FP16 | 0.115 | 0.0246 | 100% | 0.084 |
+| INT8 | 0.124 | 0.0256 | 84.5% | 0.090 |
+| FP8 | 0.124 | 0.0258 | 79% | 0.097 |
+
+Quantized this way, the value head is about 8% worse and the search's value up to 15% worse, for
+at most 4% more speed on today's network.
+
+**What this changes:**
+
+- Batching: nothing to gain; keep 128 threads and 4 inference workers.
+- Engine builds: a timing cache saves 70 s of GPU per build, under 1% of self-play; refit
+  (updating the running engine's weights) matters more for memory than for speed.
+- The trainer costs self-play about 11% of the GPU, and MPS does not get it back.
+- Quantization: not worth it now. FP8 might be worth another look for much bigger networks, with
+  quantization-aware training to keep the value head accurate.
+- The engine is limited by its many small kernels (69% of its time), not by arithmetic: fusing
+  them (a fused kernel, or norms TensorRT can fuse) is the remaining lever on the GPU side, with
+  tree reuse (about 23% fewer evaluations) on the search side.
+- Bigger networks cost much less than their size: the engine's efficiency rises from about 33
+  to 83 TFLOP/s between 0.8M and 16M parameters.

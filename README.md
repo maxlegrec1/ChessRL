@@ -198,6 +198,7 @@ checkpoint's search on the CPU for any position.
 | `check_buffer.py` | Checks buffer records against python-chess. |
 | `bench_selfplay.py`, `perfreport.py` | Self-play speed benchmark with the training config, and a side-by-side report of two benchmarks. |
 | `dashboard.py`, `pages/1_Analysis.py`, `analysis_server.py` | The dashboard and the analysis board. |
+| `perf/` | GPU performance session for a rented box: self-play and engine speed, batching, contention, FP16 / INT8 / FP8 and network size (results in `docs/PERF.md`). |
 | `vast/` | Running on rented Vast.ai GPUs: launch with a budget guard, box setup, metric sync. |
 
 ## Tests
