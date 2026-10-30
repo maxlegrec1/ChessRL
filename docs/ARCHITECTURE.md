@@ -8,8 +8,8 @@ format, the engines and the networks. Numbers in parentheses are the recipe's va
 
 `uv run python -m src.run` (`src/run.py`) is the launcher. For a new run it creates
 `artifacts/runs/<YYYYmmdd_HHMMSS>_<4 hex>[_<name>]/`, saves a randomly initialised network as
-`checkpoints/model_dynamic_initial.pt` and builds a TensorRT engine from it (so self-play has an
-engine from the start), writes the config to `<run>/config.yaml` with every path pointed inside
+`checkpoints/model_dynamic_initial.pt` and exports it (so self-play has a network from the
+start), writes the config to `<run>/config.yaml` with every path pointed inside
 the run directory, and starts `python -m src.self_play` and `python -m src.train` on that file,
 appending their output to `selfplay.log` and `training.log`. Signals are forwarded to both
 children; when one exits, the launcher stops the other. `--no-train` or `--no-selfplay` runs one
@@ -22,7 +22,7 @@ artifacts/runs/<id>/
 ├── buffer/buffer.bin.writes          number of records ever written: pacing and the ring's head
 ├── buffer/buffer.bin.stats.json      capacity, FIFO flag, cumulative game statistics
 ├── checkpoints/step_NNNNNNNN.pt      trainer checkpoints
-├── engines/step_NNNNNNNN.{onnx,trt}  engines built from them
+├── engines/step_NNNNNNNN.cnet        networks exported from them (the fused CUDA format)
 ├── engines/.iteration                CSV of published engines: self-play plays the last row
 ├── metrics/train.jsonl               trainer metrics and events (growth, skipped builds)
 ├── metrics/selfplay.jsonl            self-play speed and game statistics, every 30 s
@@ -79,9 +79,9 @@ the network. An in-flight descent adds a virtual visit to every node on its path
 loss for the side that chose it, so the next descent tends to pick another leaf; the 8 leaves are
 then evaluated together. Width 1 is a strictly sequential search. All threads share one
 `SmallBatchRunner` (`cpp/mcts/single_inference.cpp`), which dispatches a batch when `threads`
-leaves are queued or after 100 µs, to four inference workers replaying CUDA graphs. Leaves travel
-as packed bitboards (about 776 bytes) that a CUDA kernel (`cpp/mcts/expand_kernel.cu`) expands
-into the 111 input planes on the GPU. `hash_size` > 0 adds a transposition table (in MB).
+leaves are queued or after 100 µs, to four inference workers, each with its own CUDA stream.
+Leaves travel as packed bitboards (about 776 bytes); the network kernel expands them into the 111
+input planes itself (see "The fused network" below). `hash_size` > 0 adds a transposition table (in MB).
 
 **Resignation.** The side to move resigns when its root expected score (W + D/2) has been below
 `resign_threshold` (0.05) for `resign_consecutive` (3) of its own moves in a row. A fraction
@@ -172,25 +172,39 @@ and, if `wandb.enabled`, to W&B. Every `checkpoint.every_steps` (500) the traine
 and the full config) through a temporary file and a rename, starts the engine build, and deletes
 all but the newest `keep_last` checkpoints (the recipe keeps them all).
 
-## Engine build and swap
+## Network export and swap
 
-After each checkpoint the trainer runs `scripts/build_trt.sh <ckpt> <step> <engine_dir>
+After each checkpoint the trainer runs `scripts/build_net.sh <ckpt> <step> <engine_dir>
 <iteration_file>`, which:
 
-1. exports ONNX with `python -m src.export.to_onnx`: the network is rebuilt from the checkpoint's
-   `model_spec` and wrapped in `ExportWrapper`, whose four outputs are `policy` (logits), `value`
-   (softmax WDL), `mlh` and `mlh_q`; the search reads `value` and `mlh_q`. With `search_heads`
-   from the checkpoint's saved config, `outcome` routes the value head to `value` and the mlh head
-   to `mlh_q`, and `search` routes value_q and mlh_q;
-2. builds `step_NNNNNNNN.trt` with `trtexec --fp16` for batches of 1 to 512 (optimised for 256);
-3. appends `<step>,<engine path>` to `.iteration`, a CSV with the header `iteration,engine_path`
-   whose last row is the current engine.
+1. exports `step_NNNNNNNN.cnet` with `python -m src.export.to_cnet` (about 0.1 s): the network is
+   rebuilt from the checkpoint's `model_spec`. The network has four outputs, `policy` (logits),
+   `value` (softmax WDL), `mlh` and `mlh_q`; the search reads `value` and `mlh_q`. With
+   `search_heads` from the checkpoint's saved config, `outcome` routes the value head to `value`
+   and the mlh head to `mlh_q`, and `search` routes value_q and mlh_q (`ExportWrapper` in
+   `src/export/heads.py` is the same routing in PyTorch);
+2. appends `<step>,<network path>` to `.iteration`, a CSV with the header `iteration,engine_path`
+   whose last row is the current network.
 
 With `async_engine_build: true` the build runs in the background (`engine_builds.log`); if the
 previous build is still running, the new checkpoint gets no engine (a `build_skipped` event).
 Self-play checks the modification time of `.iteration` every `selfplay.poll_seconds` (300). When
 the last row names a new engine, `SelfPlayWorker.set_engine` replaces the inference runner between
 two steps: games in progress continue with the new network and nothing restarts.
+
+## The fused network
+
+Self-play, the ladder and every GPU script run the network through one CUDA kernel
+(`cpp/net/encoder_kernel.cu`), launched once per batch with one thread block per position. The
+`.cnet` file (`src/export/to_cnet.py`) holds the weights in FP16, pre-packed in the order the
+tensor-core instructions (`mma.sync`) read them, so the C++ side (`cpp/net/encoder_net.cpp`)
+only copies the file to the GPU. Inside a block, 8 warps (one per attention head) each own 16
+columns of the residual stream for all 64 tokens and keep them in registers; normalized
+activations pass through shared memory in FP16 as the left operand of each matmul, weights
+stream from L2 straight into registers, accumulation and norms are FP32, and each head's
+attention stays in its warp's registers. The output is one record per position: FP16 policy
+logits, then the WDL, mlh and mlh_q in FP32. The kernel is written for the encoder at d_model
+128, 8 heads, d_ff 256 and up to 16 layers; the export refuses other sizes.
 
 ## Resume
 
@@ -225,11 +239,11 @@ and 5 special tokens that are never played.
   the gain starts at 0), then runs pre-norm attention and a SwiGLU feed-forward,
   `down(silu(gate) · up)`, each with a residual connection.
 - Attention uses QK-norm (RMSNorm on each head's queries and keys) and adds a learned square-pair
-  bias (heads x 64 x 64) shared by all layers. It is plain matmul and softmax, which the ONNX
-  export and TensorRT handle.
+  bias (heads x 64 x 64) shared by all layers.
 - RMSNorm divides each row by its largest absolute value (detached) before squaring. RMSNorm is
   scale-invariant, so the function is unchanged up to eps, but x² stays inside FP16 range (it
-  overflows past |x| = 256) when TensorRT runs the norm in FP16.
+  overflows past |x| = 256) when the norm runs in FP16, as it did in the TensorRT engine
+  self-play used before the fused network. The fused kernel computes norms in FP32.
 - Policy head: logit(from, to, promotion) = (q_from + p_promotion) · k_to / sqrt(d_model), with q
   and k linear projections of the final tokens and p one of four learned vectors (none, queen,
   rook, bishop). The special tokens share one learned logit, initialised at -10.
@@ -264,8 +278,9 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
   simulations per move) against Stockfish limited by `UCI_LimitStrength` and `UCI_Elo` at 100 ms
   per move, from the initial position with alternating colours. `scripts/sf_benchmark.py` runs
   several engines and levels in parallel; `scripts/cpu_stockfish_match.py` uses the CPU search.
-- **Engine parity**: `scripts/trt_parity.py` compares each checkpoint's FP16 engine with PyTorch
-  FP32 on puzzle positions (top-1 agreement, policy KL, value error).
+- **Network parity**: `scripts/net_parity.py` compares each checkpoint's fused network with
+  PyTorch FP32 on puzzle positions (top-1 agreement, policy KL, value error), and the packed input
+  path with the dense one.
 - **Dashboard and analysis board**: `scripts/dashboard.py` (Streamlit, read-only) reads the metrics
   and ladder files of the runs under `artifacts/runs/` or `$CHESSRL_RUNS_ROOT`. Its analysis page
   embeds `scripts/analysis_server.py`, which runs a checkpoint's policy, value and PUCT search on
@@ -281,15 +296,16 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
 | Self-play process | `src/self_play/__main__.py`, `engine_watch.py` (`.iteration`), `calibration.py` (resign threshold) |
 | Self-play worker and record writer | `cpp/selfplay.cpp`, `cpp/selfplay.hpp` |
 | MCTS | `cpp/mcts/mcts_small.cpp`, `cpp/mcts/common.cpp`, `cpp/mcts/common.hpp`, `cpp/mcts/cache.hpp` (transposition table) |
-| Batched inference, CUDA graphs; input layout, packed positions, CPU encoders | `cpp/mcts/single_inference.cpp`, `cpp/mcts/expand_kernel.cu`; `cpp/mcts/small_layout.hpp`, `cpp/mcts/packed_position.hpp`, `cpp/mcts/small_encoding.cpp` |
-| TensorRT helpers; C++ policy vocabulary | `cpp/inference.cpp`, `cpp/include/`; `cpp/policy_vocab.cpp`, `cpp/policy_index.txt` |
+| Batched inference; input layout, packed positions, CPU encoders | `cpp/mcts/single_inference.cpp`; `cpp/mcts/small_layout.hpp`, `cpp/mcts/packed_position.hpp`, `cpp/mcts/small_encoding.cpp` |
+| The fused network (kernel, loader) | `cpp/net/encoder_kernel.cu`, `cpp/net/encoder_net.cpp`, `cpp/net/encoder_params.hpp` |
+| Network outputs; C++ policy vocabulary | `cpp/include/`; `cpp/policy_vocab.cpp`, `cpp/policy_index.txt` |
 | Python bindings (`_inference_cpp`), build, chess rules | `cpp/bindings.cpp`, `cpp/setup.py`, `cpp/pyproject.toml`, `cpp/chess-library` (submodule) |
 | Networks, input planes, policy vocabulary | `src/models/encoder.py`, `src/models/small/small_model.py`, `src/models/factory.py`, `src/models/growth.py`; `src/models/small/fen_encoder.py`, `src/models/small/vocab.py` |
-| Export and engine build | `src/export/to_onnx.py`, `scripts/build_trt.sh` |
+| Network export; search heads | `src/export/to_cnet.py`, `scripts/build_net.sh`; `src/export/heads.py` |
 | Rating ladder | `src/rating/ladder.py`, `src/rating/anchors.json`, `src/rating/anchors_sf.json`, `scripts/ladder_daemon.py`, `scripts/rerate.py`, `scripts/calibrate_finish.py`; data in `data/openings/`, `data/puzzles/` (built by `scripts/make_sf_openings.py`, `scripts/make_puzzle_set.py`) |
 | Stockfish test | `scripts/stockfish_match.py`, `scripts/sf_benchmark.py`, `scripts/cpu_stockfish_match.py` |
 | CPU search (PUCT; Gumbel root search), dashboard, analysis board | `src/analysis/engine.py`, `src/analysis/gumbel.py`, `scripts/puzzle_scan.py`, `scripts/search_quality.py`; `scripts/dashboard.py`, `scripts/pages/1_Analysis.py`, `scripts/analysis_server.py`, `scripts/analysis/` |
-| Diagnostics and benchmarks | `scripts/trt_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py`; CPU search benchmark (fake network, no GPU): `cpp/bench/`, `scripts/build_cpu_bench.sh`, `scripts/bench_cpu_search.sh`, `scripts/make_bench_positions.py`, `data/bench/positions.txt`; GPU session: `scripts/perf/`; results in `docs/PERF.md` |
+| Diagnostics and benchmarks | `scripts/net_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py`; CPU search benchmark (fake network, no GPU): `cpp/bench/`, `scripts/build_cpu_bench.sh`, `scripts/bench_cpu_search.sh`, `scripts/make_bench_positions.py`, `data/bench/positions.txt`; self-play speed A/B on a rented GPU: `scripts/perf/selfplay_ab.sh`; results in `docs/PERF.md` |
 | Rented GPUs | `scripts/vast/` |
 | Tests | `tests/` (Python); `cpp/mcts/tests.cpp`, built by `scripts/build_cpp_tests.sh` (C++) |
 | Lab log and blog posts | `docs/NEXT_ROUND.md`, `docs/blog/` |

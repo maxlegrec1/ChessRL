@@ -6,7 +6,7 @@ pre-RMSNorm blocks with QK-norm attention, one learned square-pair attention
 bias per head shared by all layers ("geom" bias), the input embedding
 re-injected before every layer, SwiGLU feed-forward, and an attention policy
 head scoring (from-square, to-square) pairs. Attention is plain matmul +
-softmax so the legacy ONNX exporter and TensorRT handle it.
+softmax; cpp/net/encoder_kernel.cu runs the same network for self-play.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        # Scale by the row max before squaring: TensorRT runs this in FP16, where
+        # Scale by the row max before squaring: the TensorRT engine ran this in FP16, where
         # x.pow(2) overflows past |x| = 256, and the residual stream grows past that
         # without weight decay (max |x| into the final norm: 46 at 10k steps, 349 at
         # 45.5k; the overflow zeroed whole tokens and the engine drifted from the

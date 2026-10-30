@@ -11,7 +11,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python ...
 The C++ build compiles for `CHESSRL_CUDA_ARCH` (default `sm_90`, H100/H200). Set it for the
 card in use: `sm_89` RTX 4090, `sm_86` RTX 3090, `sm_80` A100 (see the README).
 
-The home box (maxime-mega) has an RTX 4090 but no CUDA toolkit or TensorRT, so the extension
+The home box (maxime-mega) has an RTX 4090 but no CUDA toolkit (`nvcc`), so the extension
 does not build there. Training runs on rented Vast.ai boxes (`scripts/vast/`); their run
 directories sync to `~/chessrl-runs/`, which the home dashboard and analysis board read. Ask
 before starting anything that costs money.
@@ -24,9 +24,10 @@ before starting anything that costs money.
   written out: a missing key falls back to the dataclass default in `src/train/config.py`
   (older values, not the recipe).
 - The trainer saves `checkpoints/step_NNNNNNNN.pt` every `checkpoint.every_steps` (500) and
-  builds an engine from it; self-play swaps engines in place.
+  exports it to `engines/step_NNNNNNNN.cnet` (`scripts/build_net.sh`, the fused CUDA network in
+  `cpp/net/`); self-play swaps networks in place.
 - Strength: `scripts/ladder_daemon.py --run-dir <run>` (ladder Elo + puzzles, every 30 min).
-  `scripts/trt_parity.py` checks an engine against PyTorch.
+  `scripts/net_parity.py` checks the fused network against PyTorch.
 
 ## Resume
 

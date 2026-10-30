@@ -343,8 +343,9 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
     }
 }
 
-// The input plane `plane` of token `cell` (row-major 8x8, row 0 = rank 8), as in
-// expand_kernel.cu; planes 111..127 are the zero padding of the embedding's k loop.
+// The input plane `plane` of token `cell` (row-major 8x8, row 0 = rank 8), as
+// expand_packed_to_dense (small_encoding.cpp) builds it; planes 111..127 are the zero
+// padding of the embedding's k loop.
 __device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane)
 {
     const int sq = (kPackBoard - 1 - (cell >> 3)) * kPackBoard + (cell & 7);

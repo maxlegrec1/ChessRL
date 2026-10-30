@@ -777,12 +777,12 @@ SelfPlayMetrics SelfPlayWorker::step()
 
     auto current_time = std::chrono::high_resolution_clock::now();
     double mcts_duration_ms = std::chrono::duration<double, std::milli>(current_time - start_time).count();
-    double trt_duration_ms = end_infer_ms - start_infer_ms;
+    double infer_duration_ms = end_infer_ms - start_infer_ms;
 
     if (std::getenv("CHESSRL_PROFILE_LOG") != nullptr)
     {
         std::cerr << "[Profile] MCTS=" << mcts_duration_ms << "ms"
-                  << " TRT=" << trt_duration_ms << "ms\n";
+                  << " network=" << infer_duration_ms << "ms\n";
         if (impl_->cache) impl_->cache->print_stats();
         else std::cerr << "[Cache] disabled (hash_size=0)\n";
     }

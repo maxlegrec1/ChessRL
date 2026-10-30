@@ -199,7 +199,7 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
     single::SmallBatchConfig cfg;
     if (options.small_engine_path.empty())
     {
-        cfg.engine_path = "model.trt";
+        cfg.engine_path = "model.cnet";
     }
     else
     {
@@ -1105,9 +1105,9 @@ private:
         return summary;
     }
 
-    // Produce the compact ~776 B packed snapshot for a leaf. The dense 111
-    // planes are materialized on the GPU (launch_expand_planes) just before
-    // the TRT enqueue — no per-leaf 28 KB float tensor on the host path.
+    // Produce the compact ~776 B packed snapshot for a leaf. The fused network
+    // expands it to the 111 input planes on the GPU — no per-leaf 28 KB float
+    // tensor on the host path.
     std::shared_ptr<const single::SmallPackedPosition> acquire_small_encoding(
         const HistoryStack& history,
         const chess::Board& board)

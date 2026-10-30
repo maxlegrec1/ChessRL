@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 import torch
 
+from src.export.heads import ExportWrapper
 from src.export.to_cnet import HEADS, entries_for, write_cnet
-from src.export.to_onnx import ExportWrapper
 from src.models.encoder import EncoderModel
 
 DT = {0: np.float16, 1: np.float32, 2: np.uint16, 3: np.int32}
@@ -30,7 +30,9 @@ def read_cnet(path) -> dict[str, np.ndarray]:
     for i in range(count):
         name, dtype, _, off, nbytes = struct.unpack_from("<32sIIQQ", data, 16 + 56 * i)
         assert off % 256 == 0
-        out[name.rstrip(b"\0").decode()] = np.frombuffer(data, DT[dtype], nbytes // np.dtype(DT[dtype]).itemsize, off)
+        out[name.rstrip(b"\0").decode()] = np.frombuffer(
+            data, DT[dtype], nbytes // np.dtype(DT[dtype]).itemsize, off
+        )
     return out
 
 
@@ -46,7 +48,9 @@ def unpack_b(flat: np.ndarray, n: int, k: int) -> np.ndarray:
                 for s in range(2):
                     for b in range(2):
                         for e in range(2):
-                            w[8 * j + g, 32 * p + 16 * s + 8 * b + 2 * t + e] = frag[j, p, lane, 4 * s + 2 * b + e]
+                            w[8 * j + g, 32 * p + 16 * s + 8 * b + 2 * t + e] = frag[
+                                j, p, lane, 4 * s + 2 * b + e
+                            ]
     return w
 
 
@@ -61,7 +65,9 @@ def unpack_bias(flat: np.ndarray, heads: int) -> np.ndarray:
                     g, t = lane // 4, lane % 4
                     for v in range(8):
                         j, r = 2 * c + v // 4, v % 4
-                        bias[h, 16 * m + g + 8 * (r // 2), 8 * j + 2 * t + r % 2] = frag[h, m, c, lane, v]
+                        bias[h, 16 * m + g + 8 * (r // 2), 8 * j + 2 * t + r % 2] = frag[
+                            h, m, c, lane, v
+                        ]
     return bias
 
 
@@ -139,7 +145,10 @@ def test_packed_file_matches_pytorch(tmp_path, heads):
     planes[:, :, 110] = 0.37  # the halfmove plane is fractional
     got = kernel_forward(f, planes)
     with torch.no_grad():
-        ref = [t.numpy() for t in ExportWrapper(model, heads)(torch.from_numpy(planes).reshape(3, 8, 8, 111))]
+        ref = [
+            t.numpy()
+            for t in ExportWrapper(model, heads)(torch.from_numpy(planes).reshape(3, 8, 8, 111))
+        ]
     # FP16 weights against FP32: logits within a few hundredths, probabilities closer.
     assert np.abs(got[0] - ref[0]).max() < 0.05
     assert np.abs(got[1] - ref[1]).max() < 5e-3

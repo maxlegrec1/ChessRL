@@ -1,6 +1,7 @@
 // CPU side of the network input: the dense 8 x 8 x 111 encoder, the packed snapshot a
-// search leaf travels as, and its CPU expansion (the reference for expand_kernel.cu).
-// No TensorRT or CUDA here, so the search builds and runs without a GPU
+// search leaf travels as, and its CPU expansion (the reference for the fused kernel's
+// plane_value, net/encoder_kernel.cu). No CUDA here, so the search builds and runs
+// without a GPU
 // (scripts/build_cpu_bench.sh).
 #include "mcts/single_inference.hpp"
 
@@ -169,8 +170,7 @@ std::vector<float> encodeSmallFeatures(
 }
 
 // Convenience wrapper: encode a board with no history (slots 1..7 zero,
-// current repetition flag = 0). Used by `evaluateSmall` (single-shot
-// inference helper).
+// current repetition flag = 0).
 std::vector<float> encodeSmallFeaturesNoHistory(const chess::Board& board)
 {
     chessrl::mcts::HistoryStack empty{};

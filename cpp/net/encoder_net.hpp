@@ -1,7 +1,7 @@
 #pragma once
 
 // The fused network: a .cnet file (src/export/to_cnet.py) loaded onto the GPU, run by
-// encoder_kernel.cu on a caller's stream. Replaces the TensorRT engine.
+// encoder_kernel.cu on a caller's stream.
 
 #include <cuda_runtime_api.h>
 

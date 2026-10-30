@@ -1,6 +1,6 @@
 """Re-rate saved checkpoints on a given opening set (e.g. after switching the ladder to Stockfish openings).
 
-For each checkpoint: export with its own search heads, build a TensorRT engine, play the same
+For each checkpoint: export it (.cnet) with its own search heads, play the same
 rating as the ladder daemon (two anchors around a starting estimate, 48 games each, stepping up
 or down on lopsided results), and append a row to --out. The estimate is the run's old ladder
 rating at that step when available, else --estimate.
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.export.to_cnet import export  # noqa: E402
 from src.rating import ladder  # noqa: E402
 
 
@@ -34,40 +34,10 @@ def old_rating(ckpt: Path) -> float | None:
 
 
 def build(ckpt: Path, work: Path) -> str:
-    onnx, trt = (
-        work / f"{ckpt.parent.parent.name}_{ckpt.stem}.onnx",
-        work / f"{ckpt.parent.parent.name}_{ckpt.stem}.trt",
-    )
-    if not trt.exists():
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "src.export.to_onnx",
-                "--ckpt_path",
-                str(ckpt),
-                "--onnx_path",
-                str(onnx),
-            ],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            [
-                "trtexec",
-                f"--onnx={onnx}",
-                f"--saveEngine={trt}",
-                "--fp16",
-                "--minShapes=input:1x8x8x111",
-                "--optShapes=input:256x8x8x111",
-                "--maxShapes=input:512x8x8x111",
-                "--shapes=input:256x8x8x111",
-            ],
-            check=True,
-            capture_output=True,
-        )
-    return str(trt)
+    net = work / f"{ckpt.parent.parent.name}_{ckpt.stem}.cnet"
+    if not net.exists():
+        export(ckpt, net)
+    return str(net)
 
 
 def main() -> None:

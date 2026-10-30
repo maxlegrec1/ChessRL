@@ -111,7 +111,7 @@ TEST_CASE("MctsOptions defaults are pinned")
     CHECK(opts.dirichlet_alpha == doctest::Approx(0.3F));
     CHECK(opts.dirichlet_epsilon == doctest::Approx(0.25F));
     CHECK(!opts.use_dirichlet);
-    CHECK(opts.small_engine_path == "model.trt");
+    CHECK(opts.small_engine_path == "model.cnet");
 }
 
 // -----------------------------------------------------------------------------

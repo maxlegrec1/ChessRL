@@ -8,7 +8,7 @@ a scratch buffer under artifacts/bench/, so a run's buffer is never touched.
 
 Example:
   CUDA_VISIBLE_DEVICES=0 uv run python scripts/bench_selfplay.py \\
-      --engine artifacts/runs/<id>/engines/step_00010000.trt \\
+      --engine artifacts/runs/<id>/engines/step_00010000.cnet \\
       --duration-sec 90 --out artifacts/bench/baseline.json
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -61,7 +62,9 @@ def gpu_name() -> str:
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True, help="Path to .trt engine (must be 111-plane).")
+    ap.add_argument(
+        "--engine", required=True, help="Path to the network (.cnet, src/export/to_cnet.py)."
+    )
     ap.add_argument("--duration-sec", type=float, default=90.0)
     ap.add_argument(
         "--warmup-sec",
@@ -132,6 +135,7 @@ def main() -> int:
     pre_nodes = 0
 
     t_start = time.monotonic()
+    cpu_start = time.process_time()  # every thread of this process: the search and the runner
     samples: list[dict[str, Any]] = []
     last_sample = t_start
     step_count = 0
@@ -158,6 +162,8 @@ def main() -> int:
             break
 
     elapsed = time.monotonic() - t_start
+    cpu_sec = time.process_time() - cpu_start
+    host_load = os.getloadavg()[0]  # in a container: the whole host, neighbours included
     post_stats = worker.inference_stats()
 
     delta_batches = post_stats.batches - pre_stats.batches
@@ -196,6 +202,11 @@ def main() -> int:
         f"[bench]   encoder:  {delta_encoder_calls} calls, {mean_encode_us_per_leaf:.2f} us/leaf, "
         f"thread-busy frac {encode_thread_busy_frac * 100:.1f}%"
     )
+    print(
+        f"[bench]   cpu: {cpu_sec / elapsed:.1f} cores, "
+        f"{cpu_sec * 1000 / max(1, pre_positions):.1f} ms per recorded position, "
+        f"host load {host_load:.0f}"
+    )
 
     out = {
         "label": label,
@@ -206,6 +217,8 @@ def main() -> int:
         "config_file": str(args.config),
         "config": settings,
         "wall_clock_sec": elapsed,
+        "cpu_sec": cpu_sec,
+        "host_load": host_load,
         "warmup_sec": args.warmup_sec,
         "steps": step_count,
         "positions": pre_positions,

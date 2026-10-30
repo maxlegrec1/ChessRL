@@ -1,6 +1,6 @@
 #pragma once
 
-// A stand-in for the TensorRT network, to run the real search on a CPU
+// A stand-in for the CUDA network, to run the real search on a CPU
 // (scripts/build_cpu_bench.sh). fake_network.cpp implements SmallBatchRunner's
 // interface and is linked instead of single_inference.cpp, so the search code is
 // the production code, unchanged.

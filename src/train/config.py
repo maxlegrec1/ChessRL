@@ -24,7 +24,7 @@ class CheckpointConfig:
     dir: Path = Path("artifacts/checkpoints")
     every_steps: int = 1000
     keep_last: int = 5
-    build_script: Path | None = Path("scripts/build_trt.sh")
+    build_script: Path | None = Path("scripts/build_net.sh")
     engine_dir: Path = Path("artifacts/engines")
     iteration_file: Path = Path("artifacts/engines/.iteration")
 
@@ -187,11 +187,11 @@ class TrainingConfig:
     # those targets are ~uniform (measured: 98.7% with max prob < 0.4), so the
     # search value only learns from mates found inside the tree. "outcome":
     # value and mlh, trained on game results / true plies left (AlphaZero).
-    # "q_value" and "blend" change only the value (see ExportWrapper in to_onnx.py).
+    # "q_value" and "blend" change only the value (see ExportWrapper in src/export/heads.py).
     search_heads: str = "search"
     mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward
-    async_engine_build: bool = False  # build TRT engines in the background
+    async_engine_build: bool = False  # export networks in the background
     metrics_path: Path | None = None  # JSONL metrics for the dashboard
     expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 
@@ -241,6 +241,9 @@ def load_config(path: Path | str) -> TrainingConfig:
     cfg.checkpoint.dir = Path(cfg.checkpoint.dir)
     if cfg.checkpoint.build_script is not None:
         cfg.checkpoint.build_script = Path(cfg.checkpoint.build_script)
+        if cfg.checkpoint.build_script.name == "build_trt.sh":
+            # Configs saved before the fused network replaced TensorRT.
+            cfg.checkpoint.build_script = cfg.checkpoint.build_script.with_name("build_net.sh")
     cfg.checkpoint.engine_dir = Path(cfg.checkpoint.engine_dir)
     cfg.checkpoint.iteration_file = Path(cfg.checkpoint.iteration_file)
     cfg.selfplay.pgn_dir = Path(cfg.selfplay.pgn_dir)

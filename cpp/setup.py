@@ -7,12 +7,11 @@ from setuptools import setup
 
 ROOT = Path(__file__).resolve().parent
 
-TENSORRT_ROOT_DEFAULT = "/usr/local/TensorRT-10.14.1.48"
-TENSORRT_ROOT = Path(os.environ.get("TENSORRT_ROOT", TENSORRT_ROOT_DEFAULT))
 CUDA_ROOT = Path(os.environ.get("CUDA_ROOT", "/usr/local/cuda"))
 
-# CUDA compute capability for the .cu kernel. Default sm_90 (H200/Hopper).
-# Override via env: sm_89 for 4090/Ada, sm_86 for 3090/Ampere, sm_80 for A100.
+# CUDA compute capability for the fused network kernel (mma.sync m16n8k16: sm_80 or
+# newer). Default sm_90 (H200/Hopper). Override via env: sm_89 for 4090/Ada, sm_86 for
+# 3090/Ampere, sm_80 for A100.
 # Mismatch with the target GPU is silently accepted by nvcc but the kernel
 # will fail at runtime with cryptic CUDA errors — so we make this explicit.
 CUDA_ARCH = os.environ.get("CHESSRL_CUDA_ARCH", "sm_90")
@@ -24,37 +23,11 @@ if not CUDA_ARCH.startswith("sm_") or not CUDA_ARCH[3:].isdigit():
     )
 _CUDA_COMPUTE = "compute_" + CUDA_ARCH[3:]
 
-# Locate TensorRT headers. Two valid layouts:
-#  (1) Tarball install: $TENSORRT_ROOT/include/NvInfer.h + $TENSORRT_ROOT/lib/
-#  (2) apt install: /usr/include[/x86_64-linux-gnu]/NvInfer.h + /usr/lib/...
-# If TENSORRT_ROOT was set explicitly and the header isn't there, fail loud
-# rather than silently fall through to a possibly-mismatched apt TRT.
-_trt_include_dirs: list[str] = []
-_trt_library_dirs: list[str] = []
-_user_set_trt_root = "TENSORRT_ROOT" in os.environ
-if (TENSORRT_ROOT / "include" / "NvInfer.h").exists():
-    _trt_include_dirs.append(str(TENSORRT_ROOT / "include"))
-    _trt_library_dirs.append(str(TENSORRT_ROOT / "lib"))
-elif _user_set_trt_root:
-    raise RuntimeError(
-        f"TENSORRT_ROOT={TENSORRT_ROOT} but {TENSORRT_ROOT / 'include' / 'NvInfer.h'} "
-        "does not exist. Install TensorRT 10.14+ "
-        "(https://developer.nvidia.com/tensorrt) and point TENSORRT_ROOT at "
-        "the extracted tarball, OR unset TENSORRT_ROOT to fall back to a "
-        "system (apt) install."
-    )
-# Always add common system paths so multi-arch / apt installs work too. The
-# compiler will skip directories that don't exist.
-_trt_include_dirs.append("/usr/include/x86_64-linux-gnu")
-_trt_include_dirs.append("/usr/include")
-_trt_library_dirs.append("/usr/lib/x86_64-linux-gnu")
-
 ext_modules = [
     Pybind11Extension(
         "_inference_cpp",
         sources=[
             "bindings.cpp",
-            "inference.cpp",
             "policy_vocab.cpp",
             "mcts/common.cpp",
             "mcts/mcts_small.cpp",
@@ -66,15 +39,13 @@ ext_modules = [
         include_dirs=[
             str(ROOT / "include"),
             str(ROOT / "chess-library/include"),
-            *_trt_include_dirs,
             str(CUDA_ROOT / "include"),
             str(ROOT),
         ],
         library_dirs=[
-            *_trt_library_dirs,
             str(CUDA_ROOT / "lib64"),
         ],
-        libraries=["nvinfer", "cudart"],
+        libraries=["cudart"],
         extra_compile_args=[
             "-O3",
             "-march=native",
@@ -85,15 +56,15 @@ ext_modules = [
     )
 ]
 
-CU_SOURCES = ["mcts/expand_kernel.cu", "net/encoder_kernel.cu"]
+CU_SOURCES = ["net/encoder_kernel.cu"]
 
 
 class build_ext(_pybind_build_ext):
-    """pybind11 build_ext + an nvcc pre-pass for the .cu expansion kernel.
+    """pybind11 build_ext + an nvcc pre-pass for the fused network kernel.
 
-    The project is otherwise pure g++; nvcc only ever sees expand_kernel.cu
-    and packed_position.hpp (deliberately free of chess-library / TRT). The
-    compiled object is linked into the extension via extra_objects.
+    The project is otherwise pure g++; nvcc only ever sees net/encoder_kernel.cu and
+    the plain headers it includes (deliberately free of chess-library). The compiled
+    object is linked into the extension via extra_objects.
     """
 
     def build_extensions(self):
@@ -125,7 +96,7 @@ class build_ext(_pybind_build_ext):
 setup(
     name="chessrl_inference_cpp",
     version="0.1.0",
-    description="Pybind11 bindings for the ChessRL TensorRT inference engine",
+    description="Pybind11 bindings for the ChessRL search, self-play and fused CUDA network",
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
 )

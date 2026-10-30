@@ -1,6 +1,6 @@
 import torch
 
-from src.export.to_onnx import ExportWrapper
+from src.export.heads import ExportWrapper
 from src.models.small.small_model import SmallModel
 
 

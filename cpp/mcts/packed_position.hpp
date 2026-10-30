@@ -2,7 +2,7 @@
 
 // Standalone POD definition shared by the host encoder (g++ TU) and the
 // CUDA expansion kernel (nvcc TU). Deliberately depends ONLY on <cstdint>
-// so nvcc never has to parse chess-library / TensorRT headers.
+// so nvcc never has to parse chess-library headers.
 
 #include <cstdint>
 

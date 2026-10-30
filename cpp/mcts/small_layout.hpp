@@ -1,7 +1,7 @@
 #pragma once
 
 // Layout of the network's 8 x 8 x 111 input and of its outputs, shared by the CPU
-// encoders (small_encoding.cpp) and the TensorRT runner (single_inference.cpp).
+// encoders (small_encoding.cpp) and the network runner (single_inference.cpp).
 
 #include "mcts/packed_position.hpp"
 

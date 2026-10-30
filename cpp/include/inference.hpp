@@ -8,21 +8,6 @@
 namespace chessrl
 {
 
-struct InferenceTimings
-{
-    double encodeMs{0.0};
-    double inferMs{0.0};
-    double sampleMs{0.0};
-    double totalMs{0.0};
-};
-
-struct SmallInferenceResult
-{
-    std::vector<std::string> moves;
-    std::vector<std::array<float, 3>> wdl;
-    InferenceTimings timings;
-};
-
 struct SmallPolicyValue
 {
     std::vector<float> policy_logits;
@@ -36,12 +21,6 @@ struct SmallPolicyValue
     float mlh{0.0F};
     float mlh_q{0.0F};
 };
-
-SmallInferenceResult small_generate_moves(
-    const std::vector<std::string>& fens,
-    float temperature,
-    int iterations = 1,
-    const std::string& engine_path = "model.trt");
 
 size_t small_policy_size();
 

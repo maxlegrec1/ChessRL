@@ -527,7 +527,9 @@ class Trainer:
             return
         script_path = Path(script).resolve()
         if not script_path.is_file():
-            self.console.log(f"[WARN] build script {script_path} not found; skipping TRT export.")
+            self.console.log(
+                f"[WARN] build script {script_path} not found; skipping the network export."
+            )
             return
         cmd = [
             script_path.as_posix(),
@@ -539,9 +541,9 @@ class Trainer:
         if not self.config.async_engine_build:
             try:
                 subprocess.run(cmd, check=True)
-                self.console.log(f"Updated TensorRT engine via {script_path}.")
+                self.console.log(f"Exported the network via {script_path}.")
             except Exception as exc:
-                self.console.log(f"[WARN] build_trt.sh failed: {exc}")
+                self.console.log(f"[WARN] {script_path.name} failed: {exc}")
             return
         if self._build_proc is not None and self._build_proc.poll() is None:
             self._log_event("build_skipped", checkpoint=checkpoint_path.name)

@@ -4,8 +4,8 @@ By default each launch creates a fresh run directory at
     artifacts/runs/<run_id>/
 containing isolated subfolders for the buffer, engines, checkpoints, pgns and
 wandb logs, plus a snapshot of the resolved config used for the run. A
-random-initialized TRT engine is built up-front so self-play has something to
-play with from the very first second.
+random-initialized network (.cnet) is built up-front so self-play has something
+to play with from the very first second.
 
 Usage:
     uv run python -m src.run                          # fresh run
@@ -88,8 +88,8 @@ def _latest_step_checkpoint(run_dir: Path) -> Path | None:
 
 
 def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
-    """Save a random-init checkpoint of the configured model, build the TRT
-    engine via scripts/build_trt.sh, and seed the run's .iteration file."""
+    """Save a random-init checkpoint of the configured model, export it with
+    scripts/build_net.sh, and seed the run's .iteration file."""
     import torch  # local import; pulls torch only when launching a fresh run.
 
     from src.models.factory import build_model
@@ -110,11 +110,11 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
     engine_dir = run_dir / "engines"
     iter_file = engine_dir / ".iteration"
 
-    print(f"[launcher] building initial TRT engine ({init_pt} -> {engine_dir})", flush=True)
+    print(f"[launcher] building the initial network ({init_pt} -> {engine_dir})", flush=True)
     subprocess.run(
         [
             "bash",
-            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ROOT / "scripts" / "build_net.sh"),
             str(init_pt),
             "0",
             str(engine_dir),
@@ -123,31 +123,39 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
         cwd=ROOT,
         check=True,
     )
-    initial_trt = engine_dir / "model_dynamic_initial.trt"
-    if not initial_trt.exists():
-        raise RuntimeError(f"build_trt.sh did not produce {initial_trt}")
-    return initial_trt
+    initial = engine_dir / "model_dynamic_initial.cnet"
+    if not initial.exists():
+        raise RuntimeError(f"build_net.sh did not produce {initial}")
+    return initial
 
 
 def _has_engine(run_dir: Path) -> bool:
-    """Whether engines/.iteration names at least one engine."""
+    """Whether the last engine engines/.iteration names is an existing .cnet network
+    (runs from before the fused network list TensorRT engines, which no longer load)."""
     it = run_dir / "engines" / ".iteration"
     if not it.is_file():
         return False
-    return any(
-        line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines()
-    )
+    rows = [
+        line
+        for line in it.read_text().splitlines()
+        if line.strip() and not line.startswith("iteration")
+    ]
+    if not rows:
+        return False
+    path = Path(rows[-1].split(",", 1)[1].strip())
+    return path.suffix == ".cnet" and path.is_file()
 
 
 def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
-    """A branch run (another run's checkpoint copied in) has no engine yet: self-play would wait
-    for one forever while the trainer waits for self-play's games. Build it from the checkpoint."""
+    """A branch run (another run's checkpoint copied in) has no engine yet, and a run from before
+    the fused network has only TensorRT ones: self-play would wait for one forever while the
+    trainer waits for self-play's games. Build it from the checkpoint."""
     step = ckpt.stem.split("_")[1]
     print(f"[launcher] no engine yet: building one from {ckpt.name}", flush=True)
     subprocess.run(
         [
             "bash",
-            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ROOT / "scripts" / "build_net.sh"),
             str(ckpt),
             str(int(step)),
             str(run_dir / "engines"),
@@ -240,7 +248,7 @@ def main() -> int:
             _build_initial_engine(run_dir, args.config or DEFAULT_BASE_CONFIG)
         else:
             # Trainer-only fresh run: still need an iteration file so the
-            # trainer's later build_trt invocations append cleanly.
+            # trainer's later build_net.sh invocations append cleanly.
             (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
         resume_path = None
 

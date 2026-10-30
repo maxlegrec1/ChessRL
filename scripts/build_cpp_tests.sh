@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the doctest-based C++ test binary at cpp/build/tests/cpp_tests.
 # Mirrors the compile flags used by cpp/setup.py. Needs only g++: the tested code has no
-# TensorRT or CUDA dependency (the policy vocabulary is in policy_vocab.cpp).
+# CUDA dependency (the policy vocabulary is in policy_vocab.cpp).
 
 set -euo pipefail
 

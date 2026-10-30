@@ -6,7 +6,7 @@ limited to 1,000 nodes per move. Games start from the initial position and from 
 balanced Stockfish openings, each with both colours. Both sides are deterministic, so the
 balanced openings are what makes the games differ.
 
-  uv run python scripts/showcase_games.py --engine c800.trt --anchor sf_s20_n1000 --openings 4 --out games.pgn
+  uv run python scripts/showcase_games.py --engine c800.cnet --anchor sf_s20_n1000 --openings 4 --out games.pgn
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from src.rating import ladder  # noqa: E402
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--engine", required=True, help="TensorRT engine of the network")
+    p.add_argument("--engine", required=True, help="the network (.cnet)")
     p.add_argument(
         "--name", default=None, help="the network's name in the PGN (default: engine file stem)"
     )

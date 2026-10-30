@@ -11,7 +11,6 @@
 
 #include "mcts/common.hpp"
 #include "mcts/single_inference.hpp"
-#include "mcts/expand_kernel.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
 #include "net/encoder_net.hpp"
@@ -40,7 +39,7 @@ py::dict summary_to_python(const chessrl::mcts::MctsSummary& summary)
 }
 
 // Fused-network output records as numpy arrays: policy logits [B, 1929], value WDL
-// [B, 3], mlh [B], mlh_q [B] (the four outputs of the old TensorRT engine).
+// [B, 3], mlh [B], mlh_q [B].
 py::dict records_to_python(const std::vector<unsigned char>& records, int batch)
 {
     using chessrl::net::kAuxOffset;
@@ -81,17 +80,6 @@ py::dict records_to_python(const std::vector<unsigned char>& records, int batch)
 
 PYBIND11_MODULE(_inference_cpp, m)
 {
-    py::class_<chessrl::InferenceTimings>(m, "InferenceTimings")
-        .def_readonly("encode_ms", &chessrl::InferenceTimings::encodeMs)
-        .def_readonly("inference_ms", &chessrl::InferenceTimings::inferMs)
-        .def_readonly("sampling_ms", &chessrl::InferenceTimings::sampleMs)
-        .def_readonly("total_ms", &chessrl::InferenceTimings::totalMs);
-
-    py::class_<chessrl::SmallInferenceResult>(m, "SmallInferenceResult")
-        .def_property_readonly("moves", [](const chessrl::SmallInferenceResult& self) { return self.moves; })
-        .def_property_readonly("wdl", [](const chessrl::SmallInferenceResult& self) { return self.wdl; })
-        .def_property_readonly("timings", [](const chessrl::SmallInferenceResult& self) { return self.timings; });
-
     // Encoder parity hook: returns the C++-side input plane vector for a
     // (FEN, history) pair so the Python parity test can bit-compare it
     // against fen_encoder.fen_to_tensor. Pure encoding; no NN call.
@@ -151,56 +139,6 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("fen"),
         py::arg("moves"),
         "Pack a FEN+history then CPU-expand it; must match encode_position_with_history.");
-
-    // GPU-path parity hook: pack on host, upload, run the CUDA expansion
-    // kernel (fp32 for an exact compare), download. Must equal the CPU
-    // reference (tests/test_packed_gpu_parity.py gates this).
-    m.def(
-        "expand_packed_gpu",
-        [](const std::string& fen, const std::vector<std::string>& moves) {
-            const std::string starting_fen = fen.empty()
-                ? std::string(chess::constants::STARTPOS)
-                : fen;
-            chess::Board board(starting_fen);
-            for (const auto& mv_uci : moves)
-            {
-                chess::Move mv = chess::uci::uciToMove(board, mv_uci);
-                if (mv == chess::Move::NO_MOVE)
-                    throw std::runtime_error("expand_packed_gpu: bad move " + mv_uci);
-                board.makeMove(mv);
-            }
-            chessrl::mcts::HistoryStack stack =
-                chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
-            auto packed = chessrl::mcts::single::pack_small_position(board, stack);
-
-            using chessrl::mcts::single::SmallPackedPosition;
-            using chessrl::mcts::single::kPackElems;
-            SmallPackedPosition* dPacked = nullptr;
-            float* dOut = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&dPacked), sizeof(SmallPackedPosition)) != cudaSuccess
-                || cudaMalloc(reinterpret_cast<void**>(&dOut), sizeof(float) * kPackElems) != cudaSuccess)
-            {
-                if (dPacked) cudaFree(dPacked);
-                if (dOut) cudaFree(dOut);
-                throw std::runtime_error("expand_packed_gpu: cudaMalloc failed");
-            }
-            cudaMemcpy(dPacked, &packed, sizeof(packed), cudaMemcpyHostToDevice);
-            auto err = chessrl::mcts::single::launch_expand_planes(
-                dPacked, dOut, 1, /*out_is_half=*/0, /*stream=*/0);
-            cudaDeviceSynchronize();
-            std::vector<float> host(static_cast<size_t>(kPackElems));
-            if (err == cudaSuccess)
-                cudaMemcpy(host.data(), dOut, sizeof(float) * kPackElems,
-                           cudaMemcpyDeviceToHost);
-            cudaFree(dPacked);
-            cudaFree(dOut);
-            if (err != cudaSuccess)
-                throw std::runtime_error("expand_packed_gpu: kernel launch failed");
-            return host;
-        },
-        py::arg("fen"),
-        py::arg("moves"),
-        "Pack + GPU-expand (fp32); must match encode_position_packed_roundtrip.");
 
     m.def(
         "fused_forward_dense",
@@ -269,17 +207,6 @@ PYBIND11_MODULE(_inference_cpp, m)
         "Fused-network throughput (positions/s) on the start position.");
 
     m.def(
-        "small_generate_moves",
-        [](const std::vector<std::string>& fens, float temperature, int iterations, const std::string& engine_path) {
-            return chessrl::small_generate_moves(fens, temperature, iterations, engine_path);
-        },
-        py::arg("fens"),
-        py::arg("temperature"),
-        py::arg("iterations") = 1,
-        py::arg("engine_path") = std::string("model.trt"),
-        "Run the TensorRT policy head and return sampled moves with timing stats.");
-
-    m.def(
         "small_mcts_search_batch",
         [](const std::vector<std::string>& fens,
            int simulations,
@@ -322,7 +249,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("simulations") = 800,
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("model.trt"),
+        py::arg("engine_path") = std::string("model.cnet"),
         py::arg("temperature_at_root") = 0.0F,
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,
@@ -379,7 +306,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("simulations") = 800,
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("model.trt"),
+        py::arg("engine_path") = std::string("model.cnet"),
         py::arg("temperature_at_root") = 0.0F,
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,

@@ -6,7 +6,7 @@ good training target needs.
 ## CPU cost of the search
 
 Measured with `scripts/bench_cpu_search.sh`: the production search code
-(`cpp/mcts/mcts_small.cpp`) with a fake network in place of TensorRT
+(`cpp/mcts/mcts_small.cpp`) with a fake network in place of the GPU one
 (`cpp/bench/fake_network.cpp`), on the 414 positions of `data/bench/positions.txt` (Stockfish 16
 self-play from 40 balanced openings, plies 8 to 140, each with its real game history). Settings
 are the recipe's: full searches of 400 simulations with Dirichlet noise, fast ones of 50,
@@ -107,8 +107,8 @@ A rented RTX 4090 with an EPYC 7742 (32 cores), TensorRT 10.14, branch `perf/cpu
 network at step 92.5k (encoder 128 x 4, FP16 engine built as `scripts/build_trt.sh` does).
 Self-play numbers are `scripts/bench_selfplay.py` with the recipe (90 s after 15 s of warm-up);
 engine numbers are `trtexec` with CUDA graphs and no host copies. Scripts: `scripts/perf/`
-(`perf_session.sh`, then `perf_quant.sh`); the logs are kept on the home machine in
-`~/chessrl-runs/perf-2026-10-30/`.
+(`perf_session.sh`, then `perf_quant.sh`), removed with TensorRT (commit 0607bbf has them); the
+logs are kept on the home machine in `~/chessrl-runs/perf-2026-10-30/`.
 
 The branch builds there, and its C++ tests (26) and GPU parity tests (20) pass.
 
@@ -220,7 +220,7 @@ Checks with the CPU benchmark (fake network, sharpness 3):
   games drawn by repetition (10 to 16% with reuse, 15 to 16% without) varies as much between
   runs as between settings.
 
-**On a GPU** (`scripts/perf/tree_reuse_ab.sh`: RTX 4090 with an EPYC 7702P, run C's network at
+**On a GPU** (`scripts/perf/tree_reuse_ab.sh`, now `selfplay_ab.sh`: RTX 4090 with an EPYC 7702P, run C's network at
 step 92.5k, the recipe against the recipe with `tree_reuse: true`, alternated twice, 60 s of
 warm-up and 240 s measured each):
 

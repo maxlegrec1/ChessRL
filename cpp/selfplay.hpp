@@ -129,7 +129,7 @@ public:
     // Get approximate number of positions in buffer
     size_t get_buffer_size() const;
 
-    // Swap the TensorRT engine between steps. Games in progress keep going
+    // Swap the network (.cnet) between steps. Games in progress keep going
     // (rebuilding the worker would discard them and their pending records).
     void set_engine(const std::string& engine_path);
 

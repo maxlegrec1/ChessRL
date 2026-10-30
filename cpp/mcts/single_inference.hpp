@@ -14,8 +14,8 @@
 #include "inference.hpp"
 #include "mcts/common.hpp"
 // SmallPackedPosition + plane-layout constants: standalone header (only
-// <cstdint>) shared with the CUDA expansion kernel so nvcc never parses
-// chess-library / TensorRT.
+// <cstdint>) shared with the fused CUDA kernel so nvcc never parses
+// chess-library.
 #include "mcts/packed_position.hpp"
 
 namespace chessrl::mcts::single
@@ -98,7 +98,7 @@ SmallEncodedPosition encode_small_position(
 
 struct SmallBatchConfig
 {
-    std::string engine_path{"model.trt"};
+    std::string engine_path{"model.cnet"};  // a .cnet file (src/export/to_cnet.py)
     int max_batch_size{1024};
     bool enable_telemetry{false};
 };
@@ -111,8 +111,8 @@ public:
     explicit SmallBatchRunner(SmallBatchConfig config = {});
 
     // Carries a POINTER to the compact packed snapshot (keeps the shared-
-    // queue critical section pointer-sized). Dense planes are produced on
-    // the GPU (launch_expand_planes) just before the TRT enqueue.
+    // queue critical section pointer-sized). The fused kernel expands it to
+    // the input planes on the GPU.
     Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position);
     void process_pending();
     size_t pending() const;

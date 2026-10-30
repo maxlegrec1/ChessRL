@@ -3,9 +3,9 @@
 A small AlphaZero, trained from scratch on one GPU.
 
 ChessRL learns chess only by playing against itself: no human games, no opening book. C++ workers
-play thousands of games at once with Monte Carlo tree search (MCTS), running the network through
-TensorRT in 16-bit floating point; a PyTorch trainer learns from the positions they save and
-publishes new engines back into the running games.
+play thousands of games at once with Monte Carlo tree search (MCTS), running the network with a
+fused CUDA kernel in 16-bit floating point; a PyTorch trainer learns from the positions they save
+and publishes new networks back into the running games.
 
 With the default recipe, on one RTX 4090, the network passes 1,000 Elo after about 2 hours and
 reaches about 2,230 after 24 hours on our rating ladder. Searching 800 simulations per move, it
@@ -47,18 +47,22 @@ The charts are drawn by `docs/blog/make_charts.py --readme` from the data of the
 
 ## How it works
 
-1. `python -m src.run` creates `artifacts/runs/<id>/`, copies the config there, builds an engine
-   from a randomly initialised network, and starts two processes: self-play and the trainer.
+1. `python -m src.run` creates `artifacts/runs/<id>/`, copies the config there, exports a randomly
+   initialised network, and starts two processes: self-play and the trainer.
 2. **Self-play** (`src/self_play`, C++ in `cpp/`) plays 1,024 games at once. A quarter of the moves
    get a full 400-simulation search and are saved to the buffer file with the search's visit
    counts; the others get a 50-simulation search that only moves the game forward.
 3. **The trainer** (`src/train`) samples batches of 2,048 positions from the newest part of the
    buffer and trains the network's outputs: the move probabilities (towards the visit counts), the
    expected result (towards the game's result) and the number of moves left.
-4. Every 500 steps it saves a checkpoint and builds a TensorRT engine in the background
-   (`scripts/build_trt.sh`). Self-play loads each new engine between moves, without restarting.
+4. Every 500 steps it saves a checkpoint and exports it for self-play (`scripts/build_net.sh`, a
+   `.cnet` file in a fraction of a second). Self-play loads each new network between moves,
+   without restarting.
 5. The two processes share nothing but files: the buffer and `engines/.iteration`, which points at
-   the newest engine. Either can be stopped and resumed on its own.
+   the newest network. Either can be stopped and resumed on its own.
+6. Self-play runs the whole network in one CUDA kernel launch per batch (`cpp/net/`): one thread
+   block per position, weights pre-packed by `src/export/to_cnet.py`. It is written for the
+   encoder at 128 wide, 8 heads, feed-forward 256 and up to 16 layers.
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the details.
 
@@ -86,8 +90,6 @@ Every field is described in [`docs/CONFIG.md`](docs/CONFIG.md).
 - **GPU**: an NVIDIA card with compute capability 8.0 or higher (Ampere, Ada, Hopper). Used on an
   RTX 4090 and an H200.
 - **CUDA Toolkit** 12.x with `nvcc`: https://developer.nvidia.com/cuda-downloads.
-- **TensorRT** 10.14 or later: the tarball from https://developer.nvidia.com/tensorrt (extract it to
-  a stable path), or NVIDIA's apt packages.
 - **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`. It installs Python 3.13 itself.
 - A C++17 compiler (the system `g++` is fine).
 - **Stockfish 16** for the rating ladder (`apt install stockfish`). Training runs without it.
@@ -100,15 +102,14 @@ git clone --recurse-submodules https://github.com/maxlegrec1/ChessRL.git && cd C
 # 1) Check the host (fails with a hint for anything missing).
 bash scripts/check_install.sh
 
-# 2) Where TensorRT lives, and which GPU architecture to compile for.
-export TENSORRT_ROOT=/usr/local/TensorRT-10.14.1.48
+# 2) Which GPU architecture to compile for.
 export CHESSRL_CUDA_ARCH=sm_89        # sm_89 RTX 4090, sm_90 H100/H200, sm_86 RTX 3090, sm_80 A100
 
 # 3) Build the C++ extension and install the Python dependencies.
 uv sync
 
 # 4) Run the tests that need no GPU.
-uv run pytest -m "not gpu and not trt"
+uv run pytest -m "not gpu"
 ```
 
 ## Run
@@ -133,8 +134,8 @@ tail -f artifacts/runs/<id>/selfplay.log artifacts/runs/<id>/training.log
 uv run python -m src.run --no-train      # self-play only
 uv run python -m src.run --no-selfplay   # trainer only
 
-# Build an engine from a checkpoint by hand.
-scripts/build_trt.sh artifacts/runs/<id>/checkpoints/step_00010000.pt 10000 /tmp/engines /tmp/engines/.iteration
+# Export a checkpoint for self-play by hand (appends it to the .iteration file).
+scripts/build_net.sh artifacts/runs/<id>/checkpoints/step_00010000.pt 10000 /tmp/engines /tmp/engines/.iteration
 ```
 
 The trainer writes `metrics/train.jsonl` and self-play `metrics/selfplay.jsonl` in the run
@@ -159,11 +160,11 @@ openings that Stockfish judges balanced. Each rating also solves 1,000 Lichess p
 searching 800 simulations per move:
 
 ```bash
-uv run python scripts/sf_benchmark.py --engines a.trt b.trt --elo 1400 2000 --games 40 --out bench.jsonl
+uv run python scripts/sf_benchmark.py --engines a.cnet b.cnet --elo 1400 2000 --games 40 --out bench.jsonl
 ```
 
-**Engine check**: `scripts/trt_parity.py ckpt.pt` compares a checkpoint's TensorRT FP16 engine with
-PyTorch on the same positions (top-move agreement, policy KL divergence, value error).
+**Network check**: `scripts/net_parity.py ckpt.pt` compares the fused CUDA network with PyTorch on
+the same positions (top-move agreement, policy KL divergence, value error).
 
 ## Dashboard and analysis board
 
@@ -181,8 +182,8 @@ checkpoint's search on the CPU for any position.
 
 | Script | What it does |
 |---|---|
-| `check_install.sh` | Checks uv, the GPU, `nvcc`, TensorRT, Stockfish and the target architecture. Run it first. |
-| `build_trt.sh` | Converts a checkpoint to a TensorRT engine (PyTorch → ONNX → TensorRT FP16). |
+| `check_install.sh` | Checks uv, the GPU, `nvcc`, Stockfish and the target architecture. Run it first. |
+| `build_net.sh` | Exports a checkpoint to the fused network format (`.cnet`) and appends it to a run's `.iteration` file. |
 | `build_cpp_tests.sh` | Builds the C++ tests (`cpp/build/tests/cpp_tests`). Needs only g++. |
 | `bench_cpu_search.sh` | CPU benchmark of the self-play search with a fake network, no GPU: CPU time per evaluation and a digest of the search results (built by `build_cpu_bench.sh`; positions from `make_bench_positions.py`). |
 | `ladder_daemon.py` | Rates a run's newest engine on the ladder, every 30 minutes. |
@@ -191,21 +192,21 @@ checkpoint's search on the CPU for any position.
 | `make_sf_openings.py`, `make_puzzle_set.py` | Build the ladder's balanced openings and its 1,000-puzzle set (both are in `data/`). |
 | `sf_benchmark.py` | The first post's Stockfish test, for several engines and Stockfish levels in parallel. |
 | `stockfish_match.py` | One match of an engine against Stockfish at a fixed Elo. |
-| `cpu_stockfish_match.py` | The same test with the network searching on the CPU (no TensorRT needed). |
+| `cpu_stockfish_match.py` | The same test with the network searching on the CPU (no GPU needed). |
 | `puzzle_scan.py`, `showcase_games.py` | Hard puzzles solved by a checkpoint, and games against one ladder opponent (PGN). |
-| `trt_parity.py` | TensorRT engine against PyTorch, per checkpoint. |
+| `net_parity.py` | The fused CUDA network against PyTorch, per checkpoint. |
 | `search_quality.py`, `search_quality_report.py` | Training-target quality per network evaluation on the CPU: self-play's PUCT search against Gumbel root search, judged by Stockfish (results in `docs/PERF.md`). |
 | `check_buffer.py` | Checks buffer records against python-chess. |
 | `bench_selfplay.py`, `perfreport.py` | Self-play speed benchmark with the training config, and a side-by-side report of two benchmarks. |
 | `dashboard.py`, `pages/1_Analysis.py`, `analysis_server.py` | The dashboard and the analysis board. |
-| `perf/` | GPU performance session for a rented box: self-play and engine speed, batching, contention, FP16 / INT8 / FP8 and network size (results in `docs/PERF.md`). |
+| `perf/` | Self-play speed A/B on a rented GPU box (`selfplay_ab.sh`; results in `docs/PERF.md`). |
 | `vast/` | Running on rented Vast.ai GPUs: launch with a budget guard, box setup, metric sync. |
 
 ## Tests
 
 ```bash
-uv run pytest                            # everything (GPU and TensorRT tests skip if unavailable)
-uv run pytest -m "not gpu and not trt"   # CPU only
+uv run pytest                 # everything (GPU tests skip without CUDA)
+uv run pytest -m "not gpu"    # CPU only
 
 bash scripts/build_cpp_tests.sh && cpp/build/tests/cpp_tests   # C++ tests
 ```
@@ -216,7 +217,6 @@ bash scripts/build_cpp_tests.sh && cpp/build/tests/cpp_tests   # C++ tests
 |---|---|
 | `nvcc not at /usr/local/cuda/bin/nvcc` | The `/usr/local/cuda` link is missing or points at a CUDA without `nvcc`. `export CUDA_ROOT=/usr/local/cuda-12.8` (wherever your `nvcc` is). |
 | `error: [Errno 2] No such file ... nvcc` during `uv sync` | Same as above; `scripts/check_install.sh` catches it. |
-| `TENSORRT_ROOT=... but ...NvInfer.h does not exist` | TensorRT is not extracted at that path. Fix the path, or unset it to use the apt packages. |
 | `libcudart.so.12: cannot open shared object file` | Add the CUDA 12 library directory to `LD_LIBRARY_PATH`, e.g. `/usr/local/cuda-12.8/targets/x86_64-linux/lib`. |
 | `CHESSRL_CUDA_ARCH=... is malformed` | Use `sm_` followed by the compute capability: `sm_89` (RTX 4090), `sm_90` (H100/H200), `sm_86` (RTX 3090), `sm_80` (A100). |
 | The extension imports but self-play is slow | It was compiled for another architecture. Set `CHESSRL_CUDA_ARCH` and run `uv sync` again. |
@@ -226,9 +226,10 @@ bash scripts/build_cpp_tests.sh && cpp/build/tests/cpp_tests   # C++ tests
 - `src/run.py`: the launcher. `src/self_play/`: the self-play process. `src/train/`: the trainer, the
   buffer reader and the config (`config.yaml` is the recipe).
 - `src/models/`: the transformer (`encoder.py`), the ResNet (`small/`), growth and model loading.
-- `src/export/`: checkpoint to ONNX. `src/rating/`: the ladder. `src/analysis/`: the CPU search
+- `src/export/`: checkpoint to the fused network format. `src/rating/`: the ladder. `src/analysis/`: the CPU search
   behind the analysis board.
-- `cpp/`: the C++ extension (MCTS, self-play, TensorRT inference, position encoding) and the chess
+- `cpp/`: the C++ extension (MCTS, self-play, position encoding, the fused CUDA network in
+  `cpp/net/`) and the chess
   library (a git submodule).
 - `scripts/`: the tools above. `tests/`: the Python tests.
 - `data/`: the ladder's balanced openings and the 1,000 puzzles.

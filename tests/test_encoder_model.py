@@ -43,34 +43,9 @@ def test_policy_head_matches_naive_formula():
     torch.testing.assert_close(logits[:, real], naive[:, real], rtol=1e-4, atol=1e-5)
 
 
-def test_onnx_export(tmp_path):
-    m = EncoderModel(d_model=32, layers=1, heads=4, d_ff=64).eval()
-
-    class Wrap(torch.nn.Module):
-        def __init__(self, inner):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, x):
-            p, _v, vq, mlh, mlh_q = self.inner(x, return_all=True)
-            return p, torch.softmax(vq, dim=-1), mlh, mlh_q
-
-    torch.onnx.export(
-        Wrap(m),
-        torch.rand(2, 8, 8, 111),
-        (tmp_path / "enc.onnx").as_posix(),
-        input_names=["input"],
-        output_names=["policy", "value", "mlh", "mlh_q"],
-        dynamic_axes={"input": {0: "batch_size"}},
-        opset_version=17,
-        dynamo=False,
-    )
-    assert (tmp_path / "enc.onnx").stat().st_size > 0
-
-
 def test_rmsnorm_is_fp16_safe_on_a_grown_residual_stream():
-    # TensorRT runs the norm in FP16; the residual stream reached |x| ~ 350 in the
-    # encoder arm, where x.pow(2) overflows FP16 (> 65504).
+    # A norm run in FP16 (as the TensorRT engine did) must survive a residual stream at
+    # |x| ~ 350, as in the encoder arm, where x.pow(2) overflows FP16 (> 65504).
     from src.models.encoder import RMSNorm
 
     torch.manual_seed(0)

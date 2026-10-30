@@ -31,7 +31,7 @@ MAGIC = b"CHESSNET"
 VERSION = 1
 DTYPES = {np.float16: 0, np.float32: 1, np.uint16: 2, np.int32: 3}
 LOG2E = 1.0 / math.log(2.0)
-# ExportWrapper's modes: the MLPs whose softmax is averaged into "value", and whether
+# src/export/heads.py's ExportWrapper modes: the MLPs whose softmax is averaged into "value", and whether
 # "mlh_q" comes from the mlh_q head (otherwise it repeats mlh).
 HEADS = {
     "search": (["value_q"], True),
@@ -83,9 +83,19 @@ def vocab_codes() -> np.ndarray:
     return codes.astype(np.uint16)
 
 
+# The sizes cpp/net/encoder_kernel.cu is compiled for (any depth up to MAX_LAYERS).
+KERNEL_DIMS = {"d_model": 128, "heads": 8, "d_ff": 256}
+MAX_LAYERS = 16
+
+
 def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
     cfg = model.cfg
     d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
+    if any(cfg[k] != v for k, v in KERNEL_DIMS.items()) or not 1 <= layers <= MAX_LAYERS:
+        raise ValueError(
+            f"the fused kernel runs d_model 128, 8 heads, d_ff 256 and 1 to {MAX_LAYERS} layers; "
+            f"this network has {cfg}"
+        )
     hd = d // heads
     sd = {k: v.detach().float().cpu().numpy() for k, v in model.state_dict().items()}
     wdl_mlps, mlhq_from_q = HEADS[search_heads]
@@ -98,9 +108,7 @@ def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
     out: list[tuple[str, np.ndarray]] = [
         (
             "config",
-            np.array(
-                [d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32
-            ),
+            np.array([d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32),
         ),
         ("embed.w", pack_b(embed)),
         ("embed.b", sd["embed.bias"]),

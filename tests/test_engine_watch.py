@@ -3,9 +3,9 @@ from src.self_play.engine_watch import EngineWatcher
 
 def test_pickup_latest_row(tmp_path):
     f = tmp_path / ".iteration"
-    f.write_text("iteration,engine_path\n100,/tmp/a.trt\n200,/tmp/b.trt\n")
+    f.write_text("iteration,engine_path\n100,/tmp/a.cnet\n200,/tmp/b.cnet\n")
     w = EngineWatcher(f, poll_interval=0)
-    assert w.engine_path == "/tmp/b.trt"
+    assert w.engine_path == "/tmp/b.cnet"
 
 
 def test_missing_file_keeps_empty(tmp_path):

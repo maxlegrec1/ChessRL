@@ -46,17 +46,17 @@ Launcher flags (`python -m src.run`):
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `device` | `cuda` | `cuda` | Torch device for training. Self-play always runs on the GPU through TensorRT. |
+| `device` | `cuda` | `cuda` | Torch device for training. Self-play always runs on the GPU (the fused CUDA network). |
 | `batch_size` | 2048 | 256 | Records per training step. |
 | `learning_rate` | 0.001 | 1e-5 | Peak learning rate; `lr_schedule` and growth re-warmup scale it. |
 | `optimizer` | `adamw` | `adam` | `adamw`: `torch.optim.AdamW`, decoupled weight decay. `adam`: `torch.optim.Adam`, where `weight_decay` becomes an L2 term in the gradient. |
-| `weight_decay` | 0.05 | 0.0 | Applied only to parameters with two or more dimensions (weight matrices, embeddings, the attention pair bias); norm gains, biases and scalar gains are exempt. Decoupled only with `optimizer: adamw`. The recipe uses it to keep the encoder's activations inside FP16 range for TensorRT. |
+| `weight_decay` | 0.05 | 0.0 | Applied only to parameters with two or more dimensions (weight matrices, embeddings, the attention pair bias); norm gains, biases and scalar gains are exempt. Decoupled only with `optimizer: adamw`. The recipe uses it to keep the encoder's activations inside FP16 range. |
 | `beta1`, `beta2` | 0.9, 0.999 | 0.9, 0.999 | Adam betas. |
 | `grad_clip` | 1.0 | 0.0 | Maximum global gradient norm, applied after unscaling the FP16 loss scale. 0 = off. |
 | `amp_dtype` | `float16` | `float16` | Autocast dtype: `float16` (also `fp16`, `half`) with a gradient scaler, or `bfloat16` (`bf16`) without one. Unknown values fall back to float16. |
 | `log_every` | 5 | 50 | Steps between rows of `metrics/train.jsonl` (and W&B). The console prints every 10 rows. |
 | `policy_target` | `visits` | `played` | `visits`: cross-entropy to the record's visit distribution. `played`: cross-entropy to the move played. Both losses are logged either way. The default `loss_weights.policy` (0.1) is the one for `played`; the recipe pairs `visits` with 1.0. |
-| `search_heads` | `outcome` | `search` | Which heads the engine gives MCTS. `outcome`: value and mlh, trained on game results. `search`: value_q and mlh_q, trained on the search's own estimates. `q_value` (value_q with mlh) and `blend` (the average of both WDLs, with mlh) are value-only variants. Applied at export from the config saved in each checkpoint, so a change affects engines built from later checkpoints; `src.export.to_onnx --search_heads` overrides it. |
+| `search_heads` | `outcome` | `search` | Which heads the engine gives MCTS. `outcome`: value and mlh, trained on game results. `search`: value_q and mlh_q, trained on the search's own estimates. `q_value` (value_q with mlh) and `blend` (the average of both WDLs, with mlh) are value-only variants. Applied at export from the config saved in each checkpoint, so a change affects networks exported from later checkpoints; `src.export.to_cnet --search_heads` overrides it. |
 | `mirror_prob` | 0.5 | 0.5 | Probability that a sampled record is colour-flipped (ranks mirrored, colours swapped, moves remapped). The only augmentation. |
 | `compile` | *unset* | false | Wrap the model in `torch.compile` for training. |
 | `async_engine_build` | true | false | Build engines in a background process while training continues. A checkpoint saved while the previous build still runs gets no engine (`build_skipped` event). false: the trainer waits for each build. |
@@ -113,10 +113,10 @@ capped at 4 (100 plies).
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
 | `dir` | *run path* `checkpoints/` | `artifacts/checkpoints` | Where `step_NNNNNNNN.pt` go. Its parent counts as the run directory (metrics, `engine_builds.log`, the ladder file read by growth). |
-| `every_steps` | 500 | 1000 | Training steps between checkpoints, and so between engine builds. |
+| `every_steps` | 500 | 1000 | Training steps between checkpoints, and so between network exports. |
 | `keep_last` | 999999 | 5 | After each save the trainer deletes all but the newest `keep_last` `step_*.pt`. 0 or less keeps all. |
-| `build_script` | `scripts/build_trt.sh` | `scripts/build_trt.sh` | Run after each checkpoint as `<script> <ckpt> <step> <engine_dir> <iteration_file>`; null = no engines. The launcher's initial and resume engines always use `scripts/build_trt.sh`. |
-| `engine_dir` | *run path* `engines/` | `artifacts/engines` | Where engines (`.onnx`, `.trt`) are built. |
+| `build_script` | `scripts/build_net.sh` | `scripts/build_net.sh` | Run after each checkpoint as `<script> <ckpt> <step> <engine_dir> <iteration_file>`; null = no networks. The launcher's initial and resume networks always use `scripts/build_net.sh`, and a config naming the old `scripts/build_trt.sh` runs `build_net.sh`. |
+| `engine_dir` | *run path* `engines/` | `artifacts/engines` | Where networks (`.cnet`) are exported. |
 | `iteration_file` | *run path* `engines/.iteration` | `artifacts/engines/.iteration` | CSV (`iteration,engine_path`) the build script appends to and self-play reads. |
 
 ## `data`
@@ -210,10 +210,8 @@ Settings outside the YAML, read by the C++ extension at run time or by the build
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CHESSRL_INFER_WORKERS` | 4 | Inference worker threads per batch runner, each with its own TensorRT context and CUDA stream. |
-| `CHESSRL_CUDA_GRAPHS` | 1 | 0 runs inference without CUDA graphs. |
-| `CHESSRL_GRAPH_BUCKETS` | `32,64,128,256` | Batch sizes captured as CUDA graphs. The list is trimmed or extended so that its largest size covers the runner's maximum batch (`selfplay.threads` in self-play). |
+| `CHESSRL_INFER_WORKERS` | 4 | Inference worker threads per batch runner, each with its own CUDA stream. |
 | `CHESSRL_MCTS_FLUSH_US` | 100 | Microseconds the batcher waits for a full batch before dispatching a partial one. |
-| `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. Engines from `build_trt.sh` accept at most 512. |
-| `CHESSRL_CUDA_ARCH`, `TENSORRT_ROOT`, `CUDA_ROOT` | `sm_90`, `/usr/local/TensorRT-10.14.1.48`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture and toolkit locations. |
+| `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. |
+| `CHESSRL_CUDA_ARCH`, `CUDA_ROOT` | `sm_90`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture (the fused kernel needs `sm_80` or newer) and toolkit location. |
 | `CHESSRL_RUNS_ROOT` | `artifacts/runs` (dashboard), `~/chessrl-runs` (analysis board) | Where the dashboard and the analysis board look for runs; colon-separated for the dashboard. |

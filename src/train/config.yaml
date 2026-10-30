@@ -9,7 +9,7 @@ batch_size: 2048
 learning_rate: 0.001
 optimizer: adamw
 # Decoupled weight decay, on weight matrices only (norms, biases and gains are exempt). It
-# keeps the encoder's activations well inside FP16 range for the TensorRT engine.
+# keeps the encoder's activations well inside FP16 range.
 weight_decay: 0.05
 beta1: 0.9
 beta2: 0.999
@@ -41,11 +41,11 @@ loss_weights:
 
 checkpoint:
   dir: artifacts/checkpoints
-  # A checkpoint and a new TensorRT engine every 500 steps. The engine builds in the
+  # A checkpoint and a new network (.cnet) every 500 steps. The export runs in the
   # background (async_engine_build) and self-play loads it without restarting.
   every_steps: 500
   keep_last: 999999
-  build_script: scripts/build_trt.sh
+  build_script: scripts/build_net.sh
   engine_dir: artifacts/engines
   iteration_file: artifacts/engines/.iteration
 async_engine_build: true

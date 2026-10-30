@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build cpp/build/bench/bench_search: the self-play search (production code) with a fake
-# network in place of TensorRT, so it builds and runs on any machine with g++, no GPU.
+# network in place of the CUDA one, so it builds and runs on any machine with g++, no GPU.
 # Same compile flags as cpp/setup.py, plus -g for profiler symbols (code generation is
 # unchanged). Run it from the repo root (the policy vocabulary is read from cpp/).
 

@@ -90,7 +90,7 @@ struct MctsOptions
     float dirichlet_epsilon{0.25F};
     bool use_dirichlet{false};
     float temperature{1.0F};
-    std::string small_engine_path{"model.trt"};
+    std::string small_engine_path{"model.cnet"};
     // Seed of the search's random numbers (Dirichlet noise, root move sampling).
     // 0 = a fresh random seed per search.
     std::uint64_t seed{0};

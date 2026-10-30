@@ -81,7 +81,7 @@ def play_one(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True, help="path to TRT engine .trt")
+    ap.add_argument("--engine", required=True, help="path to the network (.cnet)")
     ap.add_argument("--stockfish", default="/usr/games/stockfish")
     ap.add_argument("--num-games", type=int, default=20)
     ap.add_argument("--simulations", type=int, default=800)

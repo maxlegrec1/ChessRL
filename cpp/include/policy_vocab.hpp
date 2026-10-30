@@ -2,7 +2,7 @@
 
 // The policy vocabulary: the network's 1,929 move tokens, read once from
 // cpp/policy_index.txt (relative to the working directory, so run from the repo root).
-// Implemented in policy_vocab.cpp, which needs no TensorRT, so the search and the C++ tests
+// Implemented in policy_vocab.cpp, which needs no CUDA, so the search and the C++ tests
 // build without it.
 
 #include <cstddef>

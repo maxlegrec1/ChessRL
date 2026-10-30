@@ -12,7 +12,6 @@ dependencies = [
     "tqdm>=4.67.1",
     "rich>=14.2.0",
     "wandb>=0.23,<1",
-    "onnx>=1.19.1",
     "pyyaml>=6.0.2",
     "chessrl-inference-cpp",
 ]
@@ -46,7 +45,6 @@ chessrl-inference-cpp = { workspace = true }
 testpaths = ["tests"]
 markers = [
     "gpu: requires CUDA",
-    "trt: requires TensorRT engine artifact",
 ]
 
 [tool.ruff]

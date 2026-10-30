@@ -1,6 +1,6 @@
 // CPU benchmark of the self-play search: the production search code (mcts_small.cpp) on
 // positions with their real game history, with a fake network (fake_network.cpp) in
-// place of TensorRT. Reports the CPU time the search spends per network evaluation.
+// place of the CUDA one. Reports the CPU time the search spends per network evaluation.
 // Built by scripts/build_cpu_bench.sh, run by scripts/bench_cpu_search.sh.
 //
 //   bench_search --positions data/bench/positions.txt --mode full --threads 8
