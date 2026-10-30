@@ -220,6 +220,22 @@ Checks with the CPU benchmark (fake network, sharpness 3):
   games drawn by repetition (10 to 16% with reuse, 15 to 16% without) varies as much between
   runs as between settings.
 
+**On a GPU** (`scripts/perf/tree_reuse_ab.sh`: RTX 4090 with an EPYC 7702P, run C's network at
+step 92.5k, the recipe against the recipe with `tree_reuse: true`, alternated twice, 60 s of
+warm-up and 240 s measured each):
+
+| setting | recorded positions/s | games/s | evaluations/s | evaluations per position | mean batch |
+|---|---|---|---|---|---|
+| recipe | 452.8, 444.1 | 51.1, 49.7 | 248.7k, 244.6k | 550 | 117 |
+| tree reuse | **685.0, 678.1** | 70.3, 69.7 | 270.1k, 267.7k | 394 | 115 |
+
+Recorded positions per second rise by 52%. Two effects multiply: 28% fewer evaluations per
+recorded position (394 instead of 550, alone worth +39%), and 9% more evaluations per second,
+because most searches now start from a root that is already expanded and skip its separate
+single-position network call. The GPU does the same work per batch (1.05 ms) but gets 10% more
+batches per second, so it was waiting on the search part of the time. Games per second rise
+less (+39%) because games are longer.
+
 Not measured yet: the effect on training. Records from reused searches include visits gathered
-before the root noise was mixed in, and games are longer. A GPU A/B at equal hours decides
+before the root noise was mixed in, and games are longer. A training A/B at equal hours decides
 whether `tree_reuse` goes into the recipe.
