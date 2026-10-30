@@ -5,8 +5,9 @@ budget (0.81M parameters at d_model 128, 4 layers): 64 square tokens built from 
 pre-RMSNorm blocks with QK-norm attention, one learned square-pair attention
 bias per head shared by all layers ("geom" bias), the input embedding
 re-injected before every layer, SwiGLU feed-forward, and an attention policy
-head scoring (from-square, to-square) pairs. Attention is plain matmul +
-softmax; cpp/net/encoder_kernel.cu runs the same network for self-play.
+head scoring (from-square, to-square) pairs. Attention runs as one fused kernel
+(scaled_dot_product_attention, the pair bias as its additive mask); cpp/net/encoder_kernel.cu
+runs the same network for self-play.
 """
 
 from __future__ import annotations
@@ -84,8 +85,17 @@ class Block(nn.Module):
         h = self.norm1(x)
         q, k, v = self.qkv(h).view(b, n, 3, self.heads, self.hd).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
-        att = (q @ k.transpose(-1, -2)) / math.sqrt(self.hd) + bias
-        h = (att.softmax(dim=-1) @ v).transpose(1, 2).reshape(b, n, d)
+        # softmax(q.k / sqrt(hd) + bias) v without writing the [batch, heads, 64, 64] scores: they
+        # and their softmax were a quarter of a training step's GPU time. The fused kernel's FP32
+        # backward on the GPU rejects this layout, so FP32 training there keeps the explicit form.
+        if q.is_cuda and v.dtype == torch.float32 and torch.is_grad_enabled():
+            att = (q @ k.transpose(-1, -2)) / math.sqrt(self.hd) + bias
+            h = att.softmax(dim=-1) @ v
+        else:
+            h = F.scaled_dot_product_attention(
+                q.to(v.dtype), k.to(v.dtype), v, attn_mask=bias.to(v.dtype).expand(b, -1, -1, -1)
+            )
+        h = h.transpose(1, 2).reshape(b, n, d)
         x = x + self.out(h)
         gate, up = self.up(self.norm2(x)).chunk(2, dim=-1)
         return x + self.down(F.silu(gate) * up)

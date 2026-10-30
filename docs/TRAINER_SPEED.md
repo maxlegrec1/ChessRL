@@ -66,6 +66,16 @@ small reduction-heavy gradients; batch-to-batch noise is far larger). In the rea
 the first table) the compiled trainer keeps up with self-play at full speed: 5 samples per record,
 waiting half the time. `compile: true` is in the recipe since then.
 
+**Fused attention** (`F.scaled_dot_product_attention` with the pair bias as its additive mask,
+PyTorch's memory-efficient kernel): the step takes 80.1 ms eager and **26.4 ms compiled** (from
+102.4 and 33.5), 3.9 times faster than the eager step with the explicit attention. Against the
+explicit formula in the model's layout: outputs within FP16 rounding, gradients of q, k, v and the
+pair bias within 0.06% (FP32 evaluation within 3e-6); the fused self-play kernel's parity is
+unchanged. What is left of the compiled step is spread thin: the attention backward about 2 ms,
+the fused SwiGLU, norm and QK-norm kernels 0.6 to 1.5 ms each, the matrix multiplies about 5 ms
+in all. The items below would each win a few percent; the trainer already waits for records half
+the time in a real run.
+
 ## Ranked by GPU time saved
 
 1. **Fused attention.** `src/models/encoder.py` builds the full score tensor in every layer:
