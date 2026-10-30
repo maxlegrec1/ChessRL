@@ -8,24 +8,26 @@ are marked with their measured effect there.
 
 ## Where things stand (2026-10-30)
 
-A short real run on an RTX 4090 with a Ryzen 9 7950X (run C's checkpoint, the recipe with the
-fused network and tree reuse, trainer and self-play together; `docs/PERF.md`):
+Short real runs on an RTX 4090 with a Ryzen 9 7950X (run C's checkpoint, the recipe with the
+fused network and tree reuse, 12 minutes each, the last 8 measured; `docs/PERF.md`):
 
-| | value |
-|---|---|
-| records/s | 1,327 (without the trainer, `bench_selfplay.py`: about 2,000) |
-| trainer steps/s | 3.24, at 2,048 samples per step |
-| step time (median) | 0.14 s |
-| samples per record | 5.0, the recipe's target (`data.target_k`) |
-| share of time the trainer waits for records | 52% |
-| GPU busy | 89% |
+| setup | records/s | trainer steps/s | step time | samples per record | trainer waiting | GPU busy |
+|---|---|---|---|---|---|---|
+| self-play alone | 2,006 | | | | | 79% |
+| trainer + self-play | 1,327 | 3.24 | 0.14 s | 5.0 | 52% | 89% |
+| both under MPS | 1,662 | 4.06 | 0.22 s | 5.0 | 9% | 98% |
+| MPS, trainer at below-normal priority | 1,964 | 3.46 | 0.28 s | 3.65 | 0% | 99% |
 
-The trainer keeps up, but its steps fill about 45% of the time, and self-play makes a third
-fewer records next to it. So the goal is not more steps per second (pacing caps them at
-`target_k`) but fewer GPU-seconds per step.
+Without MPS the trainer keeps up (it reaches the recipe's 5 samples per record, `data.target_k`,
+and waits half the time), but the two processes take turns on the GPU and self-play makes a
+third fewer records. Under MPS their kernels share the GPU; with the trainer at low priority,
+self-play loses only 2% and the trainer gets what is left, 3.46 steps/s, not enough for 5
+samples per record at 1,964 records/s (that needs 4.8). From there every GPU-second taken off a
+step is more training at no cost to self-play. So the goal is fewer GPU-seconds per step.
 
 The step is not compute-bound. The network is small (0.81M parameters, about 0.6 TFLOP per
-step of 2,048 positions, forward and backward), and at 0.14 s that is about 4 TFLOP/s on a
+step of 2,048 positions, forward and backward), and at 0.14 s (sharing the GPU in turns) that
+is about 4 TFLOP/s on a
 card that does 165 with FP32 accumulation. The speedrun trains a 30 times larger model at
 12,600 positions/s on the same card. The time goes to memory traffic (eager attention and
 element-wise kernels), kernel launches and host syncs.
@@ -82,7 +84,9 @@ how much each item below can win.
 The GPU is idle part of the time even next to the trainer (self-play's batches leave gaps).
 Training kernels in those gaps cost self-play nothing.
 - **MPS with a lower client priority for the trainer** (`CUDA_MPS_CLIENT_PRIORITY=1`; the
-  driver on the rented boxes supports it). No code change. Being measured (`docs/PERF.md`).
+  driver on the rented boxes supports it). Measured above: self-play 1,964 records/s instead of
+  1,327 (MPS without the priority: 1,662). Needs the launcher to start the MPS daemon and to
+  give the trainer the variable (the measurement started both by hand).
 - **One process, two stream priorities**: self-play's streams at high priority, the trainer's at
   low, so the GPU schedules self-play's blocks first. Needs the trainer inside the self-play
   process (or self-play inside the trainer's): a bigger change, worth it only if MPS falls short.

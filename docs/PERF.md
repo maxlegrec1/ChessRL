@@ -311,3 +311,36 @@ A neighbour on that host loaded it to about 95 threads during one attempt and cu
 by 40 to 70%; another rented "whole" machine (a Ryzen 9 7950X3D) had about 24 threads busy outside
 our container with nothing of ours running. Logs: `~/chessrl-runs/perf-2026-10-30/fused-ab/`
 and `perf4/`.
+
+**Batching settings** (same box, the recipe with tree reuse, one run each, 60 s + 240 s):
+
+| setting | recorded positions/s | mean batch | ms per batch | cores |
+|---|---|---|---|---|
+| recipe: 128 threads, 4 inference workers, 1,024 boards, 100 µs flush | 2,004.3 | 119 | 0.20 | 14.7 |
+| 192 threads | 1,830.3 | 164 | 0.31 | 15.2 |
+| 256 threads | 1,820.1 | 210 | 0.35 | 17.1 |
+| 2,048 boards | 1,982.6 | 123 | 0.21 | 15.6 |
+| 50 µs flush | 2,009.7 | 117 | 0.20 | 14.9 |
+| 6 inference workers | 2,096.8 | 106 | 0.23 | 21.1 |
+
+Bigger batches take proportionally longer and evaluations per second stay flat: the GPU is
+nearly full (81 to 90% busy in `nvidia-smi dmon`). A batch of about 119 positions occupies 119 of
+the 128 SMs (one block per position, one block per SM), so the workers' batches mostly queue
+behind one another. Six workers overlap them a little more (+4.6%) for 6 more cores spinning on
+the GPU; not adopted. The next self-play gains are in the kernel (FP16 accumulation in the
+qkv, up and policy multiplies, smaller blocks so that two share an SM).
+
+**With the trainer** (short real runs from run C's checkpoint, 12 minutes each, the last 8
+measured; `docs/TRAINER_SPEED.md` has the trainer's side):
+
+| setup | records/s | trainer steps/s | samples per record | GPU busy |
+|---|---|---|---|---|
+| self-play alone | 2,006 | | | 79% |
+| trainer + self-play | 1,327 | 3.24 | 5.0 | 89% |
+| both under MPS | 1,662 | 4.06 | 5.0 | 98% |
+| MPS, trainer at below-normal priority | 1,964 | 3.46 | 3.65 | 99% |
+
+Without MPS the two processes take turns on the GPU and self-play loses a third. Under MPS
+their kernels run side by side; with the trainer at below-normal priority
+(`CUDA_MPS_CLIENT_PRIORITY=1`) self-play loses 2% and the trainer runs in what is left, which
+is not quite enough for the recipe's 5 samples per record.
