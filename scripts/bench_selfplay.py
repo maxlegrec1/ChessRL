@@ -93,6 +93,13 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def host_busy_sec() -> float:
+    """Busy CPU seconds of the whole host since boot (/proc/stat is not per container)."""
+    with open("/proc/stat") as fh:
+        f = [float(x) for x in fh.readline().split()[1:9]]
+    return (sum(f) - f[3] - f[4]) / os.sysconf("SC_CLK_TCK")
+
+
 def main() -> int:
     args = parse_args()
     if not pathlib.Path(args.engine).exists():
@@ -136,6 +143,7 @@ def main() -> int:
 
     t_start = time.monotonic()
     cpu_start = time.process_time()  # every thread of this process: the search and the runner
+    host_start = host_busy_sec()
     samples: list[dict[str, Any]] = []
     last_sample = t_start
     step_count = 0
@@ -164,6 +172,7 @@ def main() -> int:
     elapsed = time.monotonic() - t_start
     cpu_sec = time.process_time() - cpu_start
     host_load = os.getloadavg()[0]  # in a container: the whole host, neighbours included
+    others_sec = host_busy_sec() - host_start - cpu_sec  # CPU anything else on the host used
     post_stats = worker.inference_stats()
 
     delta_batches = post_stats.batches - pre_stats.batches
@@ -205,7 +214,7 @@ def main() -> int:
     print(
         f"[bench]   cpu: {cpu_sec / elapsed:.1f} cores, "
         f"{cpu_sec * 1000 / max(1, pre_positions):.1f} ms per recorded position, "
-        f"host load {host_load:.0f}"
+        f"host load {host_load:.0f}, rest of the host {others_sec / elapsed:.1f} cores"
     )
 
     out = {
@@ -219,6 +228,7 @@ def main() -> int:
         "wall_clock_sec": elapsed,
         "cpu_sec": cpu_sec,
         "host_load": host_load,
+        "host_others_sec": others_sec,
         "warmup_sec": args.warmup_sec,
         "steps": step_count,
         "positions": pre_positions,
