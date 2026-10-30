@@ -22,6 +22,9 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -1252,8 +1255,18 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     // (about 120k wake-ups a second for the recipe's 128 threads), and woken threads waited for a
     // core. Each search does the same work in the same order either way.
     const size_t per_thread = static_cast<size_t>(std::max(1, searches_per_thread));
+    // CHESSRL_SEARCH_NICE (default 0): the search threads' nice value, so that an inference
+    // worker woken for a batch gets a core ahead of them (the workers and the caller keep theirs).
+    static const int search_nice = [] {
+        const char* env = std::getenv("CHESSRL_SEARCH_NICE");
+        return env ? std::atoi(env) : 0;
+    }();
     auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index,
                            per_thread]() {
+        if (search_nice != 0)
+        {
+            setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), search_nice);
+        }
         std::vector<std::pair<size_t, std::unique_ptr<SmallMctsRunner>>> active;
         auto take = [&]() {
             const size_t job_id = next_job_index.fetch_add(1);
