@@ -18,7 +18,8 @@ fused network and tree reuse, 12 minutes each, the last 8 measured; `docs/PERF.m
 | both under MPS | 1,662 | 4.06 | 0.22 s | 5.0 | 9% | 98% |
 | MPS, trainer at below-normal priority | 1,964 | 3.46 | 0.28 s | 3.65 | 0% | 99% |
 | same, through the launcher, FP16 accumulation in self-play (today's recipe) | 1,994 | 4.86 | 0.17 s | 5.0 | 16% | 93% |
-| + zero-copy hand-back in self-play (today's recipe) | 2,347 | 4.65 | 0.21 s | 4.1 | 0% | 98% |
+| + zero-copy hand-back in self-play | 2,347 | 4.65 | 0.21 s | 4.1 | 0% | 98% |
+| + `torch.compile` in the trainer (today's recipe) | 2,402 | 5.85 | 0.076 s | 5.0 | 50% | 86% |
 
 Without MPS the trainer keeps up (it reaches the recipe's 5 samples per record, `data.target_k`,
 and waits half the time), but the two processes take turns on the GPU and self-play makes a
@@ -57,6 +58,13 @@ its gradient 3 ms, the batched matmuls 5 ms); the QK-norm about 20%; the matrix 
 linear layers about 5%. Memory-bound element-wise work, which compiling fuses: 3 times faster.
 What is left on top after compiling is mostly attention (its fused softmax kernels and batched
 matmuls), the next item's target.
+
+Compiled against eager on one real batch with run C's weights (`torch.autocast` FP16, as the
+trainer runs): outputs within FP16 rounding (policy logits 0.15 at a scale of 26), the loss equal
+to 6 digits, gradients within 3% per tensor (the QK-norm gains, the pair bias and the x0 gains,
+small reduction-heavy gradients; batch-to-batch noise is far larger). In the real run (last row of
+the first table) the compiled trainer keeps up with self-play at full speed: 5 samples per record,
+waiting half the time. `compile: true` is in the recipe since then.
 
 ## Ranked by GPU time saved
 

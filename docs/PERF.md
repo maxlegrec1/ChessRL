@@ -421,3 +421,9 @@ busier (more batches overlap, 0.197 ms per batch) and the search threads use mor
 convert their own records). In a real run through the launcher self-play makes 2,347 records/s
 (1,994 before), and the trainer is the limit again: 4.65 steps/s, 4.1 samples per record instead
 of 5 (`docs/TRAINER_SPEED.md`).
+
+**`torch.compile` in the trainer** (`compile: true`, the recipe since this change): the train step
+is memory-bound element-wise work, 102 ms eager and 34 ms compiled on the 4090 alone
+(`scripts/bench_trainer.py`, `docs/TRAINER_SPEED.md`). Real run through the launcher: self-play
+2,402 records/s (its speed alone), the trainer 5.85 steps/s at 0.076 s per step, back to 5
+samples per record and waiting half the time.

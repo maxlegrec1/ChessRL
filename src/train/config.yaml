@@ -18,6 +18,10 @@ lr_schedule:
   kind: constant
   warmup_steps: 1000
 amp_dtype: float16
+# torch.compile the network for training: the step is memory-bound element-wise work (norms,
+# attention scores) that compiling fuses, 3 times faster (docs/TRAINER_SPEED.md). The first
+# step compiles, about a minute.
+compile: true
 mirror_prob: 0.5 # colour-flip augmentation
 log_every: 5
 
