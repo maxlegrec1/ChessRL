@@ -771,6 +771,7 @@ SelfPlayMetrics SelfPlayWorker::step()
 
     // Run MCTS
     double start_infer_ms = impl_->runner->statistics().total_inference_ms;
+    const auto search_start = std::chrono::high_resolution_clock::now();
     auto summaries = chessrl::mcts::run_small_mcts_batch_shared(
         std::move(options), impl_->runner, impl_->cache, cfg.threads);
     double end_infer_ms = impl_->runner->statistics().total_inference_ms;
@@ -904,6 +905,16 @@ SelfPlayMetrics SelfPlayWorker::step()
 
     auto end_time = std::chrono::high_resolution_clock::now();
     metrics.runtime_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    // The serial parts of a step (the search threads have nothing to run during them), next to
+    // the searches' wall time: preparing the requests, then applying the moves and writing.
+    static const bool step_phases = std::getenv("CHESSRL_MCTS_PHASES") != nullptr;
+    if (step_phases)
+    {
+        using ms = std::chrono::duration<double, std::milli>;
+        std::cerr << "[step-phases] prep=" << ms(search_start - start_time).count()
+                  << " search=" << ms(current_time - search_start).count()
+                  << " post=" << ms(end_time - current_time).count() << "\n";
+    }
     return metrics;
 }
 

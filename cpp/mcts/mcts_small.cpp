@@ -1200,16 +1200,33 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     std::vector<std::thread> workers;
     workers.reserve(num_threads);
 
+    // Longest searches first: the call returns when its last search does, so a 400-simulation
+    // search started near the end kept most threads idle for its whole length. A search's cost
+    // is the simulations it still has to run (a reused root already holds some of them). The
+    // order changes only which thread runs which search, not any search's result.
+    std::vector<int> cost(batch_options.size());
+    for (size_t i = 0; i < batch_options.size(); ++i)
+    {
+        const auto& opt = batch_options[i];
+        const auto& reuse = opt.reuse_tree;
+        const int reused = (reuse && !reuse->nodes.empty()) ? reuse->nodes.front().visit_count : 0;
+        cost[i] = std::max(0, opt.simulations - reused);
+    }
+    std::vector<size_t> order(batch_options.size());
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::stable_sort(order.begin(), order.end(), [&cost](size_t a, size_t b) { return cost[a] > cost[b]; });
+
     // Worker routine: fetch jobs from the queue until all are processed
-    auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index]() {
+    auto worker_routine = [&batch_options, &order, shared_runner, cache, &summaries, &next_job_index]() {
         while (true)
         {
-            const size_t job_id = next_job_index.fetch_add(1);
-            if (job_id >= batch_options.size())
+            const size_t next = next_job_index.fetch_add(1);
+            if (next >= batch_options.size())
             {
                 break;
             }
-            
+            const size_t job_id = order[next];
+
             SmallMctsRunner runner(batch_options[job_id], shared_runner, cache);
             summaries[job_id] = runner.run();
         }
