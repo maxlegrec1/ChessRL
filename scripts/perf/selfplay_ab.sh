@@ -3,7 +3,9 @@
 # docs/PERF.md. Runs the GPU tests and the parity check, exports the network once, then
 # alternates the arms ROUNDS times (default 2), each 60 s of warm-up and 240 s measured.
 # An arm is NAME=CONFIG (a YAML that may `extends:` the recipe); ENV_<NAME>="K=V ..." adds
-# environment variables to that arm. Each result line has the recorded positions per
+# environment variables to that arm, REPO_<NAME> runs it from another checkout (CONFIG is
+# then relative to it) and ENGINE_<NAME> plays another network file (for instance an older
+# checkout's TensorRT engine as the baseline). Each result line has the recorded positions per
 # second and the CPU time per recorded position, with the host's load average: on a
 # shared host a busy neighbour slows the search, so compare arms run close together.
 #   cd /workspace/ChessRL && ARMS="recipe=src/train/config.yaml reuse=/workspace/perf/reuse.yaml" \
@@ -35,9 +37,12 @@ for round in $(seq 1 "$ROUNDS"); do
     name="${arm%%=*}"
     cfg="${arm#*=}"
     envvar="ENV_$name"
+    repovar="REPO_$name"
+    enginevar="ENGINE_$name"
     label="${name}_$round"
-    env ${!envvar:-} uv run python scripts/bench_selfplay.py --engine "$P/net.cnet" --config "$cfg" \
-      --warmup-sec 60 --duration-sec 240 --label "$label" --out "$P/ab_$label.json" > "$P/ab_$label.log" 2>&1
+    (cd "${!repovar:-$REPO}" && env ${!envvar:-} uv run python scripts/bench_selfplay.py \
+      --engine "${!enginevar:-$P/net.cnet}" --config "$cfg" --warmup-sec 60 --duration-sec 240 \
+      --label "$label" --out "$P/ab_$label.json") > "$P/ab_$label.log" 2>&1
     log "$label: $(grep -o '[0-9.]* positions/sec.*' "$P/ab_$label.log" | head -1) |" \
       "$(grep -o 'inference: .*' "$P/ab_$label.log" | head -1) | $(grep -o 'cpu: .*' "$P/ab_$label.log" | head -1)"
   done

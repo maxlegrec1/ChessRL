@@ -258,6 +258,7 @@ struct SmallBatchRunner::Impl
         PinnedBuffer hostPacked;
         ResizableDeviceBuffer outDevice;     // one kRecordBytes record per position
         PinnedBuffer hostOut;
+        cudaEvent_t done{nullptr};           // blocking-sync event (CHESSRL_BLOCKING_SYNC)
     };
 
     explicit Impl(SmallBatchConfig cfg)
@@ -301,6 +302,10 @@ struct SmallBatchRunner::Impl
             if (w && w->thread.joinable())
             {
                 w->thread.join();
+            }
+            if (w && w->done)
+            {
+                cudaEventDestroy(w->done);
             }
         }
     }
@@ -374,7 +379,24 @@ struct SmallBatchRunner::Impl
             err = cudaMemcpyAsync(w.hostOut.data(), w.outDevice.data(), n * kRecordBytes,
                                   cudaMemcpyDeviceToHost, s);
         }
-        if (err == cudaSuccess) err = cudaStreamSynchronize(s);
+        if (err == cudaSuccess)
+        {
+            // Spinning in cudaStreamSynchronize keeps a core busy while the GPU works;
+            // a blocking-sync event puts the thread to sleep instead.
+            if (blocking_sync_)
+            {
+                if (!w.done)
+                {
+                    err = cudaEventCreateWithFlags(&w.done, cudaEventBlockingSync | cudaEventDisableTiming);
+                }
+                if (err == cudaSuccess) err = cudaEventRecord(w.done, s);
+                if (err == cudaSuccess) err = cudaEventSynchronize(w.done);
+            }
+            else
+            {
+                err = cudaStreamSynchronize(s);
+            }
+        }
         if (err != cudaSuccess)
         {
             throw std::runtime_error(std::string("fused network batch failed: ") + cudaGetErrorString(err));
@@ -478,6 +500,12 @@ struct SmallBatchRunner::Impl
     const std::chrono::microseconds flush_timeout_{[](){
         if (const char* env = std::getenv("CHESSRL_MCTS_FLUSH_US")) return std::atoi(env);
         return 100;
+    }()};
+    // Wait for each batch on a blocking-sync event rather than spinning
+    // (CHESSRL_BLOCKING_SYNC=1).
+    const bool blocking_sync_{[](){
+        const char* env = std::getenv("CHESSRL_BLOCKING_SYNC");
+        return env != nullptr && std::atoi(env) != 0;
     }()};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
