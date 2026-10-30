@@ -213,6 +213,8 @@ Settings outside the YAML, read by the C++ extension at run time or by the build
 |---|---|---|
 | `CHESSRL_INFER_WORKERS` | 4 | Inference worker threads per batch runner, each with its own CUDA stream. |
 | `CHESSRL_MCTS_FLUSH_US` | 100 | Microseconds the batcher waits for a full batch before dispatching a partial one. |
+| `CHESSRL_FP16_ACC` | 256 | The fused network's projection multiplies sum in FP16: N terms per FP16 sum before an FP32 addition (32, 64, or 256 for whole sums); 0 keeps FP32 accumulators. The attention and policy-logit multiplies and the residual stream are FP32 either way. |
+| `CHESSRL_BLOCKING_SYNC` | 0 | 1: inference workers sleep on a blocking-sync event while the GPU runs their batch instead of spinning (saves about 2 cores, costs 3 to 4% when the CPU is not short). |
 | `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. |
 | `CHESSRL_CUDA_ARCH`, `CUDA_ROOT` | `sm_90`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture (the fused kernel needs `sm_80` or newer) and toolkit location. |
 | `CHESSRL_RUNS_ROOT` | `artifacts/runs` (dashboard), `~/chessrl-runs` (analysis board) | Where the dashboard and the analysis board look for runs; colon-separated for the dashboard. |

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <iostream>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -308,6 +309,14 @@ struct SmallBatchRunner::Impl
                 cudaEventDestroy(w->done);
             }
         }
+        if (telemetry_enabled_ && batches_ > 0)
+        {
+            const double b = static_cast<double>(batches_);
+            std::cerr << "[runner] " << batches_ << " batches, " << static_cast<double>(positions_) / b
+                      << " positions each; per batch: GPU and copies " << total_infer_ms_ / b
+                      << " ms, results handed back " << total_handback_ms_ / b << " ms, waiting for work "
+                      << total_wait_ms_ / b << " ms (" << workers_.size() << " workers)\n";
+        }
     }
 
     BatchTicket<SmallPolicyValue> enqueue(std::shared_ptr<const SmallPackedPosition> position)
@@ -401,11 +410,10 @@ struct SmallBatchRunner::Impl
         {
             throw std::runtime_error(std::string("fused network batch failed: ") + cudaGetErrorString(err));
         }
+        const auto synced = std::chrono::steady_clock::now();
         if (telemetry_enabled_)
         {
-            const double infer_ms = std::chrono::duration<double, std::milli>(
-                                        std::chrono::steady_clock::now() - start_time)
-                                        .count();
+            const double infer_ms = std::chrono::duration<double, std::milli>(synced - start_time).count();
             std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
             batches_ += 1;
             positions_ += n;
@@ -424,6 +432,14 @@ struct SmallBatchRunner::Impl
             result.mlh_q = aux[4];
             work[i].promise->set_value(std::move(result));
         }
+        if (telemetry_enabled_)
+        {
+            const double handback_ms = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - synced)
+                                           .count();
+            std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+            total_handback_ms_ += handback_ms;
+        }
     }
 
     size_t pending_size() const
@@ -441,6 +457,7 @@ struct SmallBatchRunner::Impl
     {
         while (true)
         {
+            const auto idle_from = std::chrono::steady_clock::now();
             std::unique_lock<std::mutex> lock(mutex);
 
             // Stage 1: Idle wait - sleep until queue has work or we're stopping.
@@ -468,6 +485,14 @@ struct SmallBatchRunner::Impl
 
             // Stage 3: Process - unlock before calling process() since it locks internally.
             lock.unlock();
+            if (telemetry_enabled_)
+            {
+                const double wait_ms = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - idle_from)
+                                           .count();
+                std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
+                total_wait_ms_ += wait_ms;
+            }
 
             try
             {
@@ -512,6 +537,8 @@ struct SmallBatchRunner::Impl
     size_t batches_{0};
     size_t positions_{0};
     double total_infer_ms_{0.0};
+    double total_handback_ms_{0.0};  // from the batch's sync to its last result handed back
+    double total_wait_ms_{0.0};      // a worker waiting for a batch (idle and flush windows)
 };
 
 SmallBatchRunner::SmallBatchRunner(SmallBatchConfig config)

@@ -344,3 +344,59 @@ Without MPS the two processes take turns on the GPU and self-play loses a third.
 their kernels run side by side; with the trainer at below-normal priority
 (`CUDA_MPS_CLIENT_PRIORITY=1`) self-play loses 2% and the trainer runs in what is left, which
 is not quite enough for the recipe's 5 samples per record.
+
+## FP16 accumulation, MPS in the launcher, and where the inference workers' time goes (2026-10-30, evening)
+
+Same box (RTX 4090 + Ryzen 9 7950X), run C's network, today's recipe (fused network, lazy
+finished-game check, tree reuse).
+
+**FP16 accumulation** (`CHESSRL_FP16_ACC`, the default since this change): the projection
+multiplies (embedding, qkv, out, up, down, policy q and k) sum in FP16, twice the tensor-core rate
+on GeForce cards, and add into FP32 every N terms; the attention and policy-logit multiplies and
+the residual stream stay FP32. Parity against PyTorch FP32 (256 puzzle positions; run C at 92.5k,
+base-wd at 91.5k, the 8-layer run A at 50k):
+
+| accumulation | top-1 agreement | policy KL p95 | WDL error, mean | mlh max error |
+|---|---|---|---|---|
+| FP32 | 100 / 100 / 100% | 1e-5 | 0.0006 to 0.0008 | 0.0035 |
+| FP16, 32 terms | 100 / 100 / 99.6% | 1e-5 | 0.0007 to 0.0010 | 0.0032 |
+| FP16, 64 terms | 100 / 100 / 99.2% | 1e-5 | 0.0008 to 0.0013 | 0.0038 |
+| FP16, whole sums (default) | 100 / 100 / 99.6% | 3e-5 | 0.0011 to 0.0015 | 0.0053 |
+
+The kernel alone (4 streams, batch 128): 1,124k positions/s with FP32 accumulators, 1,352k with
+64-term sums, 1,451k with whole sums (+29%). Self-play alone gains only 2.2% (2,008 to 2,052
+recorded positions/s, two runs each), but next to the trainer the GPU time it frees goes to
+training (below).
+
+**MPS in the launcher** (`mps: true`, the recipe): `src.run` starts an MPS daemon for the run and
+gives the trainer below-normal priority. Real runs from run C's checkpoint, 12 minutes, the last 8
+measured:
+
+| real run | records/s | trainer steps/s | samples per record | trainer waiting | GPU busy |
+|---|---|---|---|---|---|
+| no MPS (before) | 1,327 | 3.24 | 5.0 | 52% | 89% |
+| MPS launcher, FP32 accumulation | 1,957 | 3.48 | 3.67 | 0% | 99% |
+| MPS launcher, FP16 accumulation | **1,994** | **4.86** | **5.0** | 16% | 93% |
+
+With both, self-play runs at its speed alone and the trainer reaches the recipe's 5 samples per
+record again, with time to spare.
+
+**Where an inference worker's time goes** (the runner now prints it when it closes; recipe,
+4 workers, per batch of about 118 positions):
+
+| | FP32 | FP16 accumulation | FP16, 8 workers |
+|---|---|---|---|
+| recorded positions/s | 1,999 | 2,048 | 1,977 |
+| GPU and copies | 0.201 ms | 0.168 ms | 0.172 ms (75 positions) |
+| results handed back | 0.295 ms | 0.310 ms | 0.303 ms |
+| waiting for a batch | 0.058 ms | 0.058 ms | 0.209 ms |
+
+The workers are busy 90% of the time and more than half of it goes to handing results back:
+about 2.6 µs per position, which caps self-play near 800k evaluations/s whatever the GPU does.
+Timed in two halves, filling the 1,929 FP32 logits (7.7 KB) into the result takes 1.3 µs per
+position and waking the search thread (`std::promise::set_value`) 1.5 µs; converting alone takes
+0.11 µs, so the filling cost is moving the memory between cores. More workers do not help (their
+hand-back per position grows to 4 µs). A first fix, the search thread allocating the result so
+the worker only fills it, was slower (1,851 against 1,999) and was dropped. What should work:
+each search thread reads its record directly from the worker's pinned output buffer (the worker
+writes nothing per position), and is woken once per batch rather than once per position.

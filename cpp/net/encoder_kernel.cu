@@ -707,14 +707,16 @@ cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packe
     return cudaGetLastError();
 }
 
-// CHESSRL_FP16_ACC: 0 (default) keeps FP32 accumulators; N > 0 sums N terms (32, 64, or 256 for
-// whole sums) in FP16 between FP32 additions, in the projection matrix multiplies. The score
-// multiplies (attention, policy logits) and the residual stream stay FP32.
+// The projection matrix multiplies sum in FP16 (whole sums by default): CHESSRL_FP16_ACC=0 keeps
+// FP32 accumulators, N > 0 sums N terms (32, 64, or 256 for whole sums) in FP16 between FP32
+// additions. The score multiplies (attention, policy logits) and the residual stream stay FP32.
+// Measured (docs/PERF.md): parity with PyTorch unchanged to within KL 3e-5, kernel +29%, and in a
+// real run the trainer gets the GPU time it frees (3.48 -> 4.86 steps/s next to self-play).
 int fp16_chunk()
 {
     static const int chunk = [] {
         const char* env = std::getenv("CHESSRL_FP16_ACC");
-        const int terms = env ? std::atoi(env) : 0;
+        const int terms = env ? std::atoi(env) : 256;
         if (terms <= 0) return 0;
         if (terms <= 32) return 1;
         if (terms <= 64) return 2;
