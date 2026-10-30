@@ -42,10 +42,10 @@ public:
     EvalGroup& operator=(const EvalGroup&) = delete;
     ~EvalGroup() { wait(); }
 
-    void add()
+    void add(int n = 1)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ++pending_;
+        pending_ += n;
     }
 
     void done()
@@ -213,6 +213,10 @@ public:
     // queue critical section pointer-sized). The fused kernel expands it to
     // the input planes on the GPU. `group` is woken when all its positions are done.
     Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position, EvalGroup& group);
+    // A search round's positions at once (moved from `positions`): one lock on the shared queue
+    // and at most one wake-up instead of one of each per position. Appends a ticket per position.
+    void enqueue(std::vector<std::shared_ptr<const SmallPackedPosition>>& positions, EvalGroup& group,
+                 std::vector<Ticket>& tickets);
     void process_pending();
     size_t pending() const;
     BatchStatistics statistics() const;

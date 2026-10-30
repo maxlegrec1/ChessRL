@@ -226,6 +226,16 @@ SmallBatchRunner::Ticket SmallBatchRunner::enqueue(std::shared_ptr<const SmallPa
     return ticket;
 }
 
+void SmallBatchRunner::enqueue(std::vector<std::shared_ptr<const SmallPackedPosition>>& positions,
+                               EvalGroup& group, std::vector<Ticket>& tickets)
+{
+    for (auto& position : positions)
+    {
+        tickets.push_back(enqueue(std::move(position), group));
+    }
+    positions.clear();
+}
+
 void SmallBatchRunner::process_pending() {}
 
 size_t SmallBatchRunner::pending() const

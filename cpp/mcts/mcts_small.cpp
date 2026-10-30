@@ -294,6 +294,8 @@ public:
         std::vector<DescentState> pending;
         pending.reserve(static_cast<size_t>(width));
         std::vector<single::SmallBatchRunner::Ticket> tickets;
+        std::vector<std::shared_ptr<const single::SmallPackedPosition>> positions;
+        positions.reserve(static_cast<size_t>(width));
         tickets.reserve(static_cast<size_t>(width));
         std::vector<SmallPolicyValue> cached_evals;
         cached_evals.reserve(static_cast<size_t>(width));
@@ -334,7 +336,7 @@ public:
             if (ph) g_ph_descent_ns.fetch_add(now_ns() - t_p1, std::memory_order_relaxed);
 
             // ---- Phase 2: enqueue eval requests for non-terminal leaves. ----
-            // Cache lookups happen synchronously; misses go onto the GPU queue.
+            // Cache lookups happen synchronously; misses go onto the GPU queue, all at once.
             const std::uint64_t t_p2 = ph ? now_ns() : 0;
             for (size_t i = 0; i < pending.size(); ++i)
             {
@@ -349,9 +351,9 @@ public:
                         continue;
                     }
                 }
-                tickets.push_back(small_batch_runner_->enqueue(
-                    acquire_small_encoding(d.leaf_history, d.leaf_board), evals_));
+                positions.push_back(acquire_small_encoding(d.leaf_history, d.leaf_board));
             }
+            small_batch_runner_->enqueue(positions, evals_, tickets);
             if (ph) g_ph_enqueue_ns.fetch_add(now_ns() - t_p2, std::memory_order_relaxed);
 
             // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----

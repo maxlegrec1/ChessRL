@@ -341,18 +341,61 @@ struct SmallBatchRunner::Impl
         slot->group = &group;
         group.add();
         EvalTicket ticket(slot);
+        size_t before = 0;
+        size_t after = 0;
         {
             std::lock_guard<std::mutex> lock(mutex);
+            before = queue.size();
             queue.emplace_back(SmallPending{std::move(position), std::move(slot)});
+            after = queue.size();
         }
-        cv.notify_one();
+        wake_for(before, after);
         return ticket;
+    }
+
+    void enqueue(std::vector<std::shared_ptr<const SmallPackedPosition>>& positions, EvalGroup& group,
+                 std::vector<EvalTicket>& tickets)
+    {
+        if (positions.empty()) return;
+        thread_local std::vector<std::shared_ptr<EvalSlot>> slots;
+        slots.clear();
+        group.add(static_cast<int>(positions.size()));
+        for (size_t i = 0; i < positions.size(); ++i)
+        {
+            auto slot = std::make_shared<EvalSlot>();
+            slot->group = &group;
+            tickets.emplace_back(slot);
+            slots.push_back(std::move(slot));
+        }
+        size_t before = 0;
+        size_t after = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            before = queue.size();
+            for (size_t i = 0; i < positions.size(); ++i)
+            {
+                queue.emplace_back(SmallPending{std::move(positions[i]), std::move(slots[i])});
+            }
+            after = queue.size();
+        }
+        positions.clear();
+        wake_for(before, after);
+    }
+
+    // Wake a worker only when there is something new for it: the queue was empty (workers
+    // sleep until there is work) or it just reached a full batch (a worker may be waiting for
+    // one). Waking one on every position only had it check the queue and sleep again. A worker
+    // that leaves positions in the queue wakes the next one (process()).
+    void wake_for(size_t before, size_t after)
+    {
+        if (before == 0 || (before < flush_threshold_ && after >= flush_threshold_)) cv.notify_one();
     }
 
     void process(Worker& w)
     {
         std::vector<SmallPending> work;
         work.reserve(static_cast<size_t>(config.max_batch_size));
+        bool left = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             while (!queue.empty() && work.size() < static_cast<size_t>(config.max_batch_size))
@@ -360,7 +403,9 @@ struct SmallBatchRunner::Impl
                 work.push_back(std::move(queue.front()));
                 queue.pop_front();
             }
+            left = !queue.empty();
         }
+        if (left) cv.notify_one();
         if (work.empty())
         {
             return;
@@ -617,6 +662,12 @@ SmallBatchRunner::Ticket SmallBatchRunner::enqueue(
     std::shared_ptr<const SmallPackedPosition> position, EvalGroup& group)
 {
     return impl_->enqueue(std::move(position), group);
+}
+
+void SmallBatchRunner::enqueue(std::vector<std::shared_ptr<const SmallPackedPosition>>& positions,
+                               EvalGroup& group, std::vector<Ticket>& tickets)
+{
+    impl_->enqueue(positions, group, tickets);
 }
 
 void SmallBatchRunner::process_pending()
