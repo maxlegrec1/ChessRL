@@ -99,29 +99,8 @@ HistoryStack build_root_history_stack(
     return stack;
 }
 
-struct HistoryEntry
-{
-    std::shared_ptr<const HistoryEntry> parent;
-    std::string move;
-    int length{0};
-};
-
 namespace
 {
-
-HistoryHandle build_history_chain(const std::vector<std::string>& history)
-{
-    HistoryHandle tail;
-    for (const auto& move : history)
-    {
-        auto entry = std::make_shared<HistoryEntry>();
-        entry->parent = tail;
-        entry->move = move;
-        entry->length = tail ? tail->length + 1 : 1;
-        tail = std::move(entry);
-    }
-    return tail;
-}
 
 bool starts_with_flag(const std::string& value)
 {
@@ -257,22 +236,6 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
     }
 
     return line;
-}
-
-std::vector<std::string> history_to_vector(const HistoryHandle& tail)
-{
-    if (!tail)
-    {
-        return {};
-    }
-    std::vector<std::string> moves(static_cast<size_t>(tail->length));
-    auto current = tail;
-    for (int index = tail->length - 1; index >= 0; --index)
-    {
-        moves[static_cast<size_t>(index)] = current->move;
-        current = current->parent;
-    }
-    return moves;
 }
 
 MctsOptions parse_cli(int argc, char** argv)
@@ -439,14 +402,12 @@ chess::Board apply_history(const SearchInput& input)
     return board;
 }
 
-int SearchTree::add_root(const chess::Board& board, const std::vector<std::string>& history)
+int SearchTree::add_root(const chess::Board& board)
 {
     nodes.clear();
     TreeNode root;
-    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
     root.terminal = board.isGameOver().second != chess::GameResult::NONE;
     root.prior = 1.0F;
-    root.history = build_history_chain(history);
     // Root has no parent, so move_from_parent remains NO_MOVE
 
     nodes.push_back(std::move(root));
@@ -458,11 +419,7 @@ void SearchTree::reserve(size_t count)
     nodes.reserve(count);
 }
 
-int SearchTree::add_child(
-    int parent_index,
-    chess::Move move,
-    float prior,
-    const chess::Board& child_board)
+int SearchTree::add_child(int parent_index, chess::Move move, float prior)
 {
     if (parent_index < 0 || parent_index >= static_cast<int>(nodes.size()))
     {
@@ -473,43 +430,6 @@ int SearchTree::add_child(
     node.parent = parent_index;
     node.move_from_parent = move;
     node.prior = prior;
-    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
-    node.terminal = child_board.isGameOver().second != chess::GameResult::NONE;
-    if (node.terminal)
-    {
-        // Initialize terminal node WDL from the perspective of side to move on this node
-        const auto result = child_board.isGameOver().second;
-        switch (result)
-        {
-        case chess::GameResult::WIN:
-            node.wdl = {1.0F, 0.0F, 0.0F};
-            break;
-        case chess::GameResult::LOSE:
-            node.wdl = {0.0F, 0.0F, 1.0F};
-            break;
-        case chess::GameResult::DRAW:
-            node.wdl = {0.0F, 1.0F, 0.0F};
-            break;
-        default:
-            break;
-        }
-    }
-    node.history = nodes[parent_index].history;
-
-    // Phase B: Need chess960 flag from parent board - will be passed separately or reconstructed
-    // For now, we'll need to reconstruct parent board to get chess960 flag
-    // This is a temporary solution - we may need to store chess960 flag separately
-    // But for now, we'll use the child_board which has the correct chess960 setting
-    const bool chess960 = child_board.chess960();
-    const std::string move_uci = chess::uci::moveToUci(move, chess960);
-    if (!move_uci.empty())
-    {
-        auto entry = std::make_shared<HistoryEntry>();
-        entry->parent = node.history;
-        entry->move = move_uci;
-        entry->length = node.history ? node.history->length + 1 : 1;
-        node.history = std::move(entry);
-    }
 
     nodes.push_back(std::move(node));
     const int child_index = static_cast<int>(nodes.size()) - 1;

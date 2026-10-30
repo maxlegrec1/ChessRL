@@ -12,10 +12,6 @@
 namespace chessrl::mcts
 {
 
-struct HistoryEntry;
-
-using HistoryHandle = std::shared_ptr<const HistoryEntry>;
-
 // Compact piece-bitboard snapshot of a board position, used as the
 // per-history-slot payload for the AlphaZero-style 8-board input stack.
 // Layout matches the Python encoder: bitboards[0..5] = white PNBRQK,
@@ -59,8 +55,7 @@ void history_stack_push(HistoryStack& stack, const PiecePlanes& snap);
 
 // Build the initial 8-slot stack for a fresh search: slot 0 is the
 // position represented by `root_board`, slots 1..7 are populated by
-// replaying the move list backwards through chess::Board.makeMove (the
-// HistoryHandle linked list only stores moves, not board states).
+// replaying the move list backwards through chess::Board.makeMove.
 HistoryStack build_root_history_stack(
     const std::string& fen,
     const std::vector<std::string>& moves,
@@ -138,7 +133,6 @@ struct TreeNode
     // Computed from the NN's mlh_q head as `mlh_q * 25` (the head outputs
     // plies/25). Terminal nodes use 0.
     float leaf_plies{0.0F};
-    HistoryHandle history;
     std::vector<int> children;
     std::vector<chess::Move> child_moves;
     std::vector<float> child_priors;
@@ -150,13 +144,11 @@ struct SearchTree
     // Zobrist hash of the root position, set by extract_subtree (0 for a fresh tree).
     std::uint64_t root_hash{0};
 
-    int add_root(const chess::Board& board, const std::vector<std::string>& history);
+    int add_root(const chess::Board& board);
     void reserve(size_t count);
-    int add_child(
-        int parent_index,
-        chess::Move move,
-        float prior,
-        const chess::Board& child_board);
+    // A child is not checked for a finished game here: the search does that when a
+    // descent first reaches it (most children are never visited).
+    int add_child(int parent_index, chess::Move move, float prior);
 };
 
 // The subtree under `new_root` as a tree of its own (new_root becomes node 0), so the next
@@ -166,7 +158,6 @@ struct SearchTree
 SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t root_hash);
 
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
-std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 
 // Returns the terminal value of `board` from the side-to-move's perspective:
 // +1 = win, -1 = loss (checkmate), 0 = draw, nullopt = non-terminal. Note that

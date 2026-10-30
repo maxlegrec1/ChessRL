@@ -242,7 +242,7 @@ public:
         }
         else
         {
-            tree_.add_root(root_board_, options_.request.history);
+            tree_.add_root(root_board_);
         }
         reuse.reset();
         // AlphaZero-style 8-board history stack (per-simulation seed). When
@@ -456,6 +456,23 @@ private:
 
             if (!node.expanded || node.children.empty())
             {
+                // First visit: only now check whether the game is over here (expansion
+                // does not, for children that are mostly never visited). A finished game
+                // is marked as add_child used to mark it, so later visits take the branch
+                // above.
+                if (!node.expanded)
+                {
+                    if (auto terminal = terminal_value(d.leaf_board))
+                    {
+                        node.terminal = true;
+                        node.wdl = wdl_from_terminal(*terminal);
+                        d.is_terminal = true;
+                        d.terminal_value = *terminal;
+                        d.terminal_wdl = node.wdl;
+                        d.leaf_node_index = node_index;
+                        return d;
+                    }
+                }
                 d.is_terminal = false;
                 d.leaf_node_index = node_index;
                 return d;
@@ -634,20 +651,8 @@ private:
             return;
         }
 
-        // Terminal-position detection on the eval path. The batched descent
-        // does NOT recheck terminal_value() on every node (it relies on
-        // node.terminal having been set during a prior expansion), so the
-        // first time we visit a checkmated/stalemated position we'll arrive
-        // here with the position still flagged as a regular leaf.
-        if (auto terminal = terminal_value(board_state))
-        {
-            node.expanded = true;
-            node.terminal = true;
-            node.value_prior = *terminal;
-            node.wdl = wdl_from_terminal(*terminal);
-            node.leaf_plies = 0.0F;
-            return;
-        }
+        // No finished-game check here: descend() makes it when it reaches a leaf, and
+        // evaluate_node() before expanding the root.
 
         if (eval.policy_logits.size() != chessrl::small_policy_size())
         {
@@ -673,9 +678,7 @@ private:
 
         for (const auto& entry : priors)
         {
-            chess::Board child_board = board_state;
-            child_board.makeMove(entry.move);
-            tree_.add_child(node_index, entry.move, entry.prior, child_board);
+            tree_.add_child(node_index, entry.move, entry.prior);
         }
 
         tree_.nodes[node_index].expanded = true;
