@@ -16,7 +16,8 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     std::vector<MctsOptions> options,
     std::shared_ptr<single::SmallBatchRunner> runner,
     std::shared_ptr<TranspositionTable> cache = {},
-    int num_threads = 0);  // 0 = auto: min(jobs, 256)
+    int num_threads = 0,  // 0 = auto: min(jobs, 256)
+    int searches_per_thread = 1);  // searches each thread interleaves
 
 } // namespace chessrl::mcts
 

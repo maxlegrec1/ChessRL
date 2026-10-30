@@ -50,6 +50,7 @@ struct Args
     std::string positions{"data/bench/positions.txt"};
     std::string mode{"full"}; // full (400 sims, noise) or fast (50 sims) as in the recipe
     int threads{8};
+    int searches_per_thread{1};
     int sims{-1}; // override the mode's simulations
     int repeat{3};
     int limit{0};
@@ -79,6 +80,7 @@ Args parse(int argc, char** argv)
         if (k == "--positions") a.positions = next();
         else if (k == "--mode") a.mode = next();
         else if (k == "--threads") a.threads = std::stoi(next());
+        else if (k == "--searches-per-thread") a.searches_per_thread = std::stoi(next());
         else if (k == "--sims") a.sims = std::stoi(next());
         else if (k == "--repeat") a.repeat = std::stoi(next());
         else if (k == "--limit") a.limit = std::stoi(next());
@@ -334,7 +336,7 @@ int run_reusecheck(const std::vector<Position>& positions, const Args& a,
         parents.push_back(options_at(p.board, p.moves, 400));
         parents.back().keep_tree = true;
     }
-    auto first = chessrl::mcts::run_small_mcts_batch_shared(std::move(parents), runner, nullptr, a.threads);
+    auto first = chessrl::mcts::run_small_mcts_batch_shared(std::move(parents), runner, nullptr, a.threads, a.searches_per_thread);
 
     std::vector<MctsOptions> fresh, reused, fresh800;
     for (size_t i = 0; i < positions.size(); ++i)
@@ -351,9 +353,9 @@ int run_reusecheck(const std::vector<Position>& positions, const Args& a,
         reused.back().reuse_tree = first[i].tree;
     }
     const size_t n = fresh.size();
-    auto rf = chessrl::mcts::run_small_mcts_batch_shared(std::move(fresh), runner, nullptr, a.threads);
-    auto rr = chessrl::mcts::run_small_mcts_batch_shared(std::move(reused), runner, nullptr, a.threads);
-    auto r8 = chessrl::mcts::run_small_mcts_batch_shared(std::move(fresh800), runner, nullptr, a.threads);
+    auto rf = chessrl::mcts::run_small_mcts_batch_shared(std::move(fresh), runner, nullptr, a.threads, a.searches_per_thread);
+    auto rr = chessrl::mcts::run_small_mcts_batch_shared(std::move(reused), runner, nullptr, a.threads, a.searches_per_thread);
+    auto r8 = chessrl::mcts::run_small_mcts_batch_shared(std::move(fresh800), runner, nullptr, a.threads, a.searches_per_thread);
 
     size_t agree_reused = 0, agree_800 = 0, budget_ok = 0;
     double inherited = 0.0, new_sims = 0.0, value_gap_reused = 0.0, value_gap_800 = 0.0;
@@ -408,7 +410,7 @@ int main(int argc, char** argv)
         {
             auto options = build();
             options.resize(std::min<size_t>(options.size(), 16));
-            chessrl::mcts::run_small_mcts_batch_shared(std::move(options), runner, nullptr, a.threads);
+            chessrl::mcts::run_small_mcts_batch_shared(std::move(options), runner, nullptr, a.threads, a.searches_per_thread);
         }
 
         double wall = 0.0;
@@ -423,7 +425,7 @@ int main(int argc, char** argv)
             const auto e0 = chessrl::bench::fake_network_stats().evaluations;
             const double c0 = cpu_seconds();
             const auto t0 = std::chrono::steady_clock::now();
-            auto summaries = chessrl::mcts::run_small_mcts_batch_shared(std::move(options), runner, nullptr, a.threads);
+            auto summaries = chessrl::mcts::run_small_mcts_batch_shared(std::move(options), runner, nullptr, a.threads, a.searches_per_thread);
             const auto t1 = std::chrono::steady_clock::now();
             cpu += cpu_seconds() - c0;
             wall += std::chrono::duration<double>(t1 - t0).count();

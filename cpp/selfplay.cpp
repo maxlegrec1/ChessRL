@@ -31,6 +31,17 @@ namespace chessrl
 namespace
 {
 
+// Searches each self-play thread interleaves (CHESSRL_SEARCHES_PER_THREAD, default 1,
+// run_small_mcts_batch_shared); the runner's batch threshold counts them all.
+int searches_per_thread()
+{
+    static const int n = [] {
+        const char* env = std::getenv("CHESSRL_SEARCHES_PER_THREAD");
+        return std::max(1, env ? std::atoi(env) : 1);
+    }();
+    return n;
+}
+
 // On-disk record layout v2 (1280 bytes, fixed). Bytes [0..832) keep the v1
 // layout; v2 appends the current position's bitboards and scalar state (so the
 // trainer builds input planes without parsing FEN) and the MCTS visit
@@ -615,7 +626,7 @@ struct SelfPlayWorker::Impl
         // regress total pos/sec because MCTS threads spend longer blocked
         // on ticket.get(). The 4 GPU workers pipeline well at this size.
         const int realistic_concurrency = (config.threads > 0)
-            ? config.threads
+            ? config.threads * searches_per_thread()
             : std::min(config.concurrency, 256);
         batch_config.max_batch_size = std::max(1, realistic_concurrency);
         runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(batch_config);
@@ -773,7 +784,7 @@ SelfPlayMetrics SelfPlayWorker::step()
     double start_infer_ms = impl_->runner->statistics().total_inference_ms;
     const auto search_start = std::chrono::high_resolution_clock::now();
     auto summaries = chessrl::mcts::run_small_mcts_batch_shared(
-        std::move(options), impl_->runner, impl_->cache, cfg.threads);
+        std::move(options), impl_->runner, impl_->cache, cfg.threads, searches_per_thread());
     double end_infer_ms = impl_->runner->statistics().total_inference_ms;
 
     auto current_time = std::chrono::high_resolution_clock::now();
