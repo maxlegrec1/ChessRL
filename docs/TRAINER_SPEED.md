@@ -37,12 +37,26 @@ card that does 165 with FP32 accumulation. The speedrun trains a 30 times larger
 12,600 positions/s on the same card. The time goes to memory traffic (eager attention and
 element-wise kernels), kernel launches and host syncs.
 
-## First: measure
+## Measured (2026-10-30)
 
-Before changing anything, split the step the way the speedrun does (`speedrun/train.py`, lines
-329-397): GPU time on one batch reused (no data cost), then with fresh batches, then the real
-step, plus `torch.profiler`'s kernel table for one step (kernel count, time by kernel). That says
-how much each item below can win.
+`scripts/bench_trainer.py` (the real Trainer, resumed from run C's checkpoint, sampling a real
+self-play buffer) on the RTX 4090 alone, batch 2,048:
+
+| | eager (the recipe) | `torch.compile` |
+|---|---|---|
+| step, one batch reused | 102.4 ms | 33.5 ms |
+| step, fresh batches (as `run()` does) | 102.7 ms | 33.9 ms |
+| kernels per step | 1,264 | 687 |
+
+The data pipeline is not a limit (the Prefetcher makes 530 to 580 batches/s and fresh batches
+cost nothing over a reused one), and the step is not launch-bound: the GPU is busy the whole
+102 ms. Where it goes, eager (the PyTorch operators that launched the kernels): the residual
+stream's RMSNorms, forward and backward, about 30%; the attention core on the [2,048, 8, 64, 64]
+scores about 25% (FP16/FP32 casts of the scores 5 ms, softmax and its backward 6 ms, bias add and
+its gradient 3 ms, the batched matmuls 5 ms); the QK-norm about 20%; the matrix multiplies of all
+linear layers about 5%. Memory-bound element-wise work, which compiling fuses: 3 times faster.
+What is left on top after compiling is mostly attention (its fused softmax kernels and batched
+matmuls), the next item's target.
 
 ## Ranked by GPU time saved
 
