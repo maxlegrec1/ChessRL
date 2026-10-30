@@ -239,3 +239,75 @@ less (+39%) because games are longer.
 Not measured: the effect on training. Records from reused searches include visits gathered
 before the root noise was mixed in, and games are longer. The recipe turned it on without a
 training A/B (2026-10-30), for the self-play speed.
+
+## The fused network and two CPU fixes (2026-10-30)
+
+**The fused network** (`cpp/net/`, commit 0607bbf; TensorRT removed in 24b25f2): one kernel
+launch per batch, one thread block per position (`docs/ARCHITECTURE.md`). Against PyTorch FP32
+(run C at step 92.5k, 256 puzzle positions, `scripts/net_parity.py`): top-1 agreement 100%,
+policy KL below 1e-5, WDL error 0.0006 on average, and the packed input path gives the dense
+path's outputs exactly. Exporting a checkpoint takes 0.1 s (ONNX and `trtexec`: 85 s).
+
+The kernel alone on an RTX 4090 (`_inference_cpp.fused_benchmark`, positions/s, output copy
+included) against the TensorRT engine (`trtexec`, CUDA graphs):
+
+| batch | 32 | 64 | 128 | 256 | 512 |
+|---|---|---|---|---|---|
+| TensorRT, 1 stream | 124k | 203k | 275k | 331k | 312k |
+| fused, 1 stream | 223k | 422k | 813k | 839k | 860k |
+| fused, 4 streams | 947k | 1,065k | 1,065k | 1,067k | 1,068k |
+
+TensorRT at batch 128 on four streams: 294k. At 1.07M positions/s the kernel does about
+106 TFLOP/s, 64% of the card's FP16 peak with FP32 accumulation.
+
+**Lazy finished-game check** (65fd74b): expanding a node used to copy the board for each legal
+move, play it, run `isGameOver()` (a full legal-move generation) and build a history string,
+for children that are mostly never visited. The search now checks a node when a descent first
+reaches it. Same digests on the 414 benchmark positions and on 605 positions 1 to 6 plies
+before the end of games finished by mate, stalemate, repetition or the fifty-move rule (same
+evaluation counts too), same `reusecheck` results. Search CPU per evaluation
+(`bench_cpu_search.sh`, one thread): 6.82 to 1.94 µs (full searches), 7.08 to 2.00 µs (fast).
+
+**Blocking sync** (a019d74, `CHESSRL_BLOCKING_SYNC=1`, off by default): the inference workers
+sleep on a blocking-sync event instead of spinning in `cudaStreamSynchronize` while the GPU
+runs their batch.
+
+**Self-play on one box.** An RTX 4090 with a Ryzen 9 7950X (16 cores, a 30.7-core container
+quota), rented whole. `bench_selfplay.py` now reports the CPU the rest of the host used during
+each measurement: at most 0.1 cores in every arm. `scripts/perf/selfplay_ab.sh`, run C's network,
+60 s of warm-up and 240 s measured, the eight arms alternated twice. The TensorRT arms ran from
+commit 0607bbf (the last with both backends), the plain fused arms from 24b25f2 (before the CPU
+fixes); one TensorRT run failed to start (a TensorRT internal error) and was run again at the
+end. Ratios are to the mean of the two TensorRT recipe runs (534.5).
+
+| arm | recorded positions/s | vs TensorRT recipe | evaluations/s | ms per batch | cores | CPU ms per position |
+|---|---|---|---|---|---|---|
+| TensorRT, recipe | 534.8, 534.2 | ×1.00 | 294k | 1.24 | 8.4 | 15.8 |
+| TensorRT, tree reuse | 762.2, 760.0 | ×1.42 | 300k | 1.18 | 10.8 | 14.3 |
+| fused, recipe | 1,196.1, 1,177.7 | ×2.22 | 653k | 0.19 | 19.5 | 16.5 |
+| fused, tree reuse | 1,347.8, 1,343.5 | ×2.52 | 530k | 0.21 | 23.1 | 17.2 |
+| fused + lazy check | 1,496.1, 1,524.3 | ×2.83 | 831k | 0.20 | 10.8 | 7.2 |
+| fused + lazy check, tree reuse (the recipe since c4048b3) | **1,989.5, 1,989.4** | **×3.72** | 784k | 0.20 | 14.7 | 7.4 |
+| + blocking sync | 1,457.3, 1,463.5 | ×2.73 | 804k | 0.22 | 9.1 | 6.2 |
+| + blocking sync, tree reuse | 1,923.7, 1,920.0 | ×3.60 | 759k | 0.23 | 12.4 | 6.5 |
+
+- With TensorRT the GPU is the limit: about 300k evaluations/s with or without tree reuse, so
+  reuse gains only what it saves in evaluations per position (×1.4).
+- The fused network makes a batch 6 times faster (0.20 ms against 1.2) and moves the limit to
+  the search's CPU: with tree reuse, 23 of the 30.7 cores before the lazy check.
+- The lazy check cuts the CPU per recorded position 2.3 times (16.5 to 7.2 ms) and gives tree
+  reuse its room back (×1.32 on top of it, against ×1.13 without it).
+- Blocking sync saves 1.7 to 2.3 cores but costs 3 to 4%: waking a sleeping worker adds about
+  20 to 30 µs to every batch, and the CPU is no longer short. It stays off.
+- At the recipe, neither resource is full: 14.7 of 30.7 cores, 784k of the kernel's 1.07M
+  evaluations/s. The search threads wait most of the time: a self-play step (one move on each of
+  the 1,024 boards) takes 129 ms for 94 ms of GPU work at full speed, the rest being the start
+  and the end of each step, when few searches are left and batches shrink.
+
+The same arms earlier on an EPYC 7702P box (Zen 2, a 30.7-core quota on a shared 128-thread
+host), before the lazy check: TensorRT recipe 451.8 and 465.8, fused 771.8 and 787.4, TensorRT
+with tree reuse 689.2, fused with tree reuse 1,181.8, the last one CPU-bound (26 of 30.7 cores).
+A neighbour on that host loaded it to about 95 threads during one attempt and cut the results
+by 40 to 70%; another rented "whole" machine (a Ryzen 9 7950X3D) had about 24 threads busy outside
+our container with nothing of ours running. Logs: `~/chessrl-runs/perf-2026-10-30/fused-ab/`
+and `perf4/`.
