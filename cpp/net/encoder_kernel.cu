@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 #include "net/encoder_params.hpp"
 
@@ -90,6 +91,16 @@ __device__ __forceinline__ void mma(float (&c)[4], const uint32_t (&a)[4], uint3
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+// The same with FP16 accumulators: c[0] holds row g, c[1] row g + 8 (two halves each). The
+// tensor cores of GeForce cards run this at twice the FP32-accumulator rate.
+__device__ __forceinline__ void mma_h(uint32_t (&c)[2], const uint32_t (&a)[4], uint32_t b0, uint32_t b1)
+{
+    asm("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, "
+        "{%2, %3, %4, %5}, {%6, %7}, {%0, %1};\n"
+        : "+r"(c[0]), "+r"(c[1])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
 __device__ __forceinline__ float exp2_approx(float x)
 {
     float y;
@@ -116,8 +127,9 @@ __device__ __forceinline__ void zero(float (&a)[4][NT][4])
 // acc[m][n] += A[rows of tile m] · W[n-tile tile[n]]ᵀ over K = 32·KP, for the 64 tokens.
 // A: FP16 in shared memory, row stride lda. W: B fragments packed by to_cnet.pack_b,
 // one 16-byte load per lane per (n-tile, 32 k); the next k-pair is fetched while the
-// current one is multiplied.
-template <int KP, int NT>
+// current one is multiplied. kChunk = 0: FP32 accumulators. kChunk > 0: FP16 accumulators,
+// added into acc (FP32) every kChunk k-pairs (32·kChunk terms) and at the end.
+template <int KP, int NT, int kChunk>
 __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* a, int lda,
                                           const void* weights, const int (&tile)[NT], int lane)
 {
@@ -126,6 +138,14 @@ __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* 
     uint4 b[NT];
 #pragma unroll
     for (int n = 0; n < NT; ++n) b[n] = __ldg(w + tile[n] * KP * 32 + lane);
+    uint32_t h[4][NT][2];
+    if constexpr (kChunk > 0)
+    {
+#pragma unroll
+        for (int m = 0; m < 4; ++m)
+#pragma unroll
+            for (int n = 0; n < NT; ++n) h[m][n][0] = h[m][n][1] = 0u;
+    }
 #pragma unroll
     for (int p = 0; p < KP; ++p)
     {
@@ -145,7 +165,30 @@ __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* 
                 ldsm4(af, arow + m * 16 * lda + p * 32 + s * 16);
 #pragma unroll
                 for (int n = 0; n < NT; ++n)
-                    mma(acc[m][n], af, s ? b[n].z : b[n].x, s ? b[n].w : b[n].y);
+                {
+                    if constexpr (kChunk == 0)
+                        mma(acc[m][n], af, s ? b[n].z : b[n].x, s ? b[n].w : b[n].y);
+                    else
+                        mma_h(h[m][n], af, s ? b[n].z : b[n].x, s ? b[n].w : b[n].y);
+                }
+            }
+        }
+        if constexpr (kChunk > 0)
+        {
+            if ((p + 1) % kChunk == 0 || p + 1 == KP)
+            {
+#pragma unroll
+                for (int m = 0; m < 4; ++m)
+#pragma unroll
+                    for (int n = 0; n < NT; ++n)
+                    {
+                        const float2 lo = unh2(h[m][n][0]), hi = unh2(h[m][n][1]);
+                        acc[m][n][0] += lo.x;
+                        acc[m][n][1] += lo.y;
+                        acc[m][n][2] += hi.x;
+                        acc[m][n][3] += hi.y;
+                        h[m][n][0] = h[m][n][1] = 0u;
+                    }
             }
         }
         if (p + 1 < KP)
@@ -369,6 +412,7 @@ __device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int c
     }
 }
 
+template <int kChunk>
 __global__ void __launch_bounds__(kThreads, 1)
     encoder_forward(__grid_constant__ const EncoderParams P, const SmallPackedPosition* __restrict__ packed,
                     const float* __restrict__ dense, unsigned char* __restrict__ out)
@@ -403,7 +447,7 @@ __global__ void __launch_bounds__(kThreads, 1)
     const int cols[2] = {2 * warp, 2 * warp + 1};
     float x[4][2][4];
     zero(x);
-    warp_gemm<4, 2>(x, s.h, kLdH, P.embed_w, cols, lane);
+    warp_gemm<4, 2, kChunk>(x, s.h, kLdH, P.embed_w, cols, lane);
     uint32_t x0[4][2][2];
 #pragma unroll
     for (int n = 0; n < 2; ++n)
@@ -445,7 +489,7 @@ __global__ void __launch_bounds__(kThreads, 1)
             float v[4][2][4];
             zero(v);
             const int vtile[2] = {32 + 2 * warp, 33 + 2 * warp};
-            warp_gemm<4, 2>(v, s.h, kLdH, L.qkv, vtile, lane);
+            warp_gemm<4, 2, kChunk>(v, s.h, kLdH, L.qkv, vtile, lane);
 #pragma unroll
             for (int m = 0; m < 4; ++m)
 #pragma unroll
@@ -459,14 +503,14 @@ __global__ void __launch_bounds__(kThreads, 1)
             float qk[4][4][4];
             zero(qk);
             const int qktile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-            warp_gemm<4, 4>(qk, s.h, kLdH, L.qkv, qktile, lane);
+            warp_gemm<4, 4, kChunk>(qk, s.h, kLdH, L.qkv, qktile, lane);
             head_norm(qk, 0, L.qnorm, t);
             head_norm(qk, 2, L.knorm, t);
             __syncwarp();
             attention(qk, vt, P.pair_bias, s.o, warp, lane);
         }
         __syncthreads();
-        warp_gemm<4, 2>(x, s.o, kLdH, L.out, cols, lane);
+        warp_gemm<4, 2, kChunk>(x, s.o, kLdH, L.out, cols, lane);
 
         // ---- SwiGLU feed-forward, in two passes of 16 gate + 16 up columns per warp.
         norm_to_smem(x, L.norm2, s.h, s.red, warp, lane);
@@ -477,7 +521,7 @@ __global__ void __launch_bounds__(kThreads, 1)
             zero(u);
             const int c0 = 4 * warp + 2 * pass;
             const int utile[4] = {c0, c0 + 1, 32 + c0, 33 + c0};
-            warp_gemm<4, 4>(u, s.h, kLdH, L.up, utile, lane);
+            warp_gemm<4, 4, kChunk>(u, s.h, kLdH, L.up, utile, lane);
 #pragma unroll
             for (int n = 0; n < 2; ++n)
             {
@@ -495,7 +539,7 @@ __global__ void __launch_bounds__(kThreads, 1)
             }
         }
         __syncthreads();
-        warp_gemm<8, 2>(x, s.f, kLdF, L.down, cols, lane);
+        warp_gemm<8, 2, kChunk>(x, s.f, kLdF, L.down, cols, lane);
     }
 
     // ---- Final norm into s.h, and the token mean of the normed stream (value input).
@@ -540,7 +584,7 @@ __global__ void __launch_bounds__(kThreads, 1)
         float a[4][4][4];
         zero(a);
         const int ptile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-        warp_gemm<4, 4>(a, s.h, kLdH, P.pol_w, ptile, lane);
+        warp_gemm<4, 4, kChunk>(a, s.h, kLdH, P.pol_w, ptile, lane);
 #pragma unroll
         for (int n = 0; n < 4; ++n)
         {
@@ -651,6 +695,34 @@ __global__ void __launch_bounds__(kThreads, 1)
     }
 }
 
+template <int kChunk>
+cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packed, const float* dense,
+                   int batch, void* out, cudaStream_t stream)
+{
+    static const cudaError_t setup = cudaFuncSetAttribute(
+        encoder_forward<kChunk>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(sizeof(Smem)));
+    if (setup != cudaSuccess) return setup;
+    encoder_forward<kChunk><<<batch, kThreads, sizeof(Smem), stream>>>(params, packed, dense,
+                                                                      static_cast<unsigned char*>(out));
+    return cudaGetLastError();
+}
+
+// CHESSRL_FP16_ACC: 0 (default) keeps FP32 accumulators; N > 0 sums N terms (32, 64, or 256 for
+// whole sums) in FP16 between FP32 additions, in the projection matrix multiplies. The score
+// multiplies (attention, policy logits) and the residual stream stay FP32.
+int fp16_chunk()
+{
+    static const int chunk = [] {
+        const char* env = std::getenv("CHESSRL_FP16_ACC");
+        const int terms = env ? std::atoi(env) : 0;
+        if (terms <= 0) return 0;
+        if (terms <= 32) return 1;
+        if (terms <= 64) return 2;
+        return 8;
+    }();
+    return chunk;
+}
+
 } // namespace
 
 cudaError_t launch_encoder_forward(const EncoderParams& params,
@@ -661,12 +733,13 @@ cudaError_t launch_encoder_forward(const EncoderParams& params,
                                    cudaStream_t stream)
 {
     if (batch <= 0) return cudaSuccess;
-    static const cudaError_t setup = cudaFuncSetAttribute(
-        encoder_forward, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(sizeof(Smem)));
-    if (setup != cudaSuccess) return setup;
-    encoder_forward<<<batch, kThreads, sizeof(Smem), stream>>>(params, packed, dense,
-                                                              static_cast<unsigned char*>(out));
-    return cudaGetLastError();
+    switch (fp16_chunk())
+    {
+    case 1: return launch<1>(params, packed, dense, batch, out, stream);
+    case 2: return launch<2>(params, packed, dense, batch, out, stream);
+    case 8: return launch<8>(params, packed, dense, batch, out, stream);
+    default: return launch<0>(params, packed, dense, batch, out, stream);
+    }
 }
 
 } // namespace chessrl::net
