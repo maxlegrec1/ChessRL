@@ -97,6 +97,8 @@ class Trainer:
         self.model = build_model(spec).to(self.device)
         self.model.train()
         self.optimizer = self._make_optimizer()
+        if config.fp16_accumulation:
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
         self._step_fn = self._compiled_step()
 
         self.checkpoint_dir = config.checkpoint.dir

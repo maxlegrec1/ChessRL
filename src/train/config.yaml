@@ -22,6 +22,9 @@ amp_dtype: float16
 # attention scores) that compiling fuses, 3 times faster (docs/TRAINER_SPEED.md). The first
 # step compiles, about a minute.
 compile: true
+# FP16 accumulators in the trainer's matrix multiplies, as in the self-play kernel: the same speed
+# and losses at this size (docs/TRAINER_SPEED.md), twice the tensor-core rate for a bigger model.
+fp16_accumulation: true
 mirror_prob: 0.5 # colour-flip augmentation
 log_every: 5
 
