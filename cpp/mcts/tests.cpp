@@ -452,16 +452,16 @@ TEST_CASE("extract_subtree re-roots a played move's subtree for the next search"
     CHECK(r.visit_count == 3);
     CHECK(r.virtual_loss == 0.0F);
     CHECK(r.wdl[0] == doctest::Approx(0.5F));  // wdl_sum / visits, not the refined value
-    REQUIRE(r.children.size() == 2);
-    CHECK(r.child_moves[0] == e7e5);
-    CHECK(r.child_priors[1] == doctest::Approx(0.3F));
-    const auto& sc = sub.nodes[static_cast<size_t>(r.children[0])];
+    REQUIRE(r.num_children == 2);
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child)].move_from_parent == e7e5);
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child) + 1].prior == doctest::Approx(0.3F));
+    const auto& sc = sub.nodes[static_cast<size_t>(r.first_child)];
     CHECK(sc.parent == 0);
     CHECK(sc.move_from_parent == e7e5);
     CHECK(sc.visit_count == 2);
     CHECK(sc.value_sum == doctest::Approx(-0.3F));
     CHECK(sc.wdl[2] == doctest::Approx(0.5F));
-    CHECK(sub.nodes[static_cast<size_t>(r.children[1])].move_from_parent == c7c5);
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child) + 1].move_from_parent == c7c5);
     (void)d;
 
     CHECK(mcts::extract_subtree(tree, 99, 0).nodes.empty());  // out of range: empty tree

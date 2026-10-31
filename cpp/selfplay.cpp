@@ -764,6 +764,7 @@ SelfPlayMetrics SelfPlayWorker::step()
         opt.temperature = policy_move ? 1.0f : cfg.temperature;
         opt.temperature_at_root = policy_move ? cfg.quick_policy_temperature : root_temp;
         opt.virtual_loss_width = cfg.virtual_loss_width;
+        opt.principal_variations = false;
         opt.use_dirichlet = full && cfg.use_dirichlet;
         opt.dirichlet_alpha = cfg.dirichlet_alpha;
         opt.dirichlet_epsilon = cfg.dirichlet_epsilon;

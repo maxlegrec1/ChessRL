@@ -182,23 +182,18 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
     while (current >= 0 && current < static_cast<int>(tree.nodes.size()))
     {
         const TreeNode& node = tree.nodes[current];
-        if (node.children.empty())
+        if (node.num_children == 0)
         {
             break;
         }
 
-        size_t best_index = 0;
+        int best_index = 0;
         bool has_visits = false;
         float best_visits = -1.0F;
 
-        for (size_t i = 0; i < node.children.size(); ++i)
+        for (int i = 0; i < node.num_children; ++i)
         {
-            const int child_index = node.children[i];
-            if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
-            {
-                continue;
-            }
-            const TreeNode& child = tree.nodes[child_index];
+            const TreeNode& child = tree.nodes[static_cast<size_t>(node.first_child + i)];
             const float visits = static_cast<float>(child.visit_count);
             if (visits > best_visits)
             {
@@ -212,9 +207,9 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
         {
             float best_prior = -1.0F;
             bool found_prior = false;
-            for (size_t i = 0; i < node.children.size(); ++i)
+            for (int i = 0; i < node.num_children; ++i)
             {
-                const float prior = node.child_priors[i];
+                const float prior = tree.nodes[static_cast<size_t>(node.first_child + i)].prior;
                 if (prior > best_prior)
                 {
                     best_prior = prior;
@@ -228,11 +223,11 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
             }
         }
 
-        const chess::Move move = node.child_moves[best_index];
+        current = node.first_child + best_index;
+        const chess::Move move = tree.nodes[static_cast<size_t>(current)].move_from_parent;
         // Phase B: Use current_board for chess960 flag
         line.push_back(chess::uci::moveToUci(move, current_board.chess960()));
         current_board.makeMove(move);
-        current = node.children[best_index];
     }
 
     return line;
@@ -435,9 +430,15 @@ int SearchTree::add_child(int parent_index, chess::Move move, float prior)
     const int child_index = static_cast<int>(nodes.size()) - 1;
 
     TreeNode& parent = nodes[parent_index];
-    parent.children.push_back(child_index);
-    parent.child_moves.push_back(move);
-    parent.child_priors.push_back(prior);
+    if (parent.num_children == 0)
+    {
+        parent.first_child = child_index;
+    }
+    else if (child_index != parent.first_child + parent.num_children)
+    {
+        throw std::logic_error("SearchTree::add_child: a node's children must be added together");
+    }
+    ++parent.num_children;
 
     return child_index;
 }
@@ -450,14 +451,17 @@ SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t r
     {
         return out;
     }
-    // Breadth first: a node's new index is its discovery order, so parents precede children.
+    // Breadth first: a node's new index is its discovery order, so parents precede children and
+    // each node's children stay consecutive.
     std::vector<int> order{new_root};
     std::vector<int> new_index(tree.nodes.size(), -1);
     new_index[static_cast<size_t>(new_root)] = 0;
     for (size_t k = 0; k < order.size(); ++k)
     {
-        for (const int child : tree.nodes[static_cast<size_t>(order[k])].children)
+        const TreeNode& node = tree.nodes[static_cast<size_t>(order[k])];
+        for (int i = 0; i < node.num_children; ++i)
         {
+            const int child = node.first_child + i;
             new_index[static_cast<size_t>(child)] = static_cast<int>(order.size());
             order.push_back(child);
         }
@@ -467,9 +471,9 @@ SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t r
     {
         TreeNode node = tree.nodes[static_cast<size_t>(old)];
         node.parent = old == new_root ? -1 : new_index[static_cast<size_t>(node.parent)];
-        for (int& child : node.children)
+        if (node.num_children > 0)
         {
-            child = new_index[static_cast<size_t>(child)];
+            node.first_child = new_index[static_cast<size_t>(node.first_child)];
         }
         node.virtual_loss = 0.0F;
         if (node.visit_count > 0)
@@ -561,19 +565,17 @@ std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vect
     }
     visited[static_cast<size_t>(node_index)] = true;
 
-    if (node.terminal || node.children.empty())
+    if (node.terminal || node.num_children == 0)
     {
         return node.wdl;
     }
 
     std::array<float, 3> wdl_sum{0.0F, 0.0F, 0.0F};
     int total_visits = 0;
-    for (const int child_index : node.children)
+    const int first_child = node.first_child;
+    const int num_children = node.num_children;
+    for (int child_index = first_child; child_index < first_child + num_children; ++child_index)
     {
-        if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
-        {
-            continue;
-        }
         const TreeNode& child = tree.nodes[child_index];
         if (child.visit_count > 0)
         {

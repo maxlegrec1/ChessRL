@@ -289,9 +289,10 @@ public:
         // missing simulations, after mixing fresh root noise into its priors. A fresh root is
         // evaluated first, on its own, because every descent depends on its expansion.
         reused_visits_ = 0;
-        if (tree_.nodes.front().expanded && !tree_.nodes.front().children.empty())
+        const TreeNode& root = tree_.nodes.front();
+        if (root.expanded && root.num_children > 0)
         {
-            for (const int child : tree_.nodes.front().children)
+            for (int child = root.first_child; child < root.first_child + root.num_children; ++child)
             {
                 reused_visits_ += tree_.nodes[static_cast<size_t>(child)].visit_count;
             }
@@ -401,7 +402,7 @@ private:
                 return d;
             }
 
-            if (!node.expanded || node.children.empty())
+            if (!node.expanded || node.num_children == 0)
             {
                 // First visit: only now check whether the game is over here (expansion
                 // does not, for children that are mostly never visited). A finished game
@@ -462,7 +463,7 @@ private:
     int select_child(int node_index) const
     {
         const TreeNode& node = tree_.nodes[node_index];
-        if (node.children.empty())
+        if (node.num_children == 0)
         {
             return -1;
         }
@@ -486,11 +487,10 @@ private:
         constexpr float kMlhEpsilon = 0.05F;
         constexpr float kPliesScale = 1.0F / 25.0F;
 
-        for (size_t i = 0; i < node.children.size(); ++i)
+        for (int child_index = node.first_child; child_index < node.first_child + node.num_children; ++child_index)
         {
-            const int child_index = node.children[i];
             const TreeNode& child = tree_.nodes[child_index];
-            const float prior = node.child_priors[i];
+            const float prior = child.prior;
             // Virtual loss: each in-flight visit on this child counts as a
             // "phantom win for the child" (= phantom loss for the parent).
             // Increases the effective visit count denominator AND shifts
@@ -684,7 +684,7 @@ private:
         const SmallPolicyValue& eval)
     {
         TreeNode& node = tree_.nodes[node_index];
-        if (node.expanded && !node.children.empty())
+        if (node.expanded && node.num_children > 0)
         {
             return;
         }
@@ -887,17 +887,16 @@ private:
     // mix fresh noise into its moves' priors, as a newly expanded root gets.
     void noise_reused_root()
     {
-        TreeNode& root = tree_.nodes.front();
-        std::vector<MovePrior> priors(root.child_priors.size());
+        const TreeNode& root = tree_.nodes.front();
+        std::vector<MovePrior> priors(static_cast<size_t>(root.num_children));
         for (size_t i = 0; i < priors.size(); ++i)
         {
-            priors[i].prior = root.child_priors[i];
+            priors[i].prior = tree_.nodes[static_cast<size_t>(root.first_child) + i].prior;
         }
         apply_dirichlet_noise(priors);
         for (size_t i = 0; i < priors.size(); ++i)
         {
-            root.child_priors[i] = priors[i].prior;
-            tree_.nodes[static_cast<size_t>(root.children[i])].prior = priors[i].prior;
+            tree_.nodes[static_cast<size_t>(root.first_child) + i].prior = priors[i].prior;
         }
     }
 
@@ -911,20 +910,19 @@ private:
         }
         const TreeNode& root = tree_.nodes.front();
         const bool chess960 = root_board_.chess960();
-        for (size_t i = 0; i < root.children.size(); ++i)
+        for (int child = root.first_child; child < root.first_child + root.num_children; ++child)
         {
-            if (chess::uci::moveToUci(root.child_moves[i], chess960) != summary.action)
+            const TreeNode& node = tree_.nodes[static_cast<size_t>(child)];
+            if (chess::uci::moveToUci(node.move_from_parent, chess960) != summary.action)
             {
                 continue;
             }
-            const int child = root.children[i];
-            const TreeNode& node = tree_.nodes[static_cast<size_t>(child)];
-            if (node.visit_count == 0 || !node.expanded || node.terminal || node.children.empty())
+            if (node.visit_count == 0 || !node.expanded || node.terminal || node.num_children == 0)
             {
                 return;
             }
             chess::Board after = root_board_;
-            after.makeMove(root.child_moves[i]);
+            after.makeMove(node.move_from_parent);
             summary.tree = std::make_shared<SearchTree>(extract_subtree(tree_, child, after.zobrist()));
             return;
         }
@@ -941,7 +939,7 @@ private:
         const TreeNode& root = tree_.nodes.front();
 
         std::vector<std::pair<std::string, float>> distribution;
-        distribution.reserve(root.children.size());
+        distribution.reserve(static_cast<size_t>(root.num_children));
 
         struct Aggregated
         {
@@ -953,17 +951,16 @@ private:
         };
 
         std::vector<Aggregated> aggregated;
-        aggregated.reserve(root.children.size());
+        aggregated.reserve(static_cast<size_t>(root.num_children));
         std::unordered_map<std::string, size_t> index;
 
         int total_visits = 0;
         float total_priors = 0.0F;
 
-        for (size_t i = 0; i < root.children.size(); ++i)
+        for (int child_index = root.first_child; child_index < root.first_child + root.num_children; ++child_index)
         {
-            const int child_index = root.children[i];
             const TreeNode& child = tree_.nodes[child_index];
-            const chess::Move move = root.child_moves[i];
+            const chess::Move move = child.move_from_parent;
             // Phase B: Use root_board_ instead of root.board
             const std::string uci = chess::uci::moveToUci(move, root_board_.chess960());
 
@@ -975,7 +972,7 @@ private:
 
             Aggregated& entry = aggregated[it->second];
             entry.visit_sum += child.visit_count;
-            entry.prior_sum += root.child_priors[i];
+            entry.prior_sum += child.prior;
             entry.value_sum += child.value_sum;
             if (entry.representative_child < 0 || child.visit_count > tree_.nodes[entry.representative_child].visit_count)
             {
@@ -983,7 +980,7 @@ private:
             }
 
             total_visits += child.visit_count;
-            total_priors += root.child_priors[i];
+            total_priors += child.prior;
         }
 
         if (aggregated.empty())
@@ -1140,7 +1137,7 @@ private:
             }
             detail.prior = entry.prior_sum;
             detail.average_value = entry.visit_sum > 0 ? -entry.value_sum / static_cast<float>(entry.visit_sum) : 0.0F;
-            if (entry.representative_child >= 0)
+            if (entry.representative_child >= 0 && options_.principal_variations)
             {
                 // Phase B: Pass root_board_ to principal_variation
                 detail.continuation = principal_variation(tree_, entry.representative_child, root_board_);

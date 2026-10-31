@@ -96,6 +96,9 @@ struct MctsOptions
     // `simulations` is 0. keep_tree: return the subtree under the move this search plays.
     std::shared_ptr<SearchTree> reuse_tree;
     bool keep_tree{false};
+    // Fill each root move's principal variation (MctsSummary::rollouts[].continuation). Self-play
+    // never reads them and turns this off: a board copy and a UCI string per ply of each line.
+    bool principal_variations{true};
 };
 
 MctsOptions parse_cli(int argc, char** argv);
@@ -133,9 +136,11 @@ struct TreeNode
     // Computed from the NN's mlh_q head as `mlh_q * 25` (the head outputs
     // plies/25). Terminal nodes use 0.
     float leaf_plies{0.0F};
-    std::vector<int> children;
-    std::vector<chess::Move> child_moves;
-    std::vector<float> child_priors;
+    // Children: `num_children` consecutive nodes from `first_child` (all added when this node is
+    // expanded); each holds its own move (move_from_parent) and prior. No per-node allocation, so
+    // copying a subtree for reuse and freeing a tree move only the node array.
+    int first_child{-1};
+    int num_children{0};
 };
 
 struct SearchTree
