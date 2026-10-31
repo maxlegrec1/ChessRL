@@ -87,7 +87,7 @@ class Block(nn.Module):
 
     def forward(self, x, x0, bias):
         b, n, d = x.shape
-        x = x + self.x0_gain * x0
+        x = x + self.x0_gain * x0.float()
         h = self.norm1(x)
         qkv = self.qkv(h)
         if (
@@ -170,8 +170,12 @@ class EncoderModel(nn.Module):
         b = x.shape[0]
         x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos
         h = x0
+        # The copy re-injected into every layer is FP16 under autocast, as the self-play kernel keeps
+        # it: half the bytes of each layer's FP32 read and of its gradient. The residual stream
+        # itself stays FP32.
+        x0_layers = x0.to(torch.float16) if torch.is_autocast_enabled("cuda") and x0.is_cuda else x0
         for block in self.blocks:
-            h = block(h, x0, self.pair_bias)
+            h = block(h, x0_layers, self.pair_bias)
         h = self.norm(h)
 
         # logit(from, to, promo) = (q_from + promo_vec) . k_to / sqrt(d): two small
