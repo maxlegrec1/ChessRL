@@ -97,8 +97,6 @@ class Trainer:
         self.model = build_model(spec).to(self.device)
         self.model.train()
         self.optimizer = self._make_optimizer()
-        if config.fp16_accumulation and hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
-            torch.backends.cuda.matmul.allow_fp16_accumulation = True
         self._step_fn = self._compiled_step()
 
         self.checkpoint_dir = config.checkpoint.dir
@@ -146,10 +144,7 @@ class Trainer:
 
     def _compiled_step(self):
         """The step's forward and losses, compiled with the model when config.compile."""
-        if not self.config.compile:
-            return self._losses
-        mode = None if self.config.compile_mode == "default" else self.config.compile_mode
-        return torch.compile(self._losses, mode=mode)
+        return torch.compile(self._losses) if self.config.compile else self._losses
 
     def lr_at(self, step: int) -> float:
         cfg = self.config

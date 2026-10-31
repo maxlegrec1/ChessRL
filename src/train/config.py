@@ -192,10 +192,6 @@ class TrainingConfig:
     search_heads: str = "search"
     mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward and losses
-    compile_mode: str = "default"  # torch.compile mode: default | max-autotune | max-autotune-no-cudagraphs
-    # FP16 accumulators in the FP16 matrix multiplies (torch.backends.cuda.matmul.
-    # allow_fp16_accumulation): twice the tensor-core rate on GeForce cards.
-    fp16_accumulation: bool = False
     async_engine_build: bool = False  # export networks in the background
     mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS, trainer low priority
     metrics_path: Path | None = None  # JSONL metrics for the dashboard

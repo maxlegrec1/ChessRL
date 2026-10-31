@@ -76,6 +76,50 @@ the fused SwiGLU, norm and QK-norm kernels 0.6 to 1.5 ms each, the matrix multip
 in all. The items below would each win a few percent; the trainer already waits for records half
 the time in a real run.
 
+## The quick wins, and where the step stands (2026-10-31)
+
+**Why it matters again.** With asynchronous self-play (`docs/PERF.md`) the GPU no longer has the
+idle time a low-priority trainer ran in. Short real runs on perf5 (RTX 4090 + Ryzen 9 7950X, 12
+minutes, the last 8 measured): step-by-step self-play 2,934 records/s with the trainer at 7.41
+steps/s and 5.0 samples per record; asynchronous play 3,555 records/s and 0.67 steps/s (0.38
+samples per record); with two kernel blocks per SM and 6 workers 4,387 records/s and 3.22 steps/s
+(1.67 samples per record).
+
+**Profile of the compiled step** (`scripts/bench_trainer.py --compile`, alone on the GPU, batch
+2,048): 26.8 ms, 663 kernels, the GPU busy the whole step (the profiler's "CompiledFxGraph"
+entries are ranges around their own kernels, so its total counts them twice). Inductor's fused
+Triton kernels (norms, SwiGLU, QK-norm, casts) take about 60% of it, the matrix multiplies about
+25%, attention forward and backward about 11%, AdamW 2%, the input decoding 2%: memory traffic on
+[2,048 x 64 x 128..512] activations, not launches or arithmetic.
+
+**The quick wins** (e81a386): the decoding, the visit target and the losses are compiled with
+the model (`Trainer._losses`); the diagnostics are computed only on logged steps (they only ever
+logged that step's values); no host sync in a step (the loss scaler's scale is read on logged
+steps only, AdamW is fused so that an overflowed step is skipped on the GPU, decoding has no
+`mirror.any()` and builds the en passant plane with a one-hot); RMSNorm computes in FP32 instead
+of dividing each row by its maximum first.
+
+| step, alone, batch 2,048 | ms | kernels |
+|---|---|---|
+| pushed (33ca29e) | 26.8 | 663 |
+| **quick wins** | **21.9** (-18%) | 381 |
+| + FP16 accumulation in the matrix multiplies | 22.0 | 379 |
+| + `torch.compile(mode="max-autotune-no-cudagraphs")` | 21.9 | 367 |
+
+FP16 accumulation and max-autotune change nothing (the multiplies are bound by memory, not the
+tensor cores), and together they fail (cuBLAS has no FP16-accumulating batched GEMM with an FP32
+output); neither is kept. Training is unchanged: 300 steps from run C's checkpoint on the same
+batches (`artifacts/scratch/train_parity.py`), loss 3.68178 against 3.68176 at the first step,
+per-step losses within 0.0011 to 0.0013 of the pushed code's on average, when the pushed code run
+twice differs from itself by 0.0007 (non-deterministic GPU reductions).
+
+**What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
+activations grow with it). The lever left is fusing across the matrix multiplies: a training
+kernel that runs a layer's forward and backward with the activations on chip, as the self-play
+kernel does for the forward (several times faster at best, days of work, gradients checked against
+autograd), or giving the trainer a fixed share of the GPU (self-play yielding when the trainer is
+behind its samples per record).
+
 ## Ranked by GPU time saved
 
 1. **Fused attention.** `src/models/encoder.py` builds the full score tensor in every layer:
