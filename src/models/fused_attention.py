@@ -3,7 +3,7 @@
 One Triton program per (position, head) runs the QK-norm, the scores with the learned pair bias,
 the softmax and the value product, reading q, k and v straight from the qkv projection's output and
 writing only the head's 16 output columns. The backward recomputes the scores in one program per
-(head, block of positions) and writes the qkv gradient directly, summing the pair bias's and the
+(head, 64 positions) and writes the qkv gradient directly, summing the pair bias's and the
 norm weights' gradients over its positions before adding them in. PyTorch's version (two
 RMSNorms, the layout copies, scaled_dot_product_attention) moved the [batch, 8, 64, 16] q, k, v and
 their gradients through memory several times; the training step is bound by that traffic.
@@ -20,7 +20,10 @@ import triton.language as tl
 
 TOKENS, HEADS, HEAD_DIM = 64, 8, 16
 D_MODEL = HEADS * HEAD_DIM
-_BLOCK = 16  # positions per backward program (its bias and weight gradients are summed there)
+# Positions per backward program, which sums the pair bias's and norm weights' gradients over
+# them before one atomic add: at batch 2,048 on a 4090 the backward takes 1,495 us with 1, 584 with
+# 16, 375 with 64 and 511 with 128 (too few programs left).
+_BLOCK = 64
 
 
 @triton.jit

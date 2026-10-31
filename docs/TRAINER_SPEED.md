@@ -126,13 +126,14 @@ about 3,540 records/s and train about 17,700 samples per second.
 **Fused attention** (`src/models/fused_attention.py`, a Triton custom op): one program per
 (position, head) runs the QK-norm, the scores with the pair bias, the softmax and the value product
 straight from the qkv projection's output; the backward recomputes the scores in one program per
-(head, 16 positions) and sums the pair bias's and norm weights' gradients there. Replaces the two
+(head, 64 positions) and sums the pair bias's and norm weights' gradients there. Replaces the two
 head norms, the layout copies and `scaled_dot_product_attention` (about 5.4 ms of the step).
 
 | step, alone, batch 2,048 | ms | kernels |
 |---|---|---|
 | quick wins (b1ae360) | 22.0 | 379 |
-| **+ fused attention** | **18.6** (-15.5%) | 343 |
+| + fused attention, 16 positions per backward program | 18.6 | 343 |
+| **+ 64 positions per backward program** | **17.7** (-20%) | 343 |
 
 Against the plain PyTorch formula on random inputs: output within 2e-3, the gradients of qkv,
 both norm weights and the pair bias within 2% (`tests/test_fused_attention.py`). 300 steps on the
