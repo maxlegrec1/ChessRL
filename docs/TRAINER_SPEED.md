@@ -113,6 +113,16 @@ batches (`artifacts/scratch/train_parity.py`), loss 3.68178 against 3.68176 at t
 per-step losses within 0.0011 to 0.0013 of the pushed code's on average, when the pushed code run
 twice differs from itself by 0.0007 (non-deterministic GPU reductions).
 
+**In a real run** (the pushed code, asynchronous play, two kernel blocks per SM, 6 workers, the
+same 12-minute run): 4,343 records/s and the trainer at 4.77 steps/s (0.169 s per step), 2.39
+samples per record, against 4,387 records/s, 3.22 steps/s and 1.67 with the trainer before the
+quick wins: +48% training steps for -1% records. Without host syncs the trainer keeps work queued
+and fills more of the gaps the GPU leaves. That is 9,770 samples trained per second; the
+step-by-step setup of the morning trained 15,180 (2,934 records/s at 5.0 samples per record),
+because it left the trainer more idle time. From the measured costs (about 229 µs of GPU per record
+in self-play, 11 µs per sample in training), a GPU shared to keep 5 samples per record would make
+about 3,540 records/s and train about 17,700 samples per second.
+
 **What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
 activations grow with it). The lever left is fusing across the matrix multiplies: a training
 kernel that runs a layer's forward and backward with the activations on chip, as the self-play
