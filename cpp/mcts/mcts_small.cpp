@@ -1346,6 +1346,30 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
         }
     }
 
+    report_mcts_phases(static_cast<int>(num_threads));
+
+    return summaries;
+}
+
+MctsSummary run_small_mcts_shared(
+    MctsOptions options,
+    std::shared_ptr<single::SmallBatchRunner> shared_runner,
+    std::shared_ptr<TranspositionTable> cache)
+{
+    SmallMctsRunner runner(std::move(options), std::move(shared_runner), std::move(cache));
+    runner.start();
+    while (runner.advance())
+    {
+    }
+    const bool ph = mcts_phases_on();
+    const std::uint64_t t_f = ph ? now_ns() : 0;
+    MctsSummary summary = runner.finish();
+    if (ph) g_ph_finish_ns.fetch_add(now_ns() - t_f, std::memory_order_relaxed);
+    return summary;
+}
+
+void report_mcts_phases(int threads)
+{
     if (mcts_phases_on())
     {
         // Sums are across all worker threads (wall ≈ sum / num_threads).
@@ -1363,10 +1387,8 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
                   << " get=" << g_ph_get_ns.exchange(0, std::memory_order_relaxed) / ms
                   << " finish=" << g_ph_finish_ns.exchange(0, std::memory_order_relaxed) / ms
                   << " free=" << g_ph_free_ns.exchange(0, std::memory_order_relaxed) / ms
-                  << " (threads=" << num_threads << ")\n";
+                  << " (threads=" << threads << ")\n";
     }
-
-    return summaries;
 }
 
 std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_options)

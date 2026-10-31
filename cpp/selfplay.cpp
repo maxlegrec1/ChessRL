@@ -8,11 +8,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -40,6 +42,18 @@ int searches_per_thread()
         return std::max(1, env ? std::atoi(env) : 1);
     }();
     return n;
+}
+
+// CHESSRL_ASYNC_SELFPLAY=1: persistent search threads each play their own boards in turn, with no
+// step barrier (SelfPlayWorker::Impl::play); step() then returns after one move per board's worth
+// of moves. Off: each step searches every board once, all at once.
+bool async_selfplay()
+{
+    static const bool on = [] {
+        const char* env = std::getenv("CHESSRL_ASYNC_SELFPLAY");
+        return env != nullptr && std::atoi(env) != 0;
+    }();
+    return on;
 }
 
 // On-disk record layout v2 (1280 bytes, fixed). Bytes [0..832) keep the v1
@@ -615,6 +629,249 @@ struct SelfPlayWorker::Impl
         reset_slot(slot);
     }
 
+    // One move of one board: its search request, then the search's result applied to the board.
+    struct MovePlan
+    {
+        chessrl::mcts::MctsOptions options;
+        bool full{true};
+        bool sampled{false};
+        bool policy_move{false};
+        int simulations{0};
+    };
+
+    MovePlan plan_move(BoardSlot& slot)
+    {
+        const SelfPlayConfig& cfg = config;
+        MovePlan plan;
+        chessrl::mcts::MctsOptions& opt = plan.options;
+        // The search starts from the board itself (its state history gives repetitions) and the
+        // history stack below, so it reads neither request.fen nor request.history.
+        opt.request.board = slot.board;
+        // Supply the AlphaZero history stack directly from the rolling
+        // snapshots we already maintain (slot.past_planes), so the runner
+        // skips the O(plies) build_root_history_stack replay it would
+        // otherwise do on EVERY ply ⇒ O(plies^2)/game. Bit-identical to
+        // build_root_history_stack: slot 0 = snapshot(slot.board) + its
+        // isRepetition(1); slots 1..7 = past_planes[0..6] (each captured
+        // pre-move with its repetition flag, newest-first — same ordering).
+        {
+            chessrl::mcts::HistoryStack hs{};
+            hs[0] = chessrl::mcts::snapshot_piece_planes(slot.board);
+            hs[0].repetition = slot.board.isRepetition(1);
+            for (int s = 1; s < chessrl::mcts::kHistoryDepth; ++s)
+            {
+                const size_t k = static_cast<size_t>(s - 1);
+                if (k < slot.past_planes.size())
+                    hs[static_cast<size_t>(s)] = slot.past_planes[k];
+            }
+            opt.request.history_stack = hs;
+        }
+
+        // Playout-cap randomization: cheap searches play the game forward but
+        // produce no training record and no root noise.
+        const bool full = cfg.pcr_full_prob >= 1.0f || uniform01() < cfg.pcr_full_prob;
+        const bool early = cfg.temperature_plies < 0 || slot.ply_count < cfg.temperature_plies;
+        const float root_temp = early ? cfg.temperature_at_root : cfg.temperature_late;
+        // A cheap move in the sampling phase can sample the raw policy instead: with
+        // no simulations the search only expands the root, and summarize() samples
+        // its priors; prior temperature 1 makes those softmax(logit), so the move is
+        // drawn from softmax(logit / quick_policy_temperature).
+        const bool policy_move = !full && early && root_temp > 1e-5F && cfg.quick_policy_temperature > 0.0f;
+        plan.full = full;
+        plan.policy_move = policy_move;
+        plan.simulations = full ? cfg.simulations : (policy_move ? 0 : cfg.pcr_fast_simulations);
+        plan.sampled = root_temp > 1e-5F;
+
+        opt.simulations = plan.simulations;
+        opt.cpuct = cfg.cpuct;
+        opt.temperature = policy_move ? 1.0f : cfg.temperature;
+        opt.temperature_at_root = policy_move ? cfg.quick_policy_temperature : root_temp;
+        opt.virtual_loss_width = cfg.virtual_loss_width;
+        opt.principal_variations = false;
+        opt.use_dirichlet = full && cfg.use_dirichlet;
+        opt.dirichlet_alpha = cfg.dirichlet_alpha;
+        opt.dirichlet_epsilon = cfg.dirichlet_epsilon;
+        opt.small_engine_path = cfg.engine_path;
+        // Tree reuse: continue the subtree the previous search kept for the move played (not
+        // for policy-sampled moves, which play from the priors without searching).
+        if (cfg.tree_reuse && !policy_move)
+        {
+            opt.keep_tree = true;
+            opt.reuse_tree = std::move(slot.tree);
+        }
+        slot.tree.reset();
+        return plan;
+    }
+
+    void apply_move(BoardSlot& slot, size_t i, const MovePlan& plan, const chessrl::mcts::MctsSummary& summary,
+                    SelfPlayMetrics& metrics)
+    {
+        const SelfPlayConfig& cfg = config;
+        metrics.nodes_evaluated += summary.new_simulations;
+        stats.simulations_run += summary.new_simulations;
+        stats.reused_visits += summary.reused_visits;
+
+        if (summary.action.empty())
+        {
+            reset_slot(slot);
+            metrics.games_finished++;
+            return;
+        }
+
+        if (plan.full) stats.full_searches++;
+        else stats.fast_searches++;
+        if (plan.policy_move) stats.policy_moves++;
+        if (plan.full)
+        {
+            slot.pending_records.push_back(make_record(slot, summary, plan.simulations, true, plan.sampled));
+            metrics.positions_generated++;
+        }
+
+        // Resignation: the side to move gives up once its root expected score
+        // has stayed below the threshold for resign_consecutive of its moves.
+        // Policy-sampled moves carry only the raw value head, not a search value,
+        // so they neither extend nor reset the streak.
+        const chess::Color stm = slot.board.sideToMove();
+        const size_t colour = stm == chess::Color::WHITE ? 0 : 1;
+        if (cfg.resign_threshold > 0.0f && !plan.policy_move)
+        {
+            const float expected = summary.value[0] + 0.5f * summary.value[1];
+            slot.low_streak[colour] = expected < cfg.resign_threshold ? slot.low_streak[colour] + 1 : 0;
+            if (slot.low_streak[colour] >= cfg.resign_consecutive)
+            {
+                if (slot.playthrough)
+                {
+                    slot.would_resign[colour] = true;
+                }
+                else
+                {
+                    finish_game(slot, i, colour == 0 ? 0.0f : 1.0f, EndReason::Resign);
+                    metrics.games_finished++;
+                    return;
+                }
+            }
+        }
+
+        // Apply move
+        bool move_found = false;
+        chess::Movelist moves;
+        chess::movegen::legalmoves(moves, slot.board);
+        for (const auto& m : moves)
+        {
+            if (chess::uci::moveToUci(m, slot.board.chess960()) == summary.action)
+            {
+                // Snapshot the pre-move position into the past_planes deque
+                // BEFORE applying the move, so the next record sees this
+                // position at slot 1 (t-1).
+                chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
+                pre.repetition = slot.board.isRepetition(1);
+                slot.past_planes.push_front(pre);
+                if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
+
+                slot.board.makeMove(m);
+                slot.history.push_back(summary.action);
+                slot.ply_count++;
+                slot.tree = summary.tree;  // set only with tree_reuse
+                move_found = true;
+                break;
+            }
+        }
+
+        if (!move_found)
+        {
+            std::cerr << "Move not found: " << summary.action << " in " << slot.board.getFen() << std::endl;
+            reset_slot(slot);
+            return;
+        }
+
+        // Check termination
+        const auto [reason, result] = slot.board.isGameOver();
+        if (result == chess::GameResult::NONE && slot.ply_count < cfg.max_plies)
+        {
+            return;
+        }
+
+        float z = 0.5f;
+        const bool white_to_move = slot.board.sideToMove() == chess::Color::WHITE;
+        if (result == chess::GameResult::LOSE) z = white_to_move ? 0.0f : 1.0f; // side to move is mated
+        else if (result == chess::GameResult::WIN) z = white_to_move ? 1.0f : 0.0f;
+
+        EndReason end = EndReason::MaxPlies;
+        if (result != chess::GameResult::NONE)
+        {
+            switch (reason)
+            {
+                case chess::GameResultReason::CHECKMATE: end = EndReason::Checkmate; break;
+                case chess::GameResultReason::STALEMATE: end = EndReason::Stalemate; break;
+                case chess::GameResultReason::INSUFFICIENT_MATERIAL: end = EndReason::Insufficient; break;
+                case chess::GameResultReason::FIFTY_MOVE_RULE: end = EndReason::Fifty; break;
+                case chess::GameResultReason::THREEFOLD_REPETITION: end = EndReason::Repetition; break;
+                default: end = EndReason::MaxPlies; break;
+            }
+        }
+        finish_game(slot, i, z, end);
+        metrics.games_finished++;
+    }
+
+    // ---- Asynchronous self-play (async_selfplay()). Player thread t plays boards t, t + n, ...
+    // in turn, one move each, never waiting for the others. Preparing and applying a move run
+    // under state_mutex (the record file, stats, the config and the opening RNG are shared); the
+    // searches run outside it, each on the runner current when it starts (`runner` is read and
+    // replaced atomically, so an engine swap does not wait for the searches in flight).
+    std::mutex state_mutex;
+    std::vector<std::thread> players;
+    std::atomic<bool> stop_players{false};
+    std::mutex progress_mutex;
+    std::condition_variable progress_cv;
+    size_t moves_done{0};  // since the last step() returned (progress_mutex)
+    size_t wake_at{0};     // step() is waiting for this many moves
+    SelfPlayMetrics progress;
+
+    void start_players()
+    {
+        if (!players.empty()) return;
+        const size_t n = std::min(slots.size(), static_cast<size_t>(config.threads > 0 ? config.threads : 256));
+        for (size_t t = 0; t < n; ++t) players.emplace_back([this, t, n] { play(t, n); });
+    }
+
+    void play(size_t first, size_t stride)
+    {
+        while (!stop_players.load(std::memory_order_relaxed))
+        {
+            for (size_t i = first; i < slots.size() && !stop_players.load(std::memory_order_relaxed); i += stride)
+            {
+                MovePlan plan;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex);
+                    plan = plan_move(slots[i]);
+                }
+                const auto summary =
+                    chessrl::mcts::run_small_mcts_shared(std::move(plan.options), std::atomic_load(&runner), cache);
+                SelfPlayMetrics m;
+                {
+                    std::lock_guard<std::mutex> lock(state_mutex);
+                    apply_move(slots[i], i, plan, summary, m);
+                }
+                bool wake = false;
+                {
+                    std::lock_guard<std::mutex> lock(progress_mutex);
+                    ++moves_done;
+                    progress.games_finished += m.games_finished;
+                    progress.positions_generated += m.positions_generated;
+                    progress.nodes_evaluated += m.nodes_evaluated;
+                    wake = wake_at > 0 && moves_done >= wake_at;
+                }
+                if (wake) progress_cv.notify_one();
+            }
+        }
+    }
+
+    ~Impl()
+    {
+        stop_players.store(true);
+        for (auto& p : players) p.join();
+    }
+
     Impl(const SelfPlayConfig& c) : config(c)
     {
         batch_config.engine_path = config.engine_path;
@@ -709,76 +966,36 @@ SelfPlayMetrics SelfPlayWorker::step()
     const SelfPlayConfig& cfg = impl_->config;
     const size_t n_slots = impl_->slots.size();
 
+    if (async_selfplay())
+    {
+        impl_->start_players();
+        {
+            std::unique_lock<std::mutex> lock(impl_->progress_mutex);
+            impl_->wake_at = n_slots;
+            impl_->progress_cv.wait(lock, [&] { return impl_->moves_done >= n_slots; });
+            impl_->wake_at = 0;
+            impl_->moves_done -= n_slots;
+            metrics = impl_->progress;
+            impl_->progress = SelfPlayMetrics{};
+        }
+        {
+            std::lock_guard<std::mutex> lock(impl_->state_mutex);
+            impl_->write_sidecars();
+            chessrl::mcts::report_mcts_phases(cfg.threads);
+        }
+        metrics.runtime_seconds =
+            std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start_time).count();
+        return metrics;
+    }
+
     // Prepare MCTS requests
     std::vector<chessrl::mcts::MctsOptions> options;
     options.reserve(n_slots);
-    std::vector<char> full_search(n_slots, 1);
-    std::vector<int> sims_used(n_slots, cfg.simulations);
-    std::vector<char> sampled(n_slots, 0);
-    std::vector<char> policy_moves(n_slots, 0);
-
+    std::vector<Impl::MovePlan> plans(n_slots);
     for (size_t i = 0; i < n_slots; ++i)
     {
-        auto& slot = impl_->slots[i];
-        chessrl::mcts::MctsOptions opt;
-        opt.request.fen = slot.board.getFen();
-        opt.request.history = slot.history;
-        opt.request.board = slot.board;
-        // Supply the AlphaZero history stack directly from the rolling
-        // snapshots we already maintain (slot.past_planes), so the runner
-        // skips the O(plies) build_root_history_stack replay it would
-        // otherwise do on EVERY ply ⇒ O(plies^2)/game. Bit-identical to
-        // build_root_history_stack: slot 0 = snapshot(slot.board) + its
-        // isRepetition(1); slots 1..7 = past_planes[0..6] (each captured
-        // pre-move with its repetition flag, newest-first — same ordering).
-        {
-            chessrl::mcts::HistoryStack hs{};
-            hs[0] = chessrl::mcts::snapshot_piece_planes(slot.board);
-            hs[0].repetition = slot.board.isRepetition(1);
-            for (int s = 1; s < chessrl::mcts::kHistoryDepth; ++s)
-            {
-                const size_t k = static_cast<size_t>(s - 1);
-                if (k < slot.past_planes.size())
-                    hs[static_cast<size_t>(s)] = slot.past_planes[k];
-            }
-            opt.request.history_stack = hs;
-        }
-
-        // Playout-cap randomization: cheap searches play the game forward but
-        // produce no training record and no root noise.
-        const bool full = cfg.pcr_full_prob >= 1.0f || impl_->uniform01() < cfg.pcr_full_prob;
-        full_search[i] = full ? 1 : 0;
-        const bool early = cfg.temperature_plies < 0 || slot.ply_count < cfg.temperature_plies;
-        const float root_temp = early ? cfg.temperature_at_root : cfg.temperature_late;
-        // A cheap move in the sampling phase can sample the raw policy instead: with
-        // no simulations the search only expands the root, and summarize() samples
-        // its priors; prior temperature 1 makes those softmax(logit), so the move is
-        // drawn from softmax(logit / quick_policy_temperature).
-        const bool policy_move = !full && early && root_temp > 1e-5F && cfg.quick_policy_temperature > 0.0f;
-        policy_moves[i] = policy_move ? 1 : 0;
-        sims_used[i] = full ? cfg.simulations : (policy_move ? 0 : cfg.pcr_fast_simulations);
-        sampled[i] = root_temp > 1e-5F ? 1 : 0;
-
-        opt.simulations = sims_used[i];
-        opt.cpuct = cfg.cpuct;
-        opt.temperature = policy_move ? 1.0f : cfg.temperature;
-        opt.temperature_at_root = policy_move ? cfg.quick_policy_temperature : root_temp;
-        opt.virtual_loss_width = cfg.virtual_loss_width;
-        opt.principal_variations = false;
-        opt.use_dirichlet = full && cfg.use_dirichlet;
-        opt.dirichlet_alpha = cfg.dirichlet_alpha;
-        opt.dirichlet_epsilon = cfg.dirichlet_epsilon;
-        opt.small_engine_path = cfg.engine_path;
-        // Tree reuse: continue the subtree the previous search kept for the move played (not
-        // for policy-sampled moves, which play from the priors without searching).
-        if (cfg.tree_reuse && !policy_move)
-        {
-            opt.keep_tree = true;
-            opt.reuse_tree = std::move(slot.tree);
-        }
-        slot.tree.reset();
-
-        options.push_back(std::move(opt));
+        plans[i] = impl_->plan_move(impl_->slots[i]);
+        options.push_back(std::move(plans[i].options));
     }
 
     // Run MCTS
@@ -803,114 +1020,7 @@ SelfPlayMetrics SelfPlayWorker::step()
     // Process results
     for (size_t i = 0; i < n_slots; ++i)
     {
-        auto& slot = impl_->slots[i];
-        const auto& summary = summaries[i];
-        metrics.nodes_evaluated += summary.new_simulations;
-        impl_->stats.simulations_run += summary.new_simulations;
-        impl_->stats.reused_visits += summary.reused_visits;
-
-        if (summary.action.empty())
-        {
-            impl_->reset_slot(slot);
-            metrics.games_finished++;
-            continue;
-        }
-
-        const bool full = full_search[i] != 0;
-        if (full) impl_->stats.full_searches++;
-        else impl_->stats.fast_searches++;
-        if (policy_moves[i]) impl_->stats.policy_moves++;
-        if (full)
-        {
-            slot.pending_records.push_back(
-                impl_->make_record(slot, summary, sims_used[i], true, sampled[i] != 0));
-            metrics.positions_generated++;
-        }
-
-        // Resignation: the side to move gives up once its root expected score
-        // has stayed below the threshold for resign_consecutive of its moves.
-        // Policy-sampled moves carry only the raw value head, not a search value,
-        // so they neither extend nor reset the streak.
-        const chess::Color stm = slot.board.sideToMove();
-        const size_t colour = stm == chess::Color::WHITE ? 0 : 1;
-        if (cfg.resign_threshold > 0.0f && !policy_moves[i])
-        {
-            const float expected = summary.value[0] + 0.5f * summary.value[1];
-            slot.low_streak[colour] = expected < cfg.resign_threshold ? slot.low_streak[colour] + 1 : 0;
-            if (slot.low_streak[colour] >= cfg.resign_consecutive)
-            {
-                if (slot.playthrough)
-                {
-                    slot.would_resign[colour] = true;
-                }
-                else
-                {
-                    impl_->finish_game(slot, i, colour == 0 ? 0.0f : 1.0f, EndReason::Resign);
-                    metrics.games_finished++;
-                    continue;
-                }
-            }
-        }
-
-        // Apply move
-        bool move_found = false;
-        chess::Movelist moves;
-        chess::movegen::legalmoves(moves, slot.board);
-        for (const auto& m : moves)
-        {
-            if (chess::uci::moveToUci(m, slot.board.chess960()) == summary.action)
-            {
-                // Snapshot the pre-move position into the past_planes deque
-                // BEFORE applying the move, so the next record sees this
-                // position at slot 1 (t-1).
-                chessrl::mcts::PiecePlanes pre = chessrl::mcts::snapshot_piece_planes(slot.board);
-                pre.repetition = slot.board.isRepetition(1);
-                slot.past_planes.push_front(pre);
-                if (slot.past_planes.size() > 7) slot.past_planes.pop_back();
-
-                slot.board.makeMove(m);
-                slot.history.push_back(summary.action);
-                slot.ply_count++;
-                slot.tree = summary.tree;  // set only with tree_reuse
-                move_found = true;
-                break;
-            }
-        }
-
-        if (!move_found)
-        {
-            std::cerr << "Move not found: " << summary.action << " in " << slot.board.getFen() << std::endl;
-            impl_->reset_slot(slot);
-            continue;
-        }
-
-        // Check termination
-        const auto [reason, result] = slot.board.isGameOver();
-        if (result == chess::GameResult::NONE && slot.ply_count < cfg.max_plies)
-        {
-            continue;
-        }
-
-        float z = 0.5f;
-        const bool white_to_move = slot.board.sideToMove() == chess::Color::WHITE;
-        if (result == chess::GameResult::LOSE) z = white_to_move ? 0.0f : 1.0f; // side to move is mated
-        else if (result == chess::GameResult::WIN) z = white_to_move ? 1.0f : 0.0f;
-
-        EndReason end = EndReason::MaxPlies;
-        if (result != chess::GameResult::NONE)
-        {
-            switch (reason)
-            {
-                case chess::GameResultReason::CHECKMATE: end = EndReason::Checkmate; break;
-                case chess::GameResultReason::STALEMATE: end = EndReason::Stalemate; break;
-                case chess::GameResultReason::INSUFFICIENT_MATERIAL: end = EndReason::Insufficient; break;
-                case chess::GameResultReason::FIFTY_MOVE_RULE: end = EndReason::Fifty; break;
-                case chess::GameResultReason::THREEFOLD_REPETITION: end = EndReason::Repetition; break;
-                default: end = EndReason::MaxPlies; break;
-            }
-        }
-        impl_->finish_game(slot, i, z, end);
-        metrics.games_finished++;
+        impl_->apply_move(impl_->slots[i], i, plans[i], summaries[i], metrics);
     }
 
     impl_->write_sidecars();
@@ -944,11 +1054,21 @@ size_t SelfPlayWorker::get_buffer_size() const
 
 void SelfPlayWorker::set_engine(const std::string& engine_path)
 {
+    std::lock_guard<std::mutex> lock(impl_->state_mutex);
     impl_->config.engine_path = engine_path;
     impl_->batch_config.engine_path = engine_path;
-    // Release the old engine's GPU memory before loading the new one.
-    impl_->runner.reset();
-    impl_->runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(impl_->batch_config);
+    if (impl_->players.empty())
+    {
+        // Release the old engine's GPU memory before loading the new one.
+        impl_->runner.reset();
+        impl_->runner = std::make_shared<chessrl::mcts::single::SmallBatchRunner>(impl_->batch_config);
+    }
+    else
+    {
+        // Searches in flight finish on the old network, which goes with the last of them.
+        std::atomic_store(&impl_->runner,
+                          std::make_shared<chessrl::mcts::single::SmallBatchRunner>(impl_->batch_config));
+    }
     impl_->stats.engine_swaps++;
 }
 
@@ -963,20 +1083,22 @@ void SelfPlayWorker::set_config(const SelfPlayConfig& config)
     next.hash_size = cur.hash_size;
     next.max_buffer_size = cur.max_buffer_size;
     next.fifo_buffer = cur.fifo_buffer;
+    std::lock_guard<std::mutex> lock(impl_->state_mutex);
     impl_->config = next;
 }
 
 SelfPlayStats SelfPlayWorker::stats() const
 {
+    std::lock_guard<std::mutex> lock(impl_->state_mutex);
     return impl_->stats;
 }
 
 SelfPlayInferenceStats SelfPlayWorker::inference_stats() const
 {
     SelfPlayInferenceStats out;
-    if (impl_->runner)
+    if (const auto runner = std::atomic_load(&impl_->runner))
     {
-        const auto rs = impl_->runner->statistics();
+        const auto rs = runner->statistics();
         out.batches = static_cast<int64_t>(rs.batches);
         out.positions_in_batches = static_cast<int64_t>(rs.positions);
         out.total_inference_ms = rs.total_inference_ms;
