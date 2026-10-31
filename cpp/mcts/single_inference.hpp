@@ -67,10 +67,10 @@ private:
 };
 
 // One network evaluation in flight. The runner points it at the position's record in its pinned
-// output buffer (FP16 policy logits, then WDL, mlh and mlh_q as floats) and the search thread
-// converts that record itself when it takes the result, so the worker writes nothing per position;
-// the buffer's `readers` counts the records not yet taken. The CPU benchmark's fake network fills
-// `value` instead.
+// output buffer (FP16 policy logits, then WDL, mlh and mlh_q as floats) and the search reads that
+// record in place, so the worker writes nothing per position; the buffer's `readers` counts the
+// records still held (a record is released when its slot goes, with the last ticket). The CPU
+// benchmark's fake network and the by-value hand-back fill `value` instead.
 struct EvalSlot
 {
     EvalGroup* group{nullptr};
@@ -97,25 +97,8 @@ inline void fp16_to_float(const std::uint16_t* src, float* dst, size_t n)
     {
         _mm256_storeu_ps(dst + i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i))));
     }
-    for (; i < n; ++i) dst[i] = _cvtsh_ss(src[i]);
-#else
-    for (; i < n; ++i)
-    {
-        const std::uint32_t h = src[i], sign = (h & 0x8000u) << 16, exp = (h >> 10) & 0x1fu, mant = h & 0x3ffu;
-        float f;
-        if (exp == 0)
-        {
-            f = static_cast<float>(mant) * 5.9604645e-8f;  // subnormal: mant * 2^-24
-            if (sign) f = -f;
-        }
-        else
-        {
-            const std::uint32_t bits = sign | ((exp == 31 ? 255u : exp + 112u) << 23) | (mant << 13);
-            std::memcpy(&f, &bits, sizeof(f));
-        }
-        dst[i] = f;
-    }
 #endif
+    for (; i < n; ++i) dst[i] = chessrl::half_to_float(src[i]);
 }
 
 // A pending evaluation of `group`. Call get() once, after the group's wait() has returned.
@@ -133,19 +116,19 @@ public:
         return slot_ != nullptr;
     }
 
+    // The result. From the output buffer its FP16 logits are left in place (policy_fp16), valid
+    // while this ticket is held; destroying the ticket releases the record.
     SmallPolicyValue get() const
     {
         EvalSlot& s = *slot_;
         if (s.error) std::rethrow_exception(s.error);
         if (!s.policy_fp16) return std::move(s.value);
         SmallPolicyValue v;
-        v.policy_logits.resize(static_cast<size_t>(s.policy_size));
-        fp16_to_float(s.policy_fp16, v.policy_logits.data(), v.policy_logits.size());
+        v.policy_fp16 = s.policy_fp16;
+        v.policy_fp16_size = s.policy_size;
         v.wdl = {s.aux[0], s.aux[1], s.aux[2]};
         v.mlh = s.aux[3];
         v.mlh_q = s.aux[4];
-        s.taken = true;
-        s.readers->fetch_sub(1, std::memory_order_release);
         return v;
     }
 

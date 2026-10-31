@@ -611,7 +611,7 @@ private:
                 {
                     const uint64_t hash = compute_cache_key(
                         d.leaf_board.zobrist(), d.leaf_history);
-                    cache_->put(hash, eval);
+                    cache_->put(hash, eval.owned());
                 }
             }
 
@@ -628,6 +628,7 @@ private:
             ++sims_done_;
             if (ph) g_ph_expand_ns.fetch_add(now_ns() - t_e, std::memory_order_relaxed);
         }
+        tickets_.clear();  // releases the records in the output buffers
         round_in_flight_ = false;
     }
 
@@ -668,9 +669,10 @@ private:
         SmallPolicyValue eval = root_ticket_.get();
         if (cache_)
         {
-            cache_->put(compute_cache_key(root_board_.zobrist(), root_history_stack_), eval);
+            cache_->put(compute_cache_key(root_board_.zobrist(), root_history_stack_), eval.owned());
         }
         expand_node(0, root_board_, eval);
+        root_ticket_ = {};  // releases the record
         root_in_flight_ = false;
     }
 
@@ -696,7 +698,7 @@ private:
         // No finished-game check here: descend() makes it when it reaches a leaf, and
         // issue_root_evaluation() before expanding the root.
 
-        if (eval.policy_logits.size() != chessrl::small_policy_size())
+        if (eval.policy_size() != chessrl::small_policy_size())
         {
             throw std::runtime_error("Small inference returned unexpected policy size.");
         }
@@ -765,8 +767,8 @@ private:
             if (policy_index >= 0)
             {
                 entry.policy_index = policy_index;
-                if (entry.policy_index < static_cast<int>(eval.policy_logits.size())) {
-                    entry.logit = eval.policy_logits[static_cast<size_t>(entry.policy_index)];
+                if (entry.policy_index < static_cast<int>(eval.policy_size())) {
+                    entry.logit = eval.logit(static_cast<size_t>(entry.policy_index));
                     if (!has_logit || entry.logit > max_logit)
                     {
                         max_logit = entry.logit;
