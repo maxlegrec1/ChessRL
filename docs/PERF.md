@@ -613,3 +613,49 @@ busier (+9%), the default since c64ee4a.
 **Where it ends** (this box): 4,360.6 recorded positions/s, **×8.63 the round-2 recipe** (505.4),
 ×2.12 the code pushed before today. Not kept: interleaved searches (32 x 4, 16 x 8: the same speed
 with less CPU, only in the step-by-step mode; `CHESSRL_SEARCHES_PER_THREAD`, off).
+
+## What is left (2026-10-31, evening)
+
+Performance work paused here for a training run on the round-3 recipe. Where things stand on
+perf5 (RTX 4090 + Ryzen 9 7950X): self-play alone 4,360.6 recorded positions/s (×8.63 the round-2
+recipe); the trainer step alone 11.2 ms at batch 2,048 (26.8 ms at the start of the day,
+`docs/TRAINER_SPEED.md`); in a real run 4,364 records/s with the trainer at 7.54 steps/s, 3.98
+samples per record (target 5). Estimates below are from the last measurements, not tested.
+
+**Open question first: the FP16 residual stream** (`fp16_residual: true` in the recipe, 4a9f593).
+It passed the error measurement and the 300-step loss check, but in the chess speedrun
+(`~/chess_speedrun/records.md`, records 3 and 4) a half-precision residual stream played about 20
+Elo weaker at the same held-out losses (2.3 standard errors), so loss checks cannot clear it. It
+needs two training runs with the ladder, on and off. The speedrun's network was much bigger (34M
+parameters against 0.81M).
+
+**Self-play.** The kernel alone runs 1.93M positions/s, about 99 MFLOP each: about 190 TFLOP/s,
+58% of the 4090's FP16 tensor-core peak (estimated from the FLOP count; Vast boxes block the GPU
+performance counters, so Nsight Compute cannot profile it). Self-play uses 1.72M evaluations/s on
+26 of 32 cores.
+
+| # | change | estimated gain | time |
+|---|---|---|---|
+| S1 | FP8 matrix multiplies in the kernel (Ada's FP8 tensor cores run twice the FP16 rate); checked by parity and a match against the FP16 kernel on the same network, no training run | kernel +20 to 35%, self-play +10 to 25% (then CPU-bound) | 1 to 1.5 days |
+| S2 | a cache of network results for repeated positions (transpositions, shared openings) | unknown: measure the hit rate first | 1 h to measure, 3 to 4 h to build |
+| S3 | 8 inference workers instead of 6 (untested) | 0 to 5% | 20 min |
+| S4 | search CPU once the kernel is faster: 26 of 32 cores are busy already | | |
+
+(TensorRT's INT8 and FP8 engines gained little, "GPU session" above, because the matrix
+multiplies were 31% of that network's time; in the fused kernel they are most of it.)
+
+**Trainer.** In real runs the trainer fits into the GPU time self-play leaves (self-play loses
+nothing next to it), so each gain here becomes more samples per record.
+
+| # | change | estimated gain | time |
+|---|---|---|---|
+| 5 | fuse the policy head and the losses (final norm, q/k projections, the 64x64 scores, the vocab gather, log-softmax, cross-entropy) | -0.5 to 0.8 ms | 2 to 3 h |
+| 6 | decode the input inside the embedding (no 58 MB FP32 plane tensor) | -0.2 to 0.3 ms | 1 to 2 h |
+| a | faster forward kernels: the block forward took 397 µs per layer against a memory floor of about 190, the feed-forward 217 against about 150 (both before the FP16 stream) | -0.5 to 1 ms | 3 to 6 h |
+| 8 | CUDA graphs for the whole step | about 0 alone; may fit self-play's gaps better | 2 to 3 h |
+| 9 | the replay window on the GPU | 0 on the step; frees about 1 CPU core for self-play | 2 to 3 h |
+| 10 | per-layer training kernels: merging the attention block and the feed-forward saves -0.3 to 0.6 ms (the feed-forward's backward still needs the mid-layer stream); a kernel that runs a layer's forward and backward on chip is the only large gain left | days | days |
+
+Tried and not kept: split-K feed-forward weight gradients (+7.2 ms, recomputing costs more than
+the bytes), max-autotune and Inductor's Triton GEMMs (no gain). Batch 4,096 would not help (the
+activations grow with it) and changes the learning.
