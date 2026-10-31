@@ -159,6 +159,36 @@ Against the plain PyTorch formula: output within 1e-3, the gradients of the inpu
 and both projections within 2% (`tests/test_fused_ffn.py`). 300 steps on the same batches: loss
 3.68172 at the first step (3.68178), last-100 mean 3.14751 against 3.14666 and 3.14759.
 
+**Fused attention block and the embedding in FP16** (`src/models/fused_block.py`): the
+re-injection of the embedding (now an FP16 copy under autocast, as the self-play kernel keeps it),
+norm1, the qkv projection, the attention, the out projection and the residual add. The forward is
+one Triton program per position looping over the 8 heads, so qkv and the attention output never
+reach memory; the backward is the attention output's gradient (cuBLAS), one program per (head, 64
+positions) recomputing q, k and v from the normed input, cuBLAS for the qkv input gradient and the
+weight gradients (FP32 accumulators), and one kernel for norm1's backward, the residual and the
+gain.
+
+| step, alone, batch 2,048 | ms | kernels |
+|---|---|---|
+| fused attention and feed-forward (4d98491) | 14.5 | 323 |
+| + the embedding in FP16 alone | 14.6 | 323 |
+| + the fused attention block, first launch settings | 14.4 | 312 |
+| **+ launch settings measured per kernel** | **13.5** (-7%) | 312 |
+
+The block's forward took 636 µs per layer with 8 warps, 412 with 2 warps and no software
+pipelining, 397 reading x and x0 again at the end rather than keeping them in registers through
+the head loop (the memory floor is about 190); norm1's backward 330 µs with 8 warps (365 with 4);
+the feed-forward's kernels 217 and 538 µs with two pipeline stages (245 and 558 with three).
+Against the plain PyTorch formula: output within 1e-3, the gradients of all nine inputs within 2%
+(`tests/test_fused_block.py`). 300 steps on the same batches: last-100 mean loss 3.14673 against
+3.14666 and 3.14759; the first steps differ by up to 9e-4 (the bias added in FP32, the heads' out
+projections summed in FP32 before one rounding).
+
+**Split-K weight gradients for the feed-forward did not pay** (reverted): recomputing the hidden
+layer and its gradient per 32 hidden units and 2,048 tokens instead of writing them for cuBLAS
+made the step 21.7 ms instead of 14.5. At this size the recomputation (about 50 GFLOP per layer)
+costs more than the 384 MB of traffic it saves.
+
 **What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
 activations grow with it). The lever left is fusing across the matrix multiplies: a training
 kernel that runs a layer's forward and backward with the activations on chip, as the self-play

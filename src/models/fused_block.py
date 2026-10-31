@@ -30,11 +30,15 @@ TOKENS, HEADS, HEAD_DIM = 64, 8, 16
 D = HEADS * HEAD_DIM
 _BLOCK = 64  # positions per attention-backward program
 _BM = 64  # tokens per norm-backward program
+# Launch settings measured at batch 2,048 on a 4090: the forward 636 us per layer with 8 warps, 412
+# with 2 warps and no software pipelining (1 stage), 397 reading x and x0 again at the end instead of
+# keeping x + gain x0 in registers through the head loop; the attention backward 373 us with 4 warps
+# (534 with 2, 745 with 8); the norm backward 330 us with 8 warps (365 with 4).
 
 
 @triton.jit
 def _fwd_kernel(x, x0, gain, w1, wqkv, qw, kw, bias, wout, out, xn_out, eps,
-                T: tl.constexpr, H: tl.constexpr, HD: tl.constexpr):  # fmt: skip
+                T: tl.constexpr, H: tl.constexpr, HD: tl.constexpr, RELOAD: tl.constexpr = False):  # fmt: skip
     pos = tl.program_id(0)
     DM: tl.constexpr = H * HD
     rows = tl.arange(0, T)
@@ -67,6 +71,8 @@ def _fwd_kernel(x, x0, gain, w1, wqkv, qw, kw, bias, wout, out, xn_out, eps,
         wo = tl.load(wout + cols[:, None] * DM + (h * HD + hc)[None, :])
         acc += tl.dot(o, tl.trans(wo))
     y = acc.to(tl.float16).to(tl.float32)
+    if RELOAD:  # read x and x0 again instead of keeping x + gain x0 in registers through the loop
+        xp = tl.load(x + off) + g * tl.load(x0 + off).to(tl.float32)
     tl.store(out + off, xp + y)
 
 
@@ -179,7 +185,8 @@ def fused_attention_block(
     _fwd_kernel[(n,)](
         x, x0, gain.float().reshape(1), norm_weight.float().contiguous(), qkv_weight.half().contiguous(),
         q_weight.float().contiguous(), k_weight.float().contiguous(), bias.float().contiguous(),
-        out_weight.half().contiguous(), out, xn, eps, T=TOKENS, H=HEADS, HD=HEAD_DIM, num_warps=8,
+        out_weight.half().contiguous(), out, xn, eps, T=TOKENS, H=HEADS, HD=HEAD_DIM, RELOAD=True,
+        num_warps=2, num_stages=1,
     )  # fmt: skip
     return out, xn
 
@@ -225,7 +232,7 @@ def fused_attention_block_backward(
     dw1 = torch.zeros(D, dtype=torch.float32, device=dev)
     _bwd_norm_kernel[(triton.cdiv(rows, _BM),)](
         x, x0, gain.float().reshape(1), norm_weight.float().contiguous(), dout, dxn, dx, dx0, dgain, dw1, eps,
-        rows, DM=D, BM=_BM, num_warps=4,
+        rows, DM=D, BM=_BM, num_warps=8,
     )  # fmt: skip
     return dx, dx0, dgain.reshape(()), dw1, dwqkv, dqw, dkw, dbias, dwout
 

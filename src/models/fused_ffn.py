@@ -23,7 +23,8 @@ import triton.language as tl
 D_MODEL, D_FF = 128, 256
 # Tokens per program and hidden units per inner step. At 131,072 tokens on a 4090: the forward takes
 # 243 us with 64 tokens (283 with 32), the backward kernel 558 us with 32 (770 with 64, 660 with 64
-# on 8 warps); 64 hidden units per step need more shared memory than an SM has.
+# on 8 warps); 64 hidden units per step need more shared memory than an SM has. Two pipeline stages
+# (217 and 538 us) instead of the default three (245 and 558).
 _BM_FWD, _BM_BWD, _BC = 64, 32, 32
 
 
@@ -105,7 +106,7 @@ def fused_ffn(
     out = torch.empty_like(x2)
     _fwd_kernel[(triton.cdiv(n, _BM_FWD),)](
         x2, norm_weight.float().contiguous(), up_weight.half().contiguous(), down_weight.half().contiguous(),
-        out, eps, n, D=D_MODEL, F=D_FF, BM=_BM_FWD, BC=_BC, num_warps=4,
+        out, eps, n, D=D_MODEL, F=D_FF, BM=_BM_FWD, BC=_BC, num_warps=4, num_stages=2,
     )  # fmt: skip
     return out.view(shape)
 
@@ -133,7 +134,7 @@ def fused_ffn_backward(
     dwn = torch.zeros(D_MODEL, dtype=torch.float32, device=dev)
     _bwd_kernel[(triton.cdiv(n, _BM_BWD),)](
         x2, norm_weight.float().contiguous(), up_weight.half().contiguous(), down_weight.half().contiguous(),
-        d2, dx, du, g, xn, dy, dwn, eps, n, D=D_MODEL, F=D_FF, BM=_BM_BWD, BC=_BC, num_warps=4,
+        d2, dx, du, g, xn, dy, dwn, eps, n, D=D_MODEL, F=D_FF, BM=_BM_BWD, BC=_BC, num_warps=4, num_stages=2,
     )  # fmt: skip
     # The weight gradients sum over every token: FP32 accumulators whatever the FP16-accumulation
     # setting (torch.backends.cuda.matmul.allow_fp16_accumulation, read when each GEMM is issued).
