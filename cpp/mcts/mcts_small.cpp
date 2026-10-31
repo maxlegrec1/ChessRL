@@ -1262,36 +1262,15 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     // (about 120k wake-ups a second for the recipe's 128 threads), and woken threads waited for a
     // core. Each search does the same work in the same order either way.
     const size_t per_thread = static_cast<size_t>(std::max(1, searches_per_thread));
-    // CHESSRL_LONGEST_FIRST=1: start the searches by decreasing remaining simulations (a reused
-    // root's visits count as done), so that no long search starts at the end of the call. It cost
-    // 4% when the CPU was oversubscribed (docs/PERF.md); off by default.
-    static const bool longest_first = [] {
-        const char* env = std::getenv("CHESSRL_LONGEST_FIRST");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
-    std::vector<size_t> order(batch_options.size());
-    std::iota(order.begin(), order.end(), size_t{0});
-    if (longest_first)
-    {
-        std::vector<int> cost(batch_options.size());
-        for (size_t i = 0; i < batch_options.size(); ++i)
-        {
-            const auto& reuse = batch_options[i].reuse_tree;
-            const int reused = (reuse && !reuse->nodes.empty()) ? reuse->nodes.front().visit_count : 0;
-            cost[i] = std::max(0, batch_options[i].simulations - reused);
-        }
-        std::stable_sort(order.begin(), order.end(), [&cost](size_t a, size_t b) { return cost[a] > cost[b]; });
-    }
-    auto worker_routine = [&batch_options, &order, shared_runner, cache, &summaries, &next_job_index,
+    auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index,
                            per_thread]() {
         std::vector<std::pair<size_t, std::unique_ptr<SmallMctsRunner>>> active;
         auto take = [&]() {
-            const size_t next = next_job_index.fetch_add(1);
-            if (next >= batch_options.size())
+            const size_t job_id = next_job_index.fetch_add(1);
+            if (job_id >= batch_options.size())
             {
                 return false;
             }
-            const size_t job_id = order[next];
             active.emplace_back(job_id, std::make_unique<SmallMctsRunner>(batch_options[job_id], shared_runner, cache));
             active.back().second->start();
             return true;

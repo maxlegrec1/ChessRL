@@ -23,8 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include <sys/prctl.h>
-
 #include "mcts/small_layout.hpp"
 #include "net/encoder_net.hpp"
 
@@ -480,7 +478,6 @@ struct SmallBatchRunner::Impl
             }
             else
             {
-                if (sync_sleep_us_ > 0) std::this_thread::sleep_for(std::chrono::microseconds(sync_sleep_us_));
                 err = cudaStreamSynchronize(s);
             }
         }
@@ -546,8 +543,6 @@ struct SmallBatchRunner::Impl
 
     void worker_loop(Worker& w)
     {
-        // A 1 us timer slack so that the sleep before each sync ends on time (the default is 50 us).
-        if (sync_sleep_us_ > 0) prctl(PR_SET_TIMERSLACK, 1000UL, 0UL, 0UL, 0UL);
         while (true)
         {
             const auto idle_from = std::chrono::steady_clock::now();
@@ -624,12 +619,6 @@ struct SmallBatchRunner::Impl
     const bool blocking_sync_{[](){
         const char* env = std::getenv("CHESSRL_BLOCKING_SYNC");
         return env != nullptr && std::atoi(env) != 0;
-    }()};
-    // Sleep this long after launching a batch before spinning in cudaStreamSynchronize, so that the
-    // worker's core runs search threads for most of the GPU time (CHESSRL_SYNC_SLEEP_US, 0 = spin).
-    const int sync_sleep_us_{[](){
-        const char* env = std::getenv("CHESSRL_SYNC_SLEEP_US");
-        return env != nullptr ? std::max(0, std::atoi(env)) : 0;
     }()};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
