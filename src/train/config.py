@@ -196,6 +196,9 @@ class TrainingConfig:
     # allow_fp16_accumulation): twice the tensor-core rate on GeForce cards. Neutral at today's
     # size (the multiplies are bound by memory), needed once the model grows.
     fp16_accumulation: bool = False
+    # The encoder's residual stream in FP16 during training (src/models/encoder.py FP16_RESIDUAL):
+    # half the bytes the step moves through it. The self-play kernel keeps it FP32.
+    fp16_residual: bool = False
     async_engine_build: bool = False  # export networks in the background
     mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS, trainer low priority
     metrics_path: Path | None = None  # JSONL metrics for the dashboard

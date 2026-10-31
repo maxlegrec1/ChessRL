@@ -25,6 +25,9 @@ compile: true
 # FP16 accumulators in the trainer's matrix multiplies, as in the self-play kernel: the same speed
 # and losses at this size (docs/TRAINER_SPEED.md), twice the tensor-core rate for a bigger model.
 fp16_accumulation: true
+# The encoder's residual stream in FP16 during training: half its traffic, rounding noise of the
+# same size as the FP16 matrix multiplies already add (docs/TRAINER_SPEED.md).
+fp16_residual: true
 mirror_prob: 0.5 # colour-flip augmentation
 log_every: 5
 

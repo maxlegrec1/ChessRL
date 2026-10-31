@@ -35,6 +35,10 @@ except ImportError:  # pragma: no cover
 _FUSED_BLOCK = os.environ.get("CHESSRL_FUSED_BLOCK", "1") != "0"
 _FUSED_ATTENTION = os.environ.get("CHESSRL_FUSED_ATTENTION", "1") != "0"
 _FUSED_FFN = os.environ.get("CHESSRL_FUSED_FFN", "1") != "0"
+# The residual stream in FP16 under CUDA autocast (the trainer's fp16_residual setting): half the
+# bytes a training step moves through it. Off, or outside autocast, it stays FP32. The self-play
+# kernel keeps it FP32.
+FP16_RESIDUAL = False
 
 
 def _token(square: int) -> int:
@@ -95,7 +99,7 @@ class Block(nn.Module):
             fused_attention_block is not None
             and _FUSED_BLOCK
             and x.is_cuda
-            and x.dtype == torch.float32
+            and x.dtype in (torch.float32, torch.float16)
             and x0.dtype == torch.float16
             and torch.is_autocast_enabled("cuda")
             and torch.is_grad_enabled()
@@ -108,8 +112,10 @@ class Block(nn.Module):
                 self.k_norm.weight, bias, self.out.weight, self.norm1.eps,
             )  # fmt: skip
             return self._feed_forward(x)
-        x = x + self.x0_gain * x0.float()
-        h = self.norm1(x)
+        # The re-injection and the attention's residual add in FP32, rounded once to the stream's type
+        # (as the fused block computes them).
+        xp = x + self.x0_gain * x0.float()
+        h = self.norm1(xp)
         qkv = self.qkv(h)
         if (
             fused_attention is not None
@@ -136,8 +142,7 @@ class Block(nn.Module):
                     q.to(v.dtype), k.to(v.dtype), v, attn_mask=bias.to(v.dtype).expand(b, -1, -1, -1)
                 )
             h = h.transpose(1, 2).reshape(b, n, d)
-        x = x + self.out(h)
-        return self._feed_forward(x)
+        return self._feed_forward((xp + self.out(h)).to(x.dtype))
 
     def _feed_forward(self, x):
         d = x.shape[-1]
@@ -145,7 +150,7 @@ class Block(nn.Module):
             fused_ffn is not None
             and _FUSED_FFN
             and x.is_cuda
-            and x.dtype == torch.float32
+            and x.dtype in (torch.float32, torch.float16)
             and torch.is_autocast_enabled("cuda")
             and torch.is_grad_enabled()
             and (d, self.d_ff) == (128, 256)
@@ -194,11 +199,11 @@ class EncoderModel(nn.Module):
     def forward(self, x, *, return_all: bool = False):
         b = x.shape[0]
         x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos
-        h = x0
         # The copy re-injected into every layer is FP16 under autocast, as the self-play kernel keeps
         # it: half the bytes of each layer's FP32 read and of its gradient. The residual stream
-        # itself stays FP32.
+        # starts from it with FP16_RESIDUAL, from the FP32 embedding otherwise.
         x0_layers = x0.to(torch.float16) if torch.is_autocast_enabled("cuda") and x0.is_cuda else x0
+        h = x0_layers if FP16_RESIDUAL else x0
         for block in self.blocks:
             h = block(h, x0_layers, self.pair_bias)
         h = self.norm(h)

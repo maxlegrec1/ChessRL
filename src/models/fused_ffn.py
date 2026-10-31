@@ -11,7 +11,8 @@ batch with FP32 accumulators (FP16 ones lose 0.3 to 0.5% over its 131,072 tokens
 
 Same function as Block.forward's feed-forward under FP16 autocast: the norm in FP32, rounded to
 FP16; the projections in FP16 with FP32 accumulation, rounded to FP16; SwiGLU rounded to FP16 as
-F.silu(gate) * up computes it.
+F.silu(gate) * up computes it. The residual stream comes in FP32 or FP16 and leaves in the same
+type, its gradient too; the arithmetic is FP32 either way.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+
+from src.models.fused_block import _stream, _stream_dtype
 
 D_MODEL, D_FF = 128, 256
 # Tokens per program and hidden units per inner step. At 131,072 tokens on a 4090: the forward takes
@@ -35,7 +38,7 @@ def _fwd_kernel(x, wn, wu, wd, out, eps, n_rows, D: tl.constexpr, F: tl.constexp
     mask = rows < n_rows
     cols = tl.arange(0, D)
     hc = tl.arange(0, BC)
-    xt = tl.load(x + rows[:, None] * D + cols[None, :], mask=mask[:, None], other=0.0)
+    xt = tl.load(x + rows[:, None] * D + cols[None, :], mask=mask[:, None], other=0.0).to(tl.float32)
     r = tl.rsqrt(tl.sum(xt * xt, 1) / D + eps)
     xn = (xt * r[:, None] * tl.load(wn + cols)[None, :]).to(tl.float16)
     acc = tl.zeros((BM, D), dtype=tl.float32)
@@ -49,7 +52,7 @@ def _fwd_kernel(x, wn, wu, wd, out, eps, n_rows, D: tl.constexpr, F: tl.constexp
         wdc = tl.load(wd + cols[:, None] * F + (c + hc)[None, :])
         acc += tl.dot(g, tl.trans(wdc))
     y = acc.to(tl.float16).to(tl.float32)
-    tl.store(out + rows[:, None] * D + cols[None, :], xt + y, mask=mask[:, None])
+    tl.store(out + rows[:, None] * D + cols[None, :], (xt + y).to(out.dtype.element_ty), mask=mask[:, None])
 
 
 @triton.jit
@@ -60,11 +63,11 @@ def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_
     cols = tl.arange(0, D)
     hc = tl.arange(0, BC)
     off = rows[:, None] * D + cols[None, :]
-    xt = tl.load(x + off, mask=mask[:, None], other=0.0)
+    xt = tl.load(x + off, mask=mask[:, None], other=0.0).to(tl.float32)
     w = tl.load(wn + cols)
     r = tl.rsqrt(tl.sum(xt * xt, 1) / D + eps)
     xn = (xt * r[:, None] * w[None, :]).to(tl.float16)
-    do = tl.load(dout + off, mask=mask[:, None], other=0.0)
+    do = tl.load(dout + off, mask=mask[:, None], other=0.0).to(tl.float32)
     dy = do.to(tl.float16)
     tl.store(xn_out + off, xn, mask=mask[:, None])
     tl.store(dy_out + off, dy, mask=mask[:, None])
@@ -90,7 +93,7 @@ def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_
     # dx = r g - x r^3 mean(x g), and dw = sum over rows of dy x r.
     gq = acc * w[None, :]
     dxn = r[:, None] * gq - xt * (r * r * r)[:, None] * (tl.sum(xt * gq, 1) / D)[:, None]
-    tl.store(dx + off, do + dxn, mask=mask[:, None])
+    tl.store(dx + off, (do + dxn).to(dx.dtype.element_ty), mask=mask[:, None])
     tl.atomic_add(dwn + cols, tl.sum(acc * xt * r[:, None], 0))
 
 
@@ -98,10 +101,11 @@ def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_
 def fused_ffn(
     x: torch.Tensor, norm_weight: torch.Tensor, up_weight: torch.Tensor, down_weight: torch.Tensor, eps: float
 ) -> torch.Tensor:
-    """x [..., 128] FP32 (the residual stream), the norm's weight [128], the up projection's
-    [512, 128] (gate rows then up rows) and the down projection's [128, 256] -> x + FFN(x)."""
+    """x [..., 128] FP32 or FP16 (the residual stream), the norm's weight [128], the up projection's
+    [512, 128] (gate rows then up rows) and the down projection's [128, 256] -> x + FFN(x) in x's
+    type."""
     shape = x.shape
-    x2 = x.reshape(-1, D_MODEL).float().contiguous()
+    x2 = _stream(x.reshape(-1, D_MODEL))
     n = x2.shape[0]
     out = torch.empty_like(x2)
     _fwd_kernel[(triton.cdiv(n, _BM_FWD),)](
@@ -113,7 +117,7 @@ def fused_ffn(
 
 @fused_ffn.register_fake
 def _(x, norm_weight, up_weight, down_weight, eps):
-    return torch.empty_like(x, dtype=torch.float32)
+    return torch.empty_like(x, dtype=_stream_dtype(x))
 
 
 @torch.library.custom_op("chessrl::fused_ffn_backward", mutates_args=())
@@ -122,8 +126,8 @@ def fused_ffn_backward(
     dout: torch.Tensor, eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:  # fmt: skip
     shape = x.shape
-    x2 = x.reshape(-1, D_MODEL).float().contiguous()
-    d2 = dout.reshape(-1, D_MODEL).float().contiguous()
+    x2 = _stream(x.reshape(-1, D_MODEL))
+    d2 = dout.reshape(-1, D_MODEL).to(x2.dtype).contiguous()
     n = x2.shape[0]
     dev = x2.device
     dx = torch.empty_like(x2)
@@ -151,7 +155,7 @@ def fused_ffn_backward(
 @fused_ffn_backward.register_fake
 def _(x, norm_weight, up_weight, down_weight, dout, eps):
     return (
-        torch.empty_like(x, dtype=torch.float32),
+        torch.empty_like(x, dtype=_stream_dtype(x)),
         norm_weight.new_empty(D_MODEL, dtype=torch.float32),
         up_weight.new_empty(2 * D_FF, D_MODEL, dtype=torch.float32),
         down_weight.new_empty(D_MODEL, D_FF, dtype=torch.float32),
@@ -181,4 +185,4 @@ def reference_ffn(x, norm_weight, up_weight, down_weight, eps):
     xn = (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps) * norm_weight).half()
     gate, up = (xn @ up_weight.half().t()).chunk(2, dim=-1)
     g = torch.nn.functional.silu(gate) * up
-    return xf + (g @ down_weight.half().t()).float()
+    return (xf + (g @ down_weight.half().t()).float()).to(_stream_dtype(x))

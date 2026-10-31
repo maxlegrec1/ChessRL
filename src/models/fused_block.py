@@ -16,6 +16,8 @@ embedding's gain.
 
 Same function as Block.forward's attention half under FP16 autocast (fused_attention.py's
 conventions for the attention itself: q, k, v rounded to FP16 as the qkv projection's output is).
+The residual stream comes in FP32 or FP16 and leaves in the same type, its gradient too; the
+arithmetic is FP32 either way.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ def _fwd_kernel(x, x0, gain, w1, wqkv, qw, kw, bias, wout, out, xn_out, eps,
     hc = tl.arange(0, HD)
     off = pos * T * DM + rows[:, None] * DM + cols[None, :]
     g = tl.load(gain)
-    xp = tl.load(x + off) + g * tl.load(x0 + off).to(tl.float32)
+    xp = tl.load(x + off).to(tl.float32) + g * tl.load(x0 + off).to(tl.float32)
     r = tl.rsqrt(tl.sum(xp * xp, 1) / DM + eps)
     xn = (xp * r[:, None] * tl.load(w1 + cols)[None, :]).to(tl.float16)
     tl.store(xn_out + off, xn)
@@ -72,8 +74,8 @@ def _fwd_kernel(x, x0, gain, w1, wqkv, qw, kw, bias, wout, out, xn_out, eps,
         acc += tl.dot(o, tl.trans(wo))
     y = acc.to(tl.float16).to(tl.float32)
     if RELOAD:  # read x and x0 again instead of keeping x + gain x0 in registers through the loop
-        xp = tl.load(x + off) + g * tl.load(x0 + off).to(tl.float32)
-    tl.store(out + off, xp + y)
+        xp = tl.load(x + off).to(tl.float32) + g * tl.load(x0 + off).to(tl.float32)
+    tl.store(out + off, (xp + y).to(out.dtype.element_ty))
 
 
 @triton.jit
@@ -144,18 +146,27 @@ def _bwd_norm_kernel(x, x0, gain, w1, dout, dxn, dx, dx0, dgain, dw1, eps, n_row
     off = rows[:, None] * DM + cols[None, :]
     g = tl.load(gain)
     x0t = tl.load(x0 + off, mask=mask[:, None], other=0.0).to(tl.float32)
-    xp = tl.load(x + off, mask=mask[:, None], other=0.0) + g * x0t
+    xp = tl.load(x + off, mask=mask[:, None], other=0.0).to(tl.float32) + g * x0t
     w = tl.load(w1 + cols)
     r = tl.rsqrt(tl.sum(xp * xp, 1) / DM + eps)
     dn = tl.load(dxn + off, mask=mask[:, None], other=0.0).to(tl.float32)
     gq = dn * w[None, :]
-    dxp = tl.load(dout + off, mask=mask[:, None], other=0.0) + r[:, None] * gq - xp * (r * r * r)[:, None] * (
-        tl.sum(xp * gq, 1) / DM
-    )[:, None]
-    tl.store(dx + off, dxp, mask=mask[:, None])
+    dxp = tl.load(dout + off, mask=mask[:, None], other=0.0).to(tl.float32) + r[:, None] * gq - xp * (
+        r * r * r
+    )[:, None] * (tl.sum(xp * gq, 1) / DM)[:, None]
+    tl.store(dx + off, dxp.to(dx.dtype.element_ty), mask=mask[:, None])
     tl.store(dx0 + off, (g * dxp).to(tl.float16), mask=mask[:, None])
     tl.atomic_add(dgain, tl.sum(tl.sum(x0t * dxp, 1), 0))
     tl.atomic_add(dw1 + cols, tl.sum(dn * xp * r[:, None], 0))
+
+
+def _stream(t):
+    """The residual stream as the kernels take it: FP16 or FP32 (anything else in FP32), contiguous."""
+    return (t if t.dtype in (torch.float16, torch.float32) else t.float()).contiguous()
+
+
+def _stream_dtype(t):
+    return torch.float16 if t.dtype == torch.float16 else torch.float32
 
 
 def _no_fp16_acc_mm(a, b):
@@ -174,10 +185,11 @@ def fused_attention_block(
     x: torch.Tensor, x0: torch.Tensor, gain: torch.Tensor, norm_weight: torch.Tensor, qkv_weight: torch.Tensor,
     q_weight: torch.Tensor, k_weight: torch.Tensor, bias: torch.Tensor, out_weight: torch.Tensor, eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:  # fmt: skip
-    """x [B, 64, 128] FP32 (the residual stream), x0 [B, 64, 128] FP16 (the embedding), the gain,
-    norm1's weight [128], the qkv projection's [384, 128], the QK-norm weights [16], the pair bias
-    [8, 64, 64], the out projection's [128, 128] -> (x + gain x0 + attention, the normed input)."""
-    x = x.float().contiguous()
+    """x [B, 64, 128] FP32 or FP16 (the residual stream), x0 [B, 64, 128] FP16 (the embedding), the
+    gain, norm1's weight [128], the qkv projection's [384, 128], the QK-norm weights [16], the pair
+    bias [8, 64, 64], the out projection's [128, 128] -> (x + gain x0 + attention in x's type, the
+    normed input)."""
+    x = _stream(x)
     x0 = x0.to(torch.float16).contiguous()
     n = x.shape[0]
     out = torch.empty_like(x)
@@ -193,7 +205,7 @@ def fused_attention_block(
 
 @fused_attention_block.register_fake
 def _(x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, eps):
-    return torch.empty_like(x, dtype=torch.float32), torch.empty_like(x, dtype=torch.float16)
+    return torch.empty_like(x, dtype=_stream_dtype(x)), torch.empty_like(x, dtype=torch.float16)
 
 
 @torch.library.custom_op("chessrl::fused_attention_block_backward", mutates_args=())
@@ -203,9 +215,9 @@ def fused_attention_block_backward(
     xn: torch.Tensor, dout: torch.Tensor, eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            torch.Tensor, torch.Tensor]:  # fmt: skip
-    x = x.float().contiguous()
+    x = _stream(x)
     x0 = x0.to(torch.float16).contiguous()
-    dout = dout.float().contiguous()
+    dout = dout.to(x.dtype).contiguous()
     n = x.shape[0]
     dev = x.device
     wqkv16 = qkv_weight.half().contiguous()
@@ -241,7 +253,8 @@ def fused_attention_block_backward(
 def _(x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, xn, dout, eps):
     f32 = torch.float32
     return (
-        torch.empty_like(x, dtype=f32), torch.empty_like(x0, dtype=torch.float16), gain.new_empty((), dtype=f32),
+        torch.empty_like(x, dtype=_stream_dtype(x)), torch.empty_like(x0, dtype=torch.float16),
+        gain.new_empty((), dtype=f32),
         norm_weight.new_empty(D, dtype=f32), qkv_weight.new_empty(3 * D, D, dtype=f32),
         q_weight.new_empty(HEAD_DIM, dtype=f32), k_weight.new_empty(HEAD_DIM, dtype=f32),
         bias.new_empty(HEADS, TOKENS, TOKENS, dtype=f32), out_weight.new_empty(D, D, dtype=f32),
@@ -272,4 +285,4 @@ def reference_attention_block(x, x0, gain, norm_weight, qkv_weight, q_weight, k_
     xn = (xp * torch.rsqrt(xp.pow(2).mean(-1, keepdim=True) + eps) * norm_weight).half()
     qkv = xn @ qkv_weight.half().t()
     o = reference_attention(qkv, q_weight, k_weight, bias, eps)
-    return xp + (o @ out_weight.half().t()).float()
+    return (xp + (o @ out_weight.half().t()).float()).to(_stream_dtype(x))

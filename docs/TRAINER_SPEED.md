@@ -189,12 +189,44 @@ layer and its gradient per 32 hidden units and 2,048 tokens instead of writing t
 made the step 21.7 ms instead of 14.5. At this size the recomputation (about 50 GFLOP per layer)
 costs more than the 384 MB of traffic it saves.
 
+**The residual stream in FP16** (`fp16_residual`): the fused kernels read and write the stream,
+and its gradient, in FP16 instead of FP32 (their arithmetic stays FP32, rounded once per write).
+That halves the bytes of the step's largest tensors (64 MB each at batch 2,048 in FP32).
+
+| step, alone, batch 2,048 | ms | kernels |
+|---|---|---|
+| fused attention block, tuned launches (2fda839) | 13.5 | 312 |
+| **+ the residual stream in FP16** | **11.2** (-17%) | 308 |
+
+What it costs in precision, measured on run C's final network (step 112,000) with 2,048 positions
+from games it played, FP32 as the reference (`artifacts/scratch/fp16_residual.py`, on the CPU with
+FP16 rounding emulated at every point autocast rounds):
+
+| relative error against FP32 | FP32 stream (the recipe before) | FP16 stream |
+|---|---|---|
+| policy logits | 5.3e-4 | 6.3e-4 |
+| WDL | 4.0e-4 | 4.4e-4 |
+| weight gradients, median tensor | 2.9e-3 | 3.6e-3 |
+| worst tensor (layer 2's embedding gain, a scalar summed over every token) | 4.3% | 5.1% |
+
+The FP16 stream adds about a quarter to the rounding noise the FP16 step already has. Range is
+not a concern: the stream peaks at 1,215 and the largest scaled gradient at 271 (FP16 goes to
+65,504). The weak spot is the embedding's re-injection into the late layers, small next to the
+stream there (12% of it in layer 2, 3% in layer 3), which loses 0.2 and 0.6% of itself to the
+rounding; the attention and feed-forward updates lose 0.03 to 0.04%. 300 steps on the same batches
+from run C's checkpoint: loss 3.68187 at the first step (3.68178), last-100 mean 3.14749 against
+the pushed code's 3.14666 and 3.14759; per-step losses within 0.0009 to 0.0011 of the pushed
+code's on average, when its two runs differ by 0.0007. The self-play kernel keeps the stream in
+FP32.
+
 **What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
 activations grow with it). The lever left is fusing across the matrix multiplies: a training
 kernel that runs a layer's forward and backward with the activations on chip, as the self-play
 kernel does for the forward (several times faster at best, days of work, gradients checked against
-autograd), or giving the trainer a fixed share of the GPU (self-play yielding when the trainer is
-behind its samples per record).
+autograd). In real runs a faster step mostly turns into self-play speed, since the low-priority
+trainer runs in the GPU time self-play leaves; a fixed GPU share for the trainer (equal MPS
+priorities, or an SM cap for self-play) is the scheduling knob. Self-play yielding to the trainer
+is kept for when samples per record fall below about 2.
 
 ## Ranked by GPU time saved
 

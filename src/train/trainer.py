@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from rich.console import Console
 from torch import amp, optim
 
+from src.models import encoder
 from src.models.factory import build_model, normalize_spec
 from src.models.growth import grow_encoder, grow_resnet
 from src.models.small.vocab import policy_to_idx
@@ -99,6 +100,7 @@ class Trainer:
         self.optimizer = self._make_optimizer()
         if config.fp16_accumulation:
             torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        encoder.FP16_RESIDUAL = config.fp16_residual
         self._step_fn = self._compiled_step()
 
         self.checkpoint_dir = config.checkpoint.dir
