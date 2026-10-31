@@ -24,11 +24,15 @@ from src.models.small.vocab import policy_index
 
 _PROMO = {"q": 1, "r": 2, "b": 3}
 
-try:  # Triton (with PyTorch's CUDA builds): the fused attention and feed-forward for training
+try:  # Triton (with PyTorch's CUDA builds): the fused kernels for training
     from src.models.fused_attention import fused_attention
+    from src.models.fused_block import fused_attention_block
     from src.models.fused_ffn import fused_ffn
 except ImportError:  # pragma: no cover
-    fused_attention = fused_ffn = None
+    fused_attention = fused_attention_block = fused_ffn = None
+# Off switches for A/B runs: the whole attention block (fused_block.py), the attention alone
+# (fused_attention.py, used when the block is off), the feed-forward (fused_ffn.py).
+_FUSED_BLOCK = os.environ.get("CHESSRL_FUSED_BLOCK", "1") != "0"
 _FUSED_ATTENTION = os.environ.get("CHESSRL_FUSED_ATTENTION", "1") != "0"
 _FUSED_FFN = os.environ.get("CHESSRL_FUSED_FFN", "1") != "0"
 
@@ -87,6 +91,23 @@ class Block(nn.Module):
 
     def forward(self, x, x0, bias):
         b, n, d = x.shape
+        if (
+            fused_attention_block is not None
+            and _FUSED_BLOCK
+            and x.is_cuda
+            and x.dtype == torch.float32
+            and x0.dtype == torch.float16
+            and torch.is_autocast_enabled("cuda")
+            and torch.is_grad_enabled()
+            and (n, self.heads, self.hd) == (64, 8, 16)
+        ):
+            # Training: the re-injection, norm1, qkv, attention, out projection and residual per
+            # position (fused_block.py).
+            x, _ = fused_attention_block(
+                x, x0, self.x0_gain, self.norm1.weight, self.qkv.weight, self.q_norm.weight,
+                self.k_norm.weight, bias, self.out.weight, self.norm1.eps,
+            )  # fmt: skip
+            return self._feed_forward(x)
         x = x + self.x0_gain * x0.float()
         h = self.norm1(x)
         qkv = self.qkv(h)
@@ -116,6 +137,10 @@ class Block(nn.Module):
                 )
             h = h.transpose(1, 2).reshape(b, n, d)
         x = x + self.out(h)
+        return self._feed_forward(x)
+
+    def _feed_forward(self, x):
+        d = x.shape[-1]
         if (
             fused_ffn is not None
             and _FUSED_FFN
