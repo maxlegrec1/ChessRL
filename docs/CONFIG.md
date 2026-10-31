@@ -215,6 +215,8 @@ Settings outside the YAML, read by the C++ extension at run time or by the build
 | `CHESSRL_MCTS_FLUSH_US` | 100 | Microseconds the batcher waits for a full batch before dispatching a partial one. |
 | `CHESSRL_FP16_ACC` | 256 | The fused network's projection multiplies sum in FP16: N terms per FP16 sum before an FP32 addition (32, 64, or 256 for whole sums); 0 keeps FP32 accumulators. The attention and policy-logit multiplies and the residual stream are FP32 either way. |
 | `CHESSRL_BLOCKING_SYNC` | 0 | 1: inference workers sleep on a blocking-sync event while the GPU runs their batch instead of spinning (saves about 2 cores, costs 3 to 4% when the CPU is not short). |
+| `CHESSRL_SEARCHES_PER_THREAD` | 1 | Searches each self-play thread interleaves (`threads` x this many in flight; the batch threshold counts them all). Fewer threads wake less often and use less CPU, but each search waits for its thread; 32 x 4 was 2% slower than 128 x 1 on the 4090 box (`docs/PERF.md`). |
+| `CHESSRL_MCTS_PHASES` | unset | Set: print where the search threads' time goes after each self-play step (`[mcts-phases]`) and the step's serial parts (`[step-phases]`). |
 | `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. |
 | `CHESSRL_CUDA_ARCH`, `CUDA_ROOT` | `sm_90`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture (the fused kernel needs `sm_80` or newer) and toolkit location. |
 | `CHESSRL_RUNS_ROOT` | `artifacts/runs` (dashboard), `~/chessrl-runs` (analysis board) | Where the dashboard and the analysis board look for runs; colon-separated for the dashboard. |

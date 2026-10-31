@@ -427,3 +427,104 @@ is memory-bound element-wise work, 102 ms eager and 34 ms compiled on the 4090 a
 (`scripts/bench_trainer.py`, `docs/TRAINER_SPEED.md`). Real run through the launcher: self-play
 2,402 records/s (its speed alone), the trainer 5.85 steps/s at 0.076 s per step, back to 5
 samples per record and waiting half the time.
+
+## The CPU scheduler as the limit (2026-10-31, night)
+
+Same box (RTX 4090 + Ryzen 9 7950X, 32 hardware threads, a 30.7-core quota, nothing else
+running), run C's network, self-play alone, `scripts/perf/selfplay_ab.sh` (60 s of warm-up,
+240 s measured, the arms alternated twice) unless stated.
+
+**Where the search threads' time goes** at the recipe (`CHESSRL_MCTS_PHASES=1`, 128 threads):
+waiting for the network 53.6%, idle at the end of a step 27.1%, queueing evaluations 10.5%,
+expansion and backup 6.0%, descent 2.8%. Less than a tenth of their time is search work. A step
+(one move on each of the 1,024 boards) takes 106 ms: preparing the requests 1.4 ms, the searches
+about 101 ms, applying the moves and writing the records 2.3 ms, Python 1.7 ms.
+
+**More threads or boards, again** (self-play alone, 60 s + 180 s, one run each): they lost before
+the zero-copy hand-back because the inference workers were full, and they still lose.
+
+| setting | recorded positions/s | idle | waiting for the network | GPU per batch |
+|---|---|---|---|---|
+| recipe: 128 threads, 1,024 boards (two runs) | 2,415.1, 2,402.9 | 27.1% | 53.6% | 0.197 ms |
+| 2,048 boards | 2,393.1 | 20.6% | 59.1% | 0.200 ms |
+| 192 threads | 2,264.5 | 30.5% | 56.4% | 0.276 ms |
+| 2,048 boards, 192 threads | 2,283.7 | 20.9% | 64.8% | 0.304 ms |
+
+With 2,048 boards the threads are idle less, but the time they gain goes into waiting: the idle
+end of a step is not what limits the speed.
+
+**The run queue** (`/proc/schedstat`, the whole machine, 10 s at the recipe): 23.4 cores running,
+and on average 22 threads runnable but waiting for a core, 432k context switches a second (192
+threads: 29 waiting, 376k). Each search thread sleeps and wakes once per round of 8 evaluations,
+about 120k wake-ups a second, in bursts as batches come back; part of "waiting for the network" is
+waiting for a core once the results are back.
+
+**Longest searches first** (fda7e84, reverted in 63be71b): the threads took the searches by
+decreasing remaining simulations, so that no 400-simulation search starts at the end of a step.
+2,310.5 and 2,318.3 against 2,400.8 and 2,411.6 (-3.8%): the idle fell from 27% to 19%, but with
+every long search running at once more threads competed for the cores (queueing evaluations 14.4%
+of thread time instead of 10.5%, a GPU batch 0.219 ms instead of 0.197).
+
+**Batched enqueue** (e9def2e): a search queues its round of up to 8 positions under one lock, and
+a worker is woken only when the queue was empty or just reached a full batch (each position used
+to take the lock and wake a worker, which mostly found the batch still short and slept again).
+
+**Interleaved searches** (aaba249, `CHESSRL_SEARCHES_PER_THREAD`, default 1): a thread keeps
+several searches going and advances them in the order their evaluations were queued, so it waits
+for the network only when its oldest round is not back. `SmallMctsRunner::run()` became
+`start()`, `advance()` and `finish()`; each search does the same work in the same order (same
+digests on the CPU benchmark with 1, 4 and 16 searches per thread, with and without a simulated
+GPU, same `reusecheck` results, on this box too).
+
+| arm | threads x searches | recorded positions/s | vs pushed code | cores | CPU ms per position | hand-back per batch |
+|---|---|---|---|---|---|---|
+| pushed code (0c274c1) | 128 x 1 | 2,391.4, 2,399.2 | | 22.9 | 9.5 | 0.057 ms |
+| **batched enqueue** | 128 x 1 | **2,486.6, 2,494.4** | **+4.0%** | 23.0 | 9.3 | 0.061 ms |
+| batched enqueue, interleaved | 32 x 4 | 2,437.2, 2,454.4 | +2.1% | 22.4 | 9.2 | 0.023 ms |
+| batched enqueue, interleaved | 16 x 8 | 2,329.5, 2,331.8 | -2.7% | 14.7 | 6.3 | 0.010 ms |
+
+- Batched enqueue: queueing evaluations falls from 10.8% to 2.7% of thread time and a step from
+  106.8 to 102.7 ms.
+- Interleaving does the same work with less CPU (16 x 8: a third less) and almost no run queue
+  (host load 15 instead of 43), but 16 threads are then busy most of the time and become the
+  limit. 47% of their time was outside every phase timer: taking a result (the FP16 record's
+  conversion), `finish()` (the summary and the kept subtree) and freeing the tree, which the
+  phases now time (771c75c).
+
+**More splits, and the search threads at a lower priority** (the batched-enqueue build; nice 5
+on the search threads so that a woken inference worker gets a core first, c14f37f removed it):
+
+| arm | recorded positions/s |
+|---|---|
+| 128 x 1 | 2,495.4, 2,489.4 |
+| 128 x 1, nice 5 | 2,495.8, 2,490.7 |
+| 64 x 2 | 2,443.6, 2,442.9 |
+| 32 x 4, nice 5 | 2,440.9, 2,443.8 |
+
+Priority changes nothing, and interleaving loses 2% at every split: a thread advances its
+searches one at a time, so a result that is back waits while the thread works on another search.
+Interleaving stays available (`CHESSRL_SEARCHES_PER_THREAD`), off.
+
+**The end of a search** (the new timers, 40 s + 120 s, one run each):
+
+| | 128 x 1 | 16 x 8 |
+|---|---|---|
+| recorded positions/s | 2,487.6 | 2,295.3 |
+| descent | 2.8% | 14.6% |
+| queueing evaluations | 2.8% | 3.8% |
+| expansion and backup | 6.5% | 24.2% |
+| taking a result (`get`) | 1.9% | 6.6% |
+| `finish()`: summary and kept subtree | 3.5% | 15.2% |
+| destroying the search | 1.2% | 8.5% |
+| waiting for the network | 59.4% | 9.7% |
+| idle | 21.8% | 17.3% |
+
+Taking the results, finishing and destroying a search cost 70% as much as the search's own
+descents, queueing and expansions: `finish()` alone more than the descents. Each tree node holds
+three vectors (children, their moves, their priors), so keeping the played subtree copies them all
+and destroying a search frees them all. The next CPU saving is there (nodes whose children live in
+one shared array, the kept subtree moved instead of copied), and `get` converts a whole 1,929-entry
+FP16 record into a new vector when only the legal moves' logits are used.
+
+**Batched enqueue is the recipe's code** (pushed, 771c75c): ×1.04 on the pushed code on this box,
+×4.66 the round-2 recipe (534.5 to 2,490.5). Logs: `~/chessrl-runs/perf-2026-10-30/perf4/night.tgz`.
