@@ -24,11 +24,13 @@ from src.models.small.vocab import policy_index
 
 _PROMO = {"q": 1, "r": 2, "b": 3}
 
-try:  # Triton (with PyTorch's CUDA builds): the fused attention for training
+try:  # Triton (with PyTorch's CUDA builds): the fused attention and feed-forward for training
     from src.models.fused_attention import fused_attention
+    from src.models.fused_ffn import fused_ffn
 except ImportError:  # pragma: no cover
-    fused_attention = None
+    fused_attention = fused_ffn = None
 _FUSED_ATTENTION = os.environ.get("CHESSRL_FUSED_ATTENTION", "1") != "0"
+_FUSED_FFN = os.environ.get("CHESSRL_FUSED_FFN", "1") != "0"
 
 
 def _token(square: int) -> int:
@@ -80,6 +82,7 @@ class Block(nn.Module):
         self.norm2 = RMSNorm(d)
         self.up = nn.Linear(d, 2 * d_ff, bias=False)
         self.down = nn.Linear(d_ff, d, bias=False)
+        self.d_ff = d_ff
         self.x0_gain = nn.Parameter(torch.zeros(()))
 
     def forward(self, x, x0, bias):
@@ -97,23 +100,33 @@ class Block(nn.Module):
         ):
             # Training: QK-norm, scores, softmax and values in one kernel (fused_attention.py).
             h = fused_attention(qkv, self.q_norm.weight, self.k_norm.weight, bias, self.q_norm.eps)
-            x = x + self.out(h)
-            gate, up = self.up(self.norm2(x)).chunk(2, dim=-1)
-            return x + self.down(F.silu(gate) * up)
-        q, k, v = qkv.view(b, n, 3, self.heads, self.hd).permute(2, 0, 3, 1, 4)
-        q, k = self.q_norm(q), self.k_norm(k)
-        # softmax(q.k / sqrt(hd) + bias) v without writing the [batch, heads, 64, 64] scores: they
-        # and their softmax were a quarter of a training step's GPU time. The fused kernel's FP32
-        # backward on the GPU rejects this layout, so FP32 training there keeps the explicit form.
-        if q.is_cuda and v.dtype == torch.float32 and torch.is_grad_enabled():
-            att = (q @ k.transpose(-1, -2)) / math.sqrt(self.hd) + bias
-            h = att.softmax(dim=-1) @ v
         else:
-            h = F.scaled_dot_product_attention(
-                q.to(v.dtype), k.to(v.dtype), v, attn_mask=bias.to(v.dtype).expand(b, -1, -1, -1)
-            )
-        h = h.transpose(1, 2).reshape(b, n, d)
+            q, k, v = qkv.view(b, n, 3, self.heads, self.hd).permute(2, 0, 3, 1, 4)
+            q, k = self.q_norm(q), self.k_norm(k)
+            # softmax(q.k / sqrt(hd) + bias) v without writing the [batch, heads, 64, 64] scores:
+            # they and their softmax were a quarter of a training step's GPU time. The fused
+            # kernel's FP32 backward on the GPU rejects this layout, so FP32 training there keeps
+            # the explicit form.
+            if q.is_cuda and v.dtype == torch.float32 and torch.is_grad_enabled():
+                att = (q @ k.transpose(-1, -2)) / math.sqrt(self.hd) + bias
+                h = att.softmax(dim=-1) @ v
+            else:
+                h = F.scaled_dot_product_attention(
+                    q.to(v.dtype), k.to(v.dtype), v, attn_mask=bias.to(v.dtype).expand(b, -1, -1, -1)
+                )
+            h = h.transpose(1, 2).reshape(b, n, d)
         x = x + self.out(h)
+        if (
+            fused_ffn is not None
+            and _FUSED_FFN
+            and x.is_cuda
+            and x.dtype == torch.float32
+            and torch.is_autocast_enabled("cuda")
+            and torch.is_grad_enabled()
+            and (d, self.d_ff) == (128, 256)
+        ):
+            # Training: norm, SwiGLU feed-forward and residual per tile of tokens (fused_ffn.py).
+            return fused_ffn(x, self.norm2.weight, self.up.weight, self.down.weight, self.norm2.eps)
         gate, up = self.up(self.norm2(x)).chunk(2, dim=-1)
         return x + self.down(F.silu(gate) * up)
 

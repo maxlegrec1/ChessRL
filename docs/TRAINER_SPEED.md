@@ -140,6 +140,25 @@ both norm weights and the pair bias within 2% (`tests/test_fused_attention.py`).
 same batches: loss 3.68175 at the first step (3.68178), last-100 mean 3.14660 against the pushed
 code's 3.14666 and 3.14759 (its own two runs).
 
+**Fused feed-forward** (`src/models/fused_ffn.py`, a Triton custom op): the norm, the up
+projection, SwiGLU, the down projection and the residual add per tile of tokens, the hidden layer
+on chip; the forward reads the residual stream and writes its new value, nothing else. The
+backward recomputes the hidden layer in the same tiles, takes the gradient back to the residual
+stream and writes what the weight gradients need, which two cuBLAS GEMMs sum over the batch with
+FP32 accumulators. (FP16 accumulation over the batch's 131,072 tokens: 3.4e-3 to 4.7e-3 relative
+error on the weight gradients, against 2.9e-4 with FP32 accumulators; 6e-4 against 2e-4 on the
+128-term sums of the forward and input-gradient GEMMs.)
+
+| step, alone, batch 2,048 | ms | kernels |
+|---|---|---|
+| fused attention (f200421) | 17.7 | 343 |
+| **+ fused feed-forward** | **14.5** (-18%) | 323 |
+
+Per layer at 131,072 tokens: forward 243 µs, backward kernel 558 µs, weight-gradient GEMMs 303 µs.
+Against the plain PyTorch formula: output within 1e-3, the gradients of the input, the norm weight
+and both projections within 2% (`tests/test_fused_ffn.py`). 300 steps on the same batches: loss
+3.68172 at the first step (3.68178), last-100 mean 3.14751 against 3.14666 and 3.14759.
+
 **What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
 activations grow with it). The lever left is fusing across the matrix multiplies: a training
 kernel that runs a layer's forward and backward with the activations on chip, as the self-play
