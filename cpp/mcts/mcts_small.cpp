@@ -320,6 +320,12 @@ public:
         }
     }
 
+    // advance() would not wait: what is in flight is back (or nothing is).
+    bool ready()
+    {
+        return evals_.ready();
+    }
+
     bool advance()
     {
         if (root_in_flight_)
@@ -1272,14 +1278,22 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
         while (active.size() < per_thread && take())
         {
         }
-        size_t i = 0;
+        // `active` is in the order the searches' evaluations were queued. Advance the first whose
+        // evaluations are all back, and wait on the oldest only when none is; an advanced search
+        // has just queued its next round, so it moves to the back.
         while (!active.empty())
         {
-            if (i >= active.size()) i = 0;
+            size_t i = 0;
+            if (per_thread > 1)
+            {
+                while (i < active.size() && !active[i].second->ready()) ++i;
+                if (i == active.size()) i = 0;
+            }
             auto& [job_id, runner] = active[i];
             if (runner->advance())
             {
-                ++i;  // its next round is now the newest in flight
+                std::rotate(active.begin() + static_cast<std::ptrdiff_t>(i),
+                            active.begin() + static_cast<std::ptrdiff_t>(i) + 1, active.end());
                 continue;
             }
             const bool ph = mcts_phases_on();

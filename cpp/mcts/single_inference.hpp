@@ -60,6 +60,13 @@ public:
         cv_.wait(lock, [this] { return pending_ == 0; });
     }
 
+    // True when nothing is pending, so wait() would return at once.
+    bool ready()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_ == 0;
+    }
+
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
