@@ -725,13 +725,15 @@ cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packe
     return cudaGetLastError();
 }
 
-// CHESSRL_KERNEL_BLOCKS=2: the build that keeps two blocks on each SM (at most 128 registers per
-// thread, the rest spilled), with the default FP16 accumulation. Default 1.
+// With the default FP16 accumulation the kernel keeps two blocks on each SM (at most 128 registers
+// per thread, the rest spilled to the stack): a block's barriers and memory waits are covered by the
+// other block, +33% on its own on an RTX 4090 (1.41M to 1.88M positions/s, docs/PERF.md).
+// CHESSRL_KERNEL_BLOCKS=1 selects the one-block build.
 int kernel_blocks()
 {
     static const int blocks = [] {
         const char* env = std::getenv("CHESSRL_KERNEL_BLOCKS");
-        return env != nullptr && std::atoi(env) == 2 ? 2 : 1;
+        return env != nullptr && std::atoi(env) == 1 ? 1 : 2;
     }();
     return blocks;
 }

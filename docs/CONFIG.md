@@ -212,7 +212,8 @@ Settings outside the YAML, read by the C++ extension at run time or by the build
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CHESSRL_INFER_WORKERS` | 4 | Inference worker threads per batch runner, each with its own CUDA stream. |
+| `CHESSRL_INFER_WORKERS` | 6 | Inference worker threads per batch runner, each with its own CUDA stream. |
+| `CHESSRL_KERNEL_BLOCKS` | 2 | 2: the fused kernel keeps two blocks (positions) on each SM, at most 128 registers per thread; 1: the one-block build (up to 255 registers). Only with the default FP16 accumulation; the other accumulation settings always use one block. |
 | `CHESSRL_MCTS_FLUSH_US` | 100 | Microseconds the batcher waits for a full batch before dispatching a partial one. |
 | `CHESSRL_FP16_ACC` | 256 | The fused network's projection multiplies sum in FP16: N terms per FP16 sum before an FP32 addition (32, 64, or 256 for whole sums); 0 keeps FP32 accumulators. The attention and policy-logit multiplies and the residual stream are FP32 either way. |
 | `CHESSRL_BLOCKING_SYNC` | 0 | 1: inference workers sleep on a blocking-sync event while the GPU runs their batch instead of spinning (saves about 2 cores, costs 3 to 4% when the CPU is not short). |
