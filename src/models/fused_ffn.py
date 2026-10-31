@@ -5,9 +5,12 @@ PyTorch's version writes and reads the 512-wide up projection's output (128 MB a
 the 256-wide SwiGLU output and the normed input, forward and backward; the training step is bound
 by that traffic. Here the forward reads the residual stream and writes its new value, nothing
 else. The backward recomputes the hidden layer in the same tiles, takes the gradient back to the
-residual stream and writes what the weight gradients need (the hidden layer's gradient, the SwiGLU
-output, the normed input, the output gradient in FP16), which two cuBLAS GEMMs then sum over the
-batch with FP32 accumulators (FP16 ones lose 0.3 to 0.5% over its 131,072 tokens).
+residual stream and writes the normed input and the output gradient in FP16. The weight gradients come
+from a split-K kernel: one program per (32 hidden units, 2,048 tokens) recomputes its part of the
+hidden layer and its gradient from those two and sums its share of both weight gradients with
+FP32 accumulators; a sum over the token chunks finishes them. (Writing the hidden layer's gradient
+and the SwiGLU output for two cuBLAS GEMMs cost 384 MB of traffic per layer; cuBLAS with FP16
+accumulators also loses 0.3 to 0.5% over the batch's 131,072 tokens.)
 
 Same function as Block.forward's feed-forward under FP16 autocast: the norm in FP32, rounded to
 FP16; the projections in FP16 with FP32 accumulation, rounded to FP16; SwiGLU rounded to FP16 as
@@ -25,6 +28,7 @@ D_MODEL, D_FF = 128, 256
 # 243 us with 64 tokens (283 with 32), the backward kernel 558 us with 32 (770 with 64, 660 with 64
 # on 8 warps); 64 hidden units per step need more shared memory than an SM has.
 _BM_FWD, _BM_BWD, _BC = 64, 32, 32
+_DW_SLICE, _DW_CHUNK, _DW_STEP = 32, 2048, 64  # split-K weight gradients: hidden units, tokens, inner step
 
 
 @triton.jit
@@ -52,7 +56,7 @@ def _fwd_kernel(x, wn, wu, wd, out, eps, n_rows, D: tl.constexpr, F: tl.constexp
 
 
 @triton.jit
-def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_rows,
+def _bwd_kernel(x, wn, wu, wd, dout, dx, xn_out, dy_out, dwn, eps, n_rows,
                 D: tl.constexpr, F: tl.constexpr, BM: tl.constexpr, BC: tl.constexpr):  # fmt: skip
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
     mask = rows < n_rows
@@ -76,14 +80,9 @@ def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_
         up = tl.dot(xn, tl.trans(wv)).to(tl.float16).to(tl.float32)
         sig = tl.sigmoid(gate)
         s = (gate * sig).to(tl.float16).to(tl.float32)
-        g = (s * up).to(tl.float16)
-        tl.store(g_out + rows[:, None] * F + (c + hc)[None, :], g, mask=mask[:, None])
         dg = tl.dot(dy, wdc)
         dup = (dg * s).to(tl.float16)
         dgate = (dg * up * sig * (1.0 + gate * (1.0 - sig))).to(tl.float16)
-        hoff = rows[:, None] * (2 * F) + (c + hc)[None, :]
-        tl.store(du + hoff, dgate, mask=mask[:, None])
-        tl.store(du + hoff + F, dup, mask=mask[:, None])
         acc += tl.dot(dgate, wg) + tl.dot(dup, wv)
     # RMSNorm backward: y = x r w, r = (mean(x^2) + eps)^-1/2, so with g = dy w,
     # dx = r g - x r^3 mean(x g), and dw = sum over rows of dy x r.
@@ -91,6 +90,44 @@ def _bwd_kernel(x, wn, wu, wd, dout, dx, du, g_out, xn_out, dy_out, dwn, eps, n_
     dxn = r[:, None] * gq - xt * (r * r * r)[:, None] * (tl.sum(xt * gq, 1) / D)[:, None]
     tl.store(dx + off, do + dxn, mask=mask[:, None])
     tl.atomic_add(dwn + cols, tl.sum(acc * xt * r[:, None], 0))
+
+
+@triton.jit
+def _dw_kernel(xn, dy, wu, wd, part_up, part_down, n_rows, D: tl.constexpr, F: tl.constexpr,
+               SLICE: tl.constexpr, CHUNK: tl.constexpr, STEP: tl.constexpr):  # fmt: skip
+    """Partial weight gradients of hidden units [s * SLICE, (s + 1) * SLICE) over the chunk's
+    tokens: part_up[c] rows of those gate and up units, part_down[c] those columns."""
+    sl = tl.program_id(0)  # slices vary fastest: a chunk's programs read its xn and dy from L2
+    ch = tl.program_id(1)
+    cols = tl.arange(0, D)
+    hs = sl * SLICE + tl.arange(0, SLICE)
+    wg = tl.load(wu + hs[:, None] * D + cols[None, :])
+    wv = tl.load(wu + (F + hs)[:, None] * D + cols[None, :])
+    wdc = tl.load(wd + cols[:, None] * F + hs[None, :])
+    acc_g = tl.zeros((SLICE, D), dtype=tl.float32)
+    acc_u = tl.zeros((SLICE, D), dtype=tl.float32)
+    acc_d = tl.zeros((D, SLICE), dtype=tl.float32)
+    for t in range(0, CHUNK, STEP):
+        rows = ch * CHUNK + t + tl.arange(0, STEP)
+        mask = rows < n_rows
+        off = rows[:, None] * D + cols[None, :]
+        xt = tl.load(xn + off, mask=mask[:, None], other=0.0)
+        dyt = tl.load(dy + off, mask=mask[:, None], other=0.0)
+        gate = tl.dot(xt, tl.trans(wg)).to(tl.float16).to(tl.float32)
+        up = tl.dot(xt, tl.trans(wv)).to(tl.float16).to(tl.float32)
+        sig = tl.sigmoid(gate)
+        s = (gate * sig).to(tl.float16).to(tl.float32)
+        g = (s * up).to(tl.float16)
+        dg = tl.dot(dyt, wdc)
+        dup = (dg * s).to(tl.float16)
+        dgate = (dg * up * sig * (1.0 + gate * (1.0 - sig))).to(tl.float16)
+        acc_g += tl.dot(tl.trans(dgate), xt)
+        acc_u += tl.dot(tl.trans(dup), xt)
+        acc_d += tl.dot(tl.trans(dyt), g)
+    base = ch * (2 * F) * D
+    tl.store(part_up + base + hs[:, None] * D + cols[None, :], acc_g)
+    tl.store(part_up + base + (F + hs)[:, None] * D + cols[None, :], acc_u)
+    tl.store(part_down + ch * D * F + cols[:, None] * F + hs[None, :], acc_d)
 
 
 @torch.library.custom_op("chessrl::fused_ffn", mutates_args=())
@@ -126,25 +163,22 @@ def fused_ffn_backward(
     n = x2.shape[0]
     dev = x2.device
     dx = torch.empty_like(x2)
-    du = torch.empty(n, 2 * D_FF, dtype=torch.float16, device=dev)
-    g = torch.empty(n, D_FF, dtype=torch.float16, device=dev)
     xn = torch.empty(n, D_MODEL, dtype=torch.float16, device=dev)
     dy = torch.empty(n, D_MODEL, dtype=torch.float16, device=dev)
     dwn = torch.zeros(D_MODEL, dtype=torch.float32, device=dev)
+    wu16, wd16 = up_weight.half().contiguous(), down_weight.half().contiguous()
     _bwd_kernel[(triton.cdiv(n, _BM_BWD),)](
-        x2, norm_weight.float().contiguous(), up_weight.half().contiguous(), down_weight.half().contiguous(),
-        d2, dx, du, g, xn, dy, dwn, eps, n, D=D_MODEL, F=D_FF, BM=_BM_BWD, BC=_BC, num_warps=4,
+        x2, norm_weight.float().contiguous(), wu16, wd16,
+        d2, dx, xn, dy, dwn, eps, n, D=D_MODEL, F=D_FF, BM=_BM_BWD, BC=_BC, num_warps=4,
     )  # fmt: skip
-    # The weight gradients sum over every token: FP32 accumulators whatever the FP16-accumulation
-    # setting (torch.backends.cuda.matmul.allow_fp16_accumulation, read when each GEMM is issued).
-    fp16_acc = torch.backends.cuda.matmul.allow_fp16_accumulation
-    torch.backends.cuda.matmul.allow_fp16_accumulation = False
-    try:
-        dwu = (du.t() @ xn).float()
-        dwd = (dy.t() @ g).float()
-    finally:
-        torch.backends.cuda.matmul.allow_fp16_accumulation = fp16_acc
-    return dx.view(shape), dwn, dwu, dwd
+    chunks = triton.cdiv(n, _DW_CHUNK)
+    part_up = torch.empty(chunks, 2 * D_FF, D_MODEL, dtype=torch.float32, device=dev)
+    part_down = torch.empty(chunks, D_MODEL, D_FF, dtype=torch.float32, device=dev)
+    _dw_kernel[(D_FF // _DW_SLICE, chunks)](
+        xn, dy, wu16, wd16, part_up, part_down, n, D=D_MODEL, F=D_FF, SLICE=_DW_SLICE, CHUNK=_DW_CHUNK,
+        STEP=_DW_STEP, num_warps=8,
+    )  # fmt: skip
+    return dx.view(shape), dwn, part_up.sum(0), part_down.sum(0)
 
 
 @fused_ffn_backward.register_fake
