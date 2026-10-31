@@ -219,6 +219,12 @@ the pushed code's 3.14666 and 3.14759; per-step losses within 0.0009 to 0.0011 o
 code's on average, when its two runs differ by 0.0007. The self-play kernel keeps the stream in
 FP32.
 
+**In a real run** (the same 12-minute run as above, 4a9f593): 4,364 records/s and the trainer at
+7.54 steps/s, 3.98 samples per record, against 4,417 records/s, 5.09 steps/s and 2.79 with the
+14.5 ms step: +48% training steps for -1% records, 15,440 samples trained per second. The
+trainer gains more than its step time alone (14.5 to 11.2 ms, x1.29), so it probably also
+competes less with self-play for memory bandwidth.
+
 **What is left** is memory-bound work in fused kernels. Batch 4,096 would not help (the
 activations grow with it). The lever left is fusing across the matrix multiplies: a training
 kernel that runs a layer's forward and backward with the activations on chip, as the self-play
