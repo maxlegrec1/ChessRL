@@ -528,3 +528,88 @@ FP16 record into a new vector when only the legal moves' logits are used.
 
 **Batched enqueue is the recipe's code** (pushed, 771c75c): ×1.04 on the pushed code on this box,
 ×4.66 the round-2 recipe (534.5 to 2,490.5). Logs: `~/chessrl-runs/perf-2026-10-30/perf4/night.tgz`.
+
+## ×8.6: the tree's allocations, the step barrier and the kernel's occupancy (2026-10-31)
+
+A second box of the same kind (perf5: RTX 4090 + Ryzen 9 7950X, 32 hardware threads, no CPU quota,
+rented whole), run C's network, self-play alone unless stated, `scripts/perf/selfplay_ab.sh` (60 s
+of warm-up, 240 s measured, the arms alternated twice). This host runs the same code more slowly
+than perf4 (CPU 12.1 ms per recorded position against 9.3), so every ratio below is measured on
+perf5, against the round-2 recipe measured there too.
+
+**The round-2 recipe on this box** (TensorRT, commit 0607bbf, the same alternation): 501.2 and
+509.5 recorded positions/s (505.4). The code pushed before today (49dfae3) makes 2,059.6 and
+2,063.0 here, ×4.08 (×4.66 on perf4).
+
+**1. Flat tree nodes** (c76f8a2). Each node held three vectors (children, their moves, their
+priors), allocated when it was expanded, copied with the kept subtree and freed with the tree. A
+node's children are added together, so they are consecutive nodes: a node now holds `first_child`
+and `num_children`, and each child its own move and prior. Self-play also stops building each root
+move's principal variation, which it never read. Same digests on the CPU benchmark and on the real
+network (414 positions, 400 simulations, no noise).
+
+| arm | recorded positions/s | cores | CPU ms per position | step |
+|---|---|---|---|---|
+| pushed code | 2,055.5, 2,060.6 | 25.0 | 12.1 | 124 ms |
+| **flat nodes** | **2,986.3, 2,982.7** | 14.8 | 5.0 | 86 ms |
+
++45%. The phases that allocate (expansion, taking a result, `finish()`, destroying the search) were
+16 of the 23 points of search-thread time spent working, 71% of it; the CPU was the limit (about 29
+threads wanting a core on 32 hardware threads, plus the spinning inference workers), so cutting the
+CPU per position by 59% raised the speed until the GPU became the limit.
+
+**2. Results read in place** (09d7e85): a result points at its FP16 record in the output buffer and
+the search converts only the legal moves' logits (it allocated and converted all 1,929). +0.7%.
+
+**3. The GPU's limit.** The kernel alone on this GPU (`fused_benchmark`): 925k positions/s at batch
+128 on one stream, 1,384k to 1,409k on 4 or 8 streams at batch 64 to 256. Self-play evaluated
+1.19M/s (84%), and `nvidia-smi dmon` showed the GPU running a kernel 87% of the time, with 4, 6 or
+8 inference workers alike (3,017, 3,019, 3,006): the idle time came from the searches, not from the
+workers. Within a step, the last long searches leave the GPU short of positions and the step's
+serial part (preparing and applying 1,024 moves, 4.6 of 86 ms) leaves it with none.
+
+**4. Asynchronous play** (bcfd343, `selfplay.async_play`, the recipe since 652d72d): persistent
+search threads each play their own boards in turn and never wait for each other; a worker step
+returns after one move per board's worth of moves. Preparing and applying a move run under one
+lock; the searches run outside it.
+
+| arm | recorded positions/s | evaluations/s |
+|---|---|---|
+| pushed flat nodes | 2,990.1, 2,985.9 | 1.18M |
+| + results in place, step by step | 3,051.8, 3,051.8 | 1.20M |
+| + longest searches first | 2,829.3, 2,827.7 | 1.11M |
+| **+ asynchronous play** | **3,587.1, 3,595.8** | **1.415M** |
+
++17.7%, at the kernel's own ceiling: the GPU never waits. Longest-first loses again (it lost 4%
+when the CPU was short; dropped in 6b1787a), and sleeping 100 µs before each sync (+0.9% step by
+step) gains nothing once the GPU is the limit (dropped too).
+
+**5. Two kernel blocks per SM** (f111865, the default since c64ee4a). The kernel used 92.5 KB of
+shared memory and 224 registers per thread: one block (one position, 8 warps) per SM, and each of
+its six barriers per layer idled the SM. Shared memory is now 41 KB (two FP16 buffers: the
+attention output reuses the norm buffer once every warp has its q, k and v; the feed-forward runs in
+two halves of 128 hidden columns through V's buffer; the policy's q and k reuse both), and the
+default build is limited to 128 registers (216 bytes per thread spilled) so that two blocks share
+each SM. Parity against PyTorch (256 puzzle positions, run C at 92.5k and the 8-layer run A at 50k)
+is unchanged: top-1 100%, policy KL 1e-5, WDL error 0.0012 and 0.0014 on average. The down
+projection's FP16 sums now cover 128 terms each half, so the search digest on the real network
+changes (same accuracy).
+
+| kernel alone (positions/s) | batch 128, 4 streams | 128, 8 | 256, 4 |
+|---|---|---|---|
+| pushed kernel | 1,304k, 1,409k | 1,392k, 1,405k | 1,410k, 1,406k |
+| 41 KB, one block per SM | 1,408k, 1,409k | 1,405k, 1,404k | 1,406k, 1,406k |
+| **41 KB, two blocks per SM** | **1,930k, 1,885k** | 1,852k, 1,841k | 1,854k, 1,875k |
+
+| self-play (asynchronous play) | recorded positions/s | evaluations/s | cores |
+|---|---|---|---|
+| one block per SM, 4 workers | 3,581.7, 3,581.7 | 1.41M | 16.0 |
+| two blocks per SM, 4 workers | 4,006.2, 3,989.5 | 1.58M | 20.8 |
+| **two blocks per SM, 6 workers** | **4,362.9, 4,358.3** | **1.72M** | 26.3 |
+
+With the faster kernel the 4 workers never wait for a batch (0.0006 ms per batch); 6 keep the GPU
+busier (+9%), the default since c64ee4a.
+
+**Where it ends** (this box): 4,360.6 recorded positions/s, **×8.63 the round-2 recipe** (505.4),
+×2.12 the code pushed before today. Not kept: interleaved searches (32 x 4, 16 x 8: the same speed
+with less CPU, only in the step-by-step mode; `CHESSRL_SEARCHES_PER_THREAD`, off).
