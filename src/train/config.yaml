@@ -74,6 +74,9 @@ selfplay:
   boards: 1024
   # Fewer threads batch better with virtual-loss width 8 (128 measured faster than 256).
   threads: 128
+  # Each search thread plays its own boards in turn with no step barrier, so the GPU never waits
+  # for a step's last searches (+20% recorded positions/s, docs/PERF.md).
+  async_play: true
   hash_size: 0 # transposition table off: ~1.5% hit rate, not worth the locking
   # Playout-cap randomisation: 25% of moves get a full 400-simulation search and are saved
   # for training; the others get 50 simulations and only move the game forward.

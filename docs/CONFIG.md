@@ -146,6 +146,7 @@ ply.
 |---|---|---|---|
 | `boards` | 1024 | 1024 | Concurrent games. Each worker step searches one move in every game. |
 | `threads` | 128 | 256 | CPU threads running the searches. Also the inference batch size at which a batch is dispatched. |
+| `async_play` | true | false | Each search thread plays its own boards in turn, with no step barrier: the GPU never waits for a step's last searches or for the moves to be applied. A worker step then returns after one move per board's worth of moves. false: each step searches every board once, all at once. |
 | `hash_size` | 0 | 0 | Transposition table size in MB, shared by all searches. 0 = off. |
 | `simulations` | 400 | 800 | Simulations of a full search. |
 | `pcr_full_prob` | 0.25 | 1.0 | Playout-cap randomisation: probability that a move gets a full search, which is recorded and gets Dirichlet noise. 1.0 = every move. |

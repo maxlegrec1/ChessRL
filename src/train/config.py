@@ -52,6 +52,7 @@ class SelfPlayConfig:
     # parallelism / batching
     boards: int = 1024
     threads: int = 256
+    async_play: bool = False
     hash_size: int = 0
     # MCTS settings, copied by name onto the C++ config (self_play/__main__.py _CPP_FIELDS)
     simulations: int = 800

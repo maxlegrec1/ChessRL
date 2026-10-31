@@ -44,18 +44,6 @@ int searches_per_thread()
     return n;
 }
 
-// CHESSRL_ASYNC_SELFPLAY=1: persistent search threads each play their own boards in turn, with no
-// step barrier (SelfPlayWorker::Impl::play); step() then returns after one move per board's worth
-// of moves. Off: each step searches every board once, all at once.
-bool async_selfplay()
-{
-    static const bool on = [] {
-        const char* env = std::getenv("CHESSRL_ASYNC_SELFPLAY");
-        return env != nullptr && std::atoi(env) != 0;
-    }();
-    return on;
-}
-
 // On-disk record layout v2 (1280 bytes, fixed). Bytes [0..832) keep the v1
 // layout; v2 appends the current position's bitboards and scalar state (so the
 // trainer builds input planes without parsing FEN) and the MCTS visit
@@ -813,7 +801,7 @@ struct SelfPlayWorker::Impl
         metrics.games_finished++;
     }
 
-    // ---- Asynchronous self-play (async_selfplay()). Player thread t plays boards t, t + n, ...
+    // ---- Asynchronous self-play (SelfPlayConfig::async_play). Player thread t plays boards t, t + n, ...
     // in turn, one move each, never waiting for the others. Preparing and applying a move run
     // under state_mutex (the record file, stats, the config and the opening RNG are shared); the
     // searches run outside it, each on the runner current when it starts (`runner` is read and
@@ -966,7 +954,7 @@ SelfPlayMetrics SelfPlayWorker::step()
     const SelfPlayConfig& cfg = impl_->config;
     const size_t n_slots = impl_->slots.size();
 
-    if (async_selfplay())
+    if (cfg.async_play)
     {
         impl_->start_players();
         {
@@ -1080,6 +1068,7 @@ void SelfPlayWorker::set_config(const SelfPlayConfig& config)
     next.output_path = cur.output_path;
     next.concurrency = cur.concurrency;
     next.threads = cur.threads;
+    next.async_play = cur.async_play;
     next.hash_size = cur.hash_size;
     next.max_buffer_size = cur.max_buffer_size;
     next.fifo_buffer = cur.fifo_buffer;

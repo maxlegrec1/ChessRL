@@ -13,6 +13,10 @@ struct SelfPlayConfig
     std::string output_path;
     int concurrency = 256;
     int threads = 0;       // 0 = auto (256 MCTS worker threads)
+    // Persistent search threads each play their own boards in turn, with no step barrier;
+    // step() returns after one move per board's worth of moves. false: each step searches every
+    // board once, all at once.
+    bool async_play = false;
     int hash_size = 4096;  // MB; transposition-table size shared across slots
     int simulations = 800;
     float cpuct = 0.65f;

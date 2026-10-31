@@ -51,6 +51,7 @@ struct Args
     std::string mode{"full"}; // full (400 sims, noise) or fast (50 sims) as in the recipe
     int threads{8};
     int searches_per_thread{1};
+    bool async_play{false};
     int sims{-1}; // override the mode's simulations
     int repeat{3};
     int limit{0};
@@ -81,6 +82,7 @@ Args parse(int argc, char** argv)
         else if (k == "--mode") a.mode = next();
         else if (k == "--threads") a.threads = std::stoi(next());
         else if (k == "--searches-per-thread") a.searches_per_thread = std::stoi(next());
+        else if (k == "--async-play") a.async_play = std::stoi(next()) != 0;
         else if (k == "--sims") a.sims = std::stoi(next());
         else if (k == "--repeat") a.repeat = std::stoi(next());
         else if (k == "--limit") a.limit = std::stoi(next());
@@ -228,6 +230,7 @@ int run_selfplay(const Args& a)
     cfg.output_path = a.buffer;
     cfg.concurrency = a.boards;
     cfg.threads = a.threads;
+    cfg.async_play = a.async_play;
     cfg.hash_size = 0;
     cfg.simulations = a.sims >= 0 ? a.sims : 400;
     cfg.pcr_full_prob = 0.25F;

@@ -17,6 +17,7 @@ from .engine_watch import EngineWatcher
 # Fields copied from the Python SelfPlayConfig onto the C++ one (same names).
 _CPP_FIELDS = (
     "threads",
+    "async_play",
     "hash_size",
     "simulations",
     "cpuct",

@@ -36,6 +36,7 @@ from src.train.config import load_config  # noqa: E402
 OVERRIDES = {
     "concurrency": "boards",
     "threads": "threads",
+    "async_play": "async_play",
     "sims": "simulations",
     "virtual_loss_width": "virtual_loss_width",
     "hash_size": "hash_size",
@@ -115,7 +116,7 @@ def main() -> int:
     sp = load_config(args.config).selfplay
     for flag, name in OVERRIDES.items():
         if getattr(args, flag) is not None:
-            setattr(sp, name, getattr(args, flag))
+            setattr(sp, name, type(getattr(sp, name))(getattr(args, flag)))  # 0/1 for a bool key
     sp.save_pgn = False
     settings = {"boards": sp.boards, **{name: getattr(sp, name) for name in _CPP_FIELDS}}
 
