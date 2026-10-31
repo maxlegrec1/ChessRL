@@ -53,15 +53,11 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x):
-        # Scale by the row max before squaring: the TensorRT engine ran this in FP16, where
-        # x.pow(2) overflows past |x| = 256, and the residual stream grows past that
-        # without weight decay (max |x| into the final norm: 46 at 10k steps, 349 at
-        # 45.5k; the overflow zeroed whole tokens and the engine drifted from the
-        # trained net). RMSNorm is scale-invariant, so this is the same function up
-        # to eps, and treating the scale as a constant leaves the gradient exact.
-        s = x.detach().abs().amax(-1, keepdim=True).clamp_min(1e-6)
-        x = x / s
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        # In FP32, as the fused self-play kernel computes it: x.pow(2) cannot overflow there
+        # (in FP16 it did past |x| = 256, which an earlier version avoided by dividing each row
+        # by its maximum first, at two extra reductions per norm).
+        xf = x.float()
+        return (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight).to(x.dtype)
 
 
 class Block(nn.Module):

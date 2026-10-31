@@ -27,8 +27,8 @@ from .dataset import (
     Batch,
     Prefetcher,
     ReplayBuffer,
-    decode_planes,
-    dense_policy_target,
+    decode_fields,
+    dense_target,
 )
 
 AMP_DTYPES: dict[str, torch.dtype] = {
@@ -41,6 +41,12 @@ AMP_DTYPES: dict[str, torch.dtype] = {
 
 _CASTLE_IDX = torch.tensor(sorted(CASTLE_INDEX))
 _E1, _E8 = 4, 60
+# The batch fields the step's compiled part reads (the FENs stay outside it).
+_STEP_FIELDS = (
+    "cur_bb", "past_bb", "cur_rep", "past_rep", "white_to_move", "castling", "ep", "halfmove",
+    "mirror", "flags", "played_idx", "policy_idx", "policy_prob", "value_outcome", "value_mcts",
+    "plies_remaining", "backed_plies",
+)  # fmt: skip
 
 
 def legal_move_probability(probs: torch.Tensor, fens: list[str]) -> float:
@@ -91,7 +97,9 @@ class Trainer:
         self.model = build_model(spec).to(self.device)
         self.model.train()
         self.optimizer = self._make_optimizer()
-        self._forward = torch.compile(self.model) if config.compile else self.model
+        if config.fp16_accumulation and hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        self._step_fn = self._compiled_step()
 
         self.checkpoint_dir = config.checkpoint.dir
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -129,9 +137,19 @@ class Trainer:
                 {"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
                 {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0},
             ]
+        # One fused kernel for all parameters on the GPU (with the FP16 loss scaler it also skips
+        # an overflowed step on the GPU, without the host sync of the unfused path).
+        kwargs["fused"] = self.device.type == "cuda"
         if cfg.optimizer == "adamw":
             return optim.AdamW(params, **kwargs)
         return optim.Adam(params, **kwargs)
+
+    def _compiled_step(self):
+        """The step's forward and losses, compiled with the model when config.compile."""
+        if not self.config.compile:
+            return self._losses
+        mode = None if self.config.compile_mode == "default" else self.config.compile_mode
+        return torch.compile(self._losses, mode=mode)
 
     def lr_at(self, step: int) -> float:
         cfg = self.config
@@ -260,7 +278,7 @@ class Trainer:
                 )
             self.model.train()
             self.optimizer = self._make_optimizer()
-            self._forward = torch.compile(self.model) if self.config.compile else self.model
+            self._step_fn = self._compiled_step()
             self.last_growth_step = self.step
             self._log_event(
                 "grow", spec=self.model.spec(), params_before=before, params=self.param_count()
@@ -299,7 +317,8 @@ class Trainer:
                 # On the step that ends at a multiple of expensive_metrics_every, so that a
                 # logged step (counted after the increment below) includes these metrics.
                 expensive = (self.step + 1) % max(1, cfg.expensive_metrics_every) == 0
-                metrics = self._train_step(batch, expensive)
+                log = (self.step + 1) % cfg.log_every == 0  # logged after the increment below
+                metrics = self._train_step(batch, expensive, log)
                 t1 = time.time()
                 step_dt = t1 - t0
                 step_times.append(step_dt)
@@ -355,23 +374,56 @@ class Trainer:
                 wandb.finish()
 
     # ------------------------------------------------------------------ #
-    def _train_step(self, batch: Batch, expensive: bool) -> dict[str, torch.Tensor | float]:
+    def _train_step(
+        self, batch: Batch, expensive: bool, log: bool = False
+    ) -> dict[str, torch.Tensor | float]:
+        """One optimizer step. Returns the metrics on a logged step (log or expensive), else {}:
+        nothing in a step reads a value back from the GPU otherwise."""
         cfg = self.config
+        log = log or expensive
         lr = self.lr_at(self.step)
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.zero_grad(set_to_none=True)
 
-        inputs = decode_planes(batch)
-        full = (batch.flags & FLAG_FULL_SEARCH) > 0
-        target_mlh = (batch.plies_remaining.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        target_mlh_q = (batch.backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        mlh_mask = (batch.plies_remaining > -0.5).float()
-        mlh_q_mask = (batch.backed_plies > -0.5).float()
-        has_visits = full & (batch.policy_prob.sum(dim=1) > 0)
+        fields = {name: getattr(batch, name) for name in _STEP_FIELDS}
+        total_loss, metrics, log_probs = self._step_fn(fields, log)
+
+        self.scaler.scale(total_loss).backward()
+        if cfg.grad_clip > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        if not log:
+            return {}
+        metrics = dict(metrics)
+        metrics["amp/scale"] = self.scaler.get_scale() if self.scaler.is_enabled() else 1.0
+        if expensive:
+            rows = min(16, log_probs.shape[0])
+            metrics["legal_move_prob"] = legal_move_probability(
+                log_probs[:rows].exp().float().cpu(), batch.fens[:rows]
+            )
+        return metrics
+
+    def _losses(self, f: dict[str, torch.Tensor], with_metrics: bool):
+        """The step's forward and losses (compiled with the model, _compiled_step): the total loss,
+        the scalars to log (the diagnostics too when with_metrics) and the policy's log-probs."""
+        cfg = self.config
+        inputs = decode_fields(
+            f["cur_bb"], f["past_bb"], f["cur_rep"], f["past_rep"], f["white_to_move"],
+            f["castling"], f["ep"], f["halfmove"], f["mirror"],
+        )  # fmt: skip
+        full = (f["flags"] & FLAG_FULL_SEARCH) > 0
+        target_mlh = (f["plies_remaining"].clamp_min(0.0) / 25.0).clamp_max(4.0)
+        target_mlh_q = (f["backed_plies"].clamp_min(0.0) / 25.0).clamp_max(4.0)
+        mlh_mask = (f["plies_remaining"] > -0.5).float()
+        mlh_q_mask = (f["backed_plies"] > -0.5).float()
+        has_visits = full & (f["policy_prob"].sum(dim=1) > 0)
 
         with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
-            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self._forward(
+            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self.model(
                 inputs, return_all=True
             )
         policy_logits = policy_logits.float()
@@ -381,17 +433,17 @@ class Trainer:
         mlh_q_pred = mlh_q_pred.float().view(-1)
 
         log_probs = F.log_softmax(policy_logits, dim=-1)
-        visit_target = dense_policy_target(batch)
+        visit_target = dense_target(f["policy_idx"], f["policy_prob"])
         visit_ce = -(visit_target * log_probs).sum(dim=-1)
         visit_loss = (visit_ce * has_visits).sum() / has_visits.sum().clamp_min(1)
-        played = torch.where(
-            full, batch.played_idx, torch.full_like(batch.played_idx, IGNORE_INDEX)
-        )
+        played_idx = f["played_idx"]
+        played = torch.where(full, played_idx, torch.full_like(played_idx, IGNORE_INDEX))
         played_loss = F.cross_entropy(policy_logits, played, ignore_index=IGNORE_INDEX)
         policy_loss = visit_loss if cfg.policy_target == "visits" else played_loss
 
-        value_loss = F.cross_entropy(value_logits, batch.value_outcome)
-        value_q_loss = F.cross_entropy(value_q_logits, batch.value_mcts)
+        value_outcome, value_mcts = f["value_outcome"], f["value_mcts"]
+        value_loss = F.cross_entropy(value_logits, value_outcome)
+        value_q_loss = F.cross_entropy(value_q_logits, value_mcts)
         mlh_loss = ((mlh_pred - target_mlh).pow(2) * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0)
         mlh_q_loss = (
             (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
@@ -405,27 +457,22 @@ class Trainer:
             + lw.mlh * mlh_loss
             + lw.mlh_q * mlh_q_loss
         )
-
-        self.scaler.scale(total_loss).backward()
-        if cfg.grad_clip > 0:
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        metrics: dict[str, torch.Tensor] = {}
+        if not with_metrics:
+            return total_loss, metrics, None
 
         with torch.no_grad():
             probs = log_probs.exp()
-            value_labels = batch.value_outcome.argmax(dim=-1)
-            value_q_labels = batch.value_mcts.argmax(dim=-1)
+            value_labels = value_outcome.argmax(dim=-1)
+            value_q_labels = value_mcts.argmax(dim=-1)
             played_ok = played != IGNORE_INDEX
             top1 = policy_logits.argmax(dim=-1)
             target_entropy = -(visit_target * visit_target.clamp_min(1e-12).log()).sum(-1)
-            vm = batch.value_mcts
-            castle_cand = torch.isin(batch.played_idx, _CASTLE_IDX.to(self.device))
-            kings_home = (((batch.cur_bb[:, 5] >> _E1) & 1) > 0) | (
-                ((batch.cur_bb[:, 11] >> _E8) & 1) > 0
-            )
-            metrics: dict[str, torch.Tensor | float] = {
+            vm = value_mcts
+            castle_cand = torch.isin(played_idx, _CASTLE_IDX.to(played_idx.device))
+            cur_bb = f["cur_bb"]
+            kings_home = (((cur_bb[:, 5] >> _E1) & 1) > 0) | (((cur_bb[:, 11] >> _E8) & 1) > 0)
+            metrics = {
                 "loss/total": total_loss.detach(),
                 "loss/policy": policy_loss.detach(),
                 "loss/policy_visits": visit_loss.detach(),
@@ -455,20 +502,12 @@ class Trainer:
                 "buffer/decisive_outcome": (value_labels != 1).float().mean(),
                 "buffer/wdl_agreement": (value_labels == value_q_labels).float().mean(),
                 "buffer/castle_rate": (castle_cand & kings_home).float().mean(),
-                "mlh/pred_plies": (mlh_pred * mlh_mask).sum()
-                / mlh_mask.sum().clamp_min(1.0)
-                * 25.0,
+                "mlh/pred_plies": (mlh_pred * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
                 "mlh/target_plies": (target_mlh * mlh_mask).sum()
                 / mlh_mask.sum().clamp_min(1.0)
                 * 25.0,
-                "amp/scale": self.scaler.get_scale() if self.scaler.is_enabled() else 1.0,
             }
-            if expensive:
-                rows = min(16, probs.shape[0])
-                metrics["legal_move_prob"] = legal_move_probability(
-                    probs[:rows].float().cpu(), batch.fens[:rows]
-                )
-        return metrics
+        return total_loss, metrics, log_probs.detach()
 
     # ------------------------------------------------------------------ #
     def _save_checkpoint(self) -> None:

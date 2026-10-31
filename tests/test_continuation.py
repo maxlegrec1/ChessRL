@@ -41,7 +41,7 @@ def test_encoder_continuation_grows_and_decays(tmp_path):
     assert r.lr_at(3) == pytest.approx(cfg.learning_rate)
     assert r.lr_at(13) == pytest.approx(cfg.learning_rate * cfg.lr_schedule.final_ratio)
     r.model.train()
-    m = r._train_step(r.buffer.sample_batch(cfg.batch_size), expensive=False)
+    m = r._train_step(r.buffer.sample_batch(cfg.batch_size), expensive=False, log=True)
     assert torch.isfinite(torch.as_tensor(float(m["loss/total"])))
 
     # A later plain resume keeps the continuation's start step (and the grown model).
