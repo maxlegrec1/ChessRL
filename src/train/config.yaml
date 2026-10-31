@@ -59,10 +59,14 @@ checkpoint:
   engine_dir: artifacts/engines
   iteration_file: artifacts/engines/.iteration
 async_engine_build: true
-# Self-play and the trainer share the GPU through NVIDIA MPS, the trainer at below-normal
-# priority: their kernels run side by side and self-play's go first (docs/PERF.md: 1,964
-# records/s against 1,327 taking turns). The launcher falls back to no MPS where it fails.
+# Self-play and the trainer share the GPU through NVIDIA MPS: their kernels run side by side
+# (docs/PERF.md: 1,964 records/s against 1,327 taking turns). The launcher falls back to no MPS
+# where it fails.
 mps: true
+# The trainer at the same priority as self-play, paced by data.target_k. At below-normal
+# priority ("low") it got 5 steps in 20 s from a new network: self-play's searches then saturate
+# the GPU and leave it nothing.
+mps_trainer_priority: normal
 
 data:
   dataset_path: artifacts/buffers/buffer.bin

@@ -200,7 +200,11 @@ class TrainingConfig:
     # half the bytes the step moves through it. The self-play kernel keeps it FP32.
     fp16_residual: bool = False
     async_engine_build: bool = False  # export networks in the background
-    mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS, trainer low priority
+    mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS
+    # The trainer's MPS priority. "low": below self-play, its kernels run in the time self-play
+    # leaves, and it starves when self-play saturates the GPU (a new network's searches leave no
+    # gaps). "normal": the same as self-play; target_k paces the trainer either way.
+    mps_trainer_priority: str = "low"
     metrics_path: Path | None = None  # JSONL metrics for the dashboard
     expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 

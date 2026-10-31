@@ -227,7 +227,7 @@ def mps_child_env(
     return env
 
 
-def _start_mps() -> tuple[str, str] | None:
+def _start_mps(trainer_priority: str) -> tuple[str, str] | None:
     """Start an MPS daemon with its own pipe directory (other GPU processes on the box keep
     their own contexts) and check that a client can connect. Returns (pipe_dir, log_dir), or
     None after a warning when MPS is unavailable."""
@@ -257,7 +257,8 @@ def _start_mps() -> tuple[str, str] | None:
         print("[launcher] mps: a test client failed; running without MPS", flush=True)
         _stop_mps((pipe_dir, log_dir))
         return None
-    print(f"[launcher] mps: daemon up ({pipe_dir}), trainer at below-normal priority", flush=True)
+    level = "below-normal" if trainer_priority == "low" else "normal"
+    print(f"[launcher] mps: daemon up ({pipe_dir}), trainer at {level} priority", flush=True)
     return pipe_dir, log_dir
 
 
@@ -336,12 +337,16 @@ def main() -> int:
 
     from src.train.config import load_config
 
-    mps = _start_mps() if len(plan) == 2 and load_config(cfg_path).mps else None
+    run_cfg = load_config(cfg_path)
+    mps = _start_mps(run_cfg.mps_trainer_priority) if len(plan) == 2 and run_cfg.mps else None
+    low_trainer = run_cfg.mps_trainer_priority == "low"
     children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
         env = None
         if mps is not None:
-            env = mps_child_env(dict(os.environ), mps[0], mps[1], trainer=name == "training")
+            env = mps_child_env(
+                dict(os.environ), mps[0], mps[1], trainer=name == "training" and low_trainer
+            )
         children.append((name, _spawn(cmd, log, env), log))
 
     print(f"\nRun directory: {run_dir}")
