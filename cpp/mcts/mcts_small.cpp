@@ -172,6 +172,9 @@ std::atomic<std::uint64_t> g_ph_enqueue_ns{0};
 std::atomic<std::uint64_t> g_ph_wait_ns{0};
 std::atomic<std::uint64_t> g_ph_expand_ns{0};
 std::atomic<std::uint64_t> g_ph_ctor_ns{0};
+std::atomic<std::uint64_t> g_ph_get_ns{0};     // taking a result (converting its record)
+std::atomic<std::uint64_t> g_ph_finish_ns{0};  // finish(): the summary and the kept subtree
+std::atomic<std::uint64_t> g_ph_free_ns{0};    // destroying a finished search
 inline bool mcts_phases_on()
 {
     static const bool on = (std::getenv("CHESSRL_MCTS_PHASES") != nullptr);
@@ -604,7 +607,9 @@ private:
             }
             else
             {
+                const std::uint64_t t_g = ph ? now_ns() : 0;
                 eval = tickets_[ticket_idx++].get();
+                if (ph) g_ph_get_ns.fetch_add(now_ns() - t_g, std::memory_order_relaxed);
                 if (cache_)
                 {
                     const uint64_t hash = compute_cache_key(
@@ -1291,8 +1296,16 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
                 ++i;  // its next round is now the newest in flight
                 continue;
             }
+            const bool ph = mcts_phases_on();
+            const std::uint64_t t_f = ph ? now_ns() : 0;
             summaries[job_id] = runner->finish();
+            const std::uint64_t t_d = ph ? now_ns() : 0;
             active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+            if (ph)
+            {
+                g_ph_finish_ns.fetch_add(t_d - t_f, std::memory_order_relaxed);
+                g_ph_free_ns.fetch_add(now_ns() - t_d, std::memory_order_relaxed);
+            }
             take();  // a new search goes last: its first evaluation is the newest
         }
     };
@@ -1326,6 +1339,9 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
                   << g_ph_wait_ns.exchange(0, std::memory_order_relaxed) / ms
                   << " expand+backup="
                   << g_ph_expand_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " get=" << g_ph_get_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " finish=" << g_ph_finish_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " free=" << g_ph_free_ns.exchange(0, std::memory_order_relaxed) / ms
                   << " (threads=" << num_threads << ")\n";
     }
 
