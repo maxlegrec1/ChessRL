@@ -13,6 +13,7 @@ runs the same network for self-play.
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -22,6 +23,12 @@ from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index
 
 _PROMO = {"q": 1, "r": 2, "b": 3}
+
+try:  # Triton (with PyTorch's CUDA builds): the fused attention for training
+    from src.models.fused_attention import fused_attention
+except ImportError:  # pragma: no cover
+    fused_attention = None
+_FUSED_ATTENTION = os.environ.get("CHESSRL_FUSED_ATTENTION", "1") != "0"
 
 
 def _token(square: int) -> int:
@@ -79,7 +86,21 @@ class Block(nn.Module):
         b, n, d = x.shape
         x = x + self.x0_gain * x0
         h = self.norm1(x)
-        q, k, v = self.qkv(h).view(b, n, 3, self.heads, self.hd).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(h)
+        if (
+            fused_attention is not None
+            and _FUSED_ATTENTION
+            and qkv.is_cuda
+            and qkv.dtype == torch.float16
+            and torch.is_grad_enabled()
+            and (n, self.heads, self.hd) == (64, 8, 16)
+        ):
+            # Training: QK-norm, scores, softmax and values in one kernel (fused_attention.py).
+            h = fused_attention(qkv, self.q_norm.weight, self.k_norm.weight, bias, self.q_norm.eps)
+            x = x + self.out(h)
+            gate, up = self.up(self.norm2(x)).chunk(2, dim=-1)
+            return x + self.down(F.silu(gate) * up)
+        q, k, v = qkv.view(b, n, 3, self.heads, self.hd).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q), self.k_norm(k)
         # softmax(q.k / sqrt(hd) + bias) v without writing the [batch, heads, 64, 64] scores: they
         # and their softmax were a quarter of a training step's GPU time. The fused kernel's FP32
