@@ -119,6 +119,9 @@ class ModelConfig:
     layers: int = 4
     heads: int = 8
     d_ff: int = 256
+    # Canonical boards (encoder): with black to move the network sees the position mirrored, colours swapped,
+    # so it always plays white (src/models/encoder.py).
+    canonical: bool = False
 
 
 @dataclass

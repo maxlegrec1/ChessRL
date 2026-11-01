@@ -394,25 +394,34 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 
 // The input plane `plane` of token `cell` (row-major 8x8, row 0 = rank 8), as
 // expand_packed_to_dense (small_encoding.cpp) builds it; planes 111..127 are the zero
-// padding of the embedding's k loop.
-__device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane)
+// padding of the embedding's k loop. A canonical network reads every position as white to move: with
+// `mirror` (black to move) the square's rank is reversed and white's and black's pieces and castling rights
+// swapped (src/models/encoder.py).
+__device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane, bool canonical,
+                                             bool mirror)
 {
-    const int sq = (kPackBoard - 1 - (cell >> 3)) * kPackBoard + (cell & 7);
+    const int rank = mirror ? (cell >> 3) : kPackBoard - 1 - (cell >> 3);
+    const int sq = rank * kPackBoard + (cell & 7);
     if (plane < kPackPlaneSTM)
     {
         const int slot = plane / kPackHistBlock, within = plane % kPackHistBlock;
         if (slot != 0 && !((p.slot_valid >> slot) & 1u)) return 0.f;
-        if (within < kPackPiecePlanes) return ((p.bitboards[slot][within] >> sq) & 1ull) ? 1.f : 0.f;
+        if (within < kPackPiecePlanes)
+        {
+            const int piece = mirror ? (within < 6 ? within + 6 : within - 6) : within;
+            return ((p.bitboards[slot][piece] >> sq) & 1ull) ? 1.f : 0.f;
+        }
         return ((p.slot_rep >> slot) & 1u) ? 1.f : 0.f;
     }
+    const unsigned castling = mirror ? ((p.castling >> 2) | ((p.castling & 0x3u) << 2)) : p.castling;
     switch (plane)
     {
-    case kPackPlaneSTM: return p.stm ? 1.f : 0.f;
+    case kPackPlaneSTM: return (canonical || p.stm) ? 1.f : 0.f;
     case kPackPlaneEP: return p.ep_square == sq ? 1.f : 0.f;
-    case kPackPlaneCWK: return (p.castling & 0x1u) ? 1.f : 0.f;
-    case kPackPlaneCWQ: return (p.castling & 0x2u) ? 1.f : 0.f;
-    case kPackPlaneCBK: return (p.castling & 0x4u) ? 1.f : 0.f;
-    case kPackPlaneCBQ: return (p.castling & 0x8u) ? 1.f : 0.f;
+    case kPackPlaneCWK: return (castling & 0x1u) ? 1.f : 0.f;
+    case kPackPlaneCWQ: return (castling & 0x2u) ? 1.f : 0.f;
+    case kPackPlaneCBK: return (castling & 0x4u) ? 1.f : 0.f;
+    case kPackPlaneCBQ: return (castling & 0x8u) ? 1.f : 0.f;
     case kPackPlaneHMC: return fminf(static_cast<float>(p.halfmove) / 100.f, 1.f);
     default: return 0.f;
     }
@@ -428,23 +437,40 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
     const int b = blockIdx.x;
 
-    // ---- Input planes into s.h as [token][plane], FP16.
+    // ---- Input planes into s.h as [token][plane], FP16. `mirror`: a canonical network's position with black
+    // to move (read mirrored, its policy from vocab_b).
+    bool mirror;
     if (packed)
     {
         const auto* src = reinterpret_cast<const unsigned long long*>(packed + b);
         for (int i = tid; i < static_cast<int>(sizeof(s.packed) / 8); i += kThreads) s.packed[i] = src[i];
         __syncthreads();
         const auto& pos = *reinterpret_cast<const SmallPackedPosition*>(s.packed);
+        mirror = P.canonical && !pos.stm;
         for (int i = tid; i < kTok * 128; i += kThreads)
-            s.h[(i >> 7) * kLdH + (i & 127)] = __float2half(plane_value(pos, i >> 7, i & 127));
+            s.h[(i >> 7) * kLdH + (i & 127)] =
+                __float2half(plane_value(pos, i >> 7, i & 127, P.canonical, mirror));
     }
     else
     {
         const float* src = dense + static_cast<size_t>(b) * kTok * kPackPlanes;
+        mirror = P.canonical && src[kPackPlaneSTM] < 0.5f;
         for (int i = tid; i < kTok * 128; i += kThreads)
         {
             const int tok = i >> 7, pl = i & 127;
-            s.h[tok * kLdH + pl] = __float2half(pl < kPackPlanes ? src[tok * kPackPlanes + pl] : 0.f);
+            float v = 0.f;
+            if (pl < kPackPlanes)
+            {
+                // Mirrored: the token of the rank-reversed square, the colour-swapped piece or castling plane.
+                int from = pl;
+                if (mirror && pl < kPackPlaneSTM && pl % kPackHistBlock < kPackPiecePlanes)
+                    from = pl % kPackHistBlock < 6 ? pl + 6 : pl - 6;
+                if (mirror && pl >= kPackPlaneCWK && pl <= kPackPlaneCBQ)
+                    from = pl < kPackPlaneCBK ? pl + 2 : pl - 2;
+                v = src[(mirror ? tok ^ 56 : tok) * kPackPlanes + from];
+                if (P.canonical && pl == kPackPlaneSTM) v = 1.f;
+            }
+            s.h[tok * kLdH + pl] = __float2half(v);
         }
     }
     __syncthreads();
@@ -653,9 +679,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     }
     __syncthreads();
     auto* policy = reinterpret_cast<__half*>(out + static_cast<size_t>(b) * kRecordBytes);
+    const std::uint16_t* vocab = mirror ? P.vocab_b : P.vocab;
     for (int i = tid; i < kPolicySize; i += kThreads)
     {
-        const unsigned code = __ldg(P.vocab + i);
+        const unsigned code = __ldg(vocab + i);
         const int to = (code >> 6) & 63;
         const float v = (code >> 15)
             ? P.special

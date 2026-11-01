@@ -37,6 +37,9 @@ struct EncoderParams
     int layers;
     int n_wdl;        // value MLPs averaged into the WDL (2 for search_heads=blend)
     int mlhq_from_q;  // mlh_q output from the mlh_q head (search) or repeating mlh
+    // Canonical boards: positions with black to move are read mirrored (ranks reversed, colours and castling
+    // rights swapped, side to move white) and their policy filled from vocab_b (src/models/encoder.py).
+    int canonical;
     const void* embed_w;
     const float* embed_b;
     const float* pos;
@@ -47,7 +50,8 @@ struct EncoderParams
     const float* pol_b;
     const void* promo;
     float special;
-    const std::uint16_t* vocab;
+    const std::uint16_t* vocab;    // per absolute policy slot: the move's code (white to move, or any network)
+    const std::uint16_t* vocab_b;  // canonical networks, black to move
     const void* mlp1_w;
     const float* mlp1_b;
     const float* mlp2_w;

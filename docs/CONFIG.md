@@ -84,6 +84,7 @@ trainer rebuilds the architecture stored in its checkpoint (`model_spec`) instea
 | `layers` | 4 | 4 | Encoder blocks. |
 | `heads` | 8 | 8 | Attention heads (`d_model` must divide by it). |
 | `d_ff` | 256 | 256 | Hidden width of the SwiGLU feed-forward. |
+| `canonical` | false | false | Encoder only. With black to move the network reads the position mirrored (ranks reversed, colours and castling rights swapped, side to move white), so it always plays white, and scores white's 1,858 moves (lc0's vocabulary); its outputs are mapped back to the 1,929 absolute policy slots, so records, the trainer and the search do not change. The colour-flip augmentation (`mirror_prob`) is then an exact no-op. The fused kernel (`.cnet` config value 8) mirrors on the GPU. |
 | `blocks` | *unset* | 4 | ResNet residual blocks. |
 | `channels` | *unset* | 64 | ResNet trunk width. |
 

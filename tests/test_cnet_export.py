@@ -81,8 +81,19 @@ def silu(x):
 
 def kernel_forward(f: dict[str, np.ndarray], planes: np.ndarray):
     """The kernel's arithmetic for one batch [B, 64, planes], in FP32 from the packed file."""
-    d, layers, heads, d_ff, n_planes, n_wdl, mlhq = (int(v) for v in f["config"])
+    d, layers, heads, d_ff, n_planes, n_wdl, mlhq = (int(v) for v in f["config"][:7])
+    canonical = len(f["config"]) > 7 and int(f["config"][7]) == 1
     hd = d // heads
+    # Canonical: a position with black to move read mirrored, as the kernel's dense path does it (token ^ 56,
+    # colour-swapped piece and castling planes), and the side-to-move plane set.
+    mirror = canonical & (planes[:, 0, 104] < 0.5)
+    if canonical:
+        src = np.arange(n_planes)
+        for slot in range(8):
+            src[13 * slot : 13 * slot + 12] = np.r_[13 * slot + 6 : 13 * slot + 12, 13 * slot : 13 * slot + 6]
+        src[106:110] = [108, 109, 106, 107]
+        planes = np.where(mirror[:, None, None], planes[:, np.arange(64) ^ 56][:, :, src], planes)
+        planes[:, :, 104] = 1.0
     a = np.zeros((planes.shape[0], 64, 128), np.float32)
     a[:, :, :n_planes] = planes
     x0 = a @ unpack_b(f["embed.w"], d, 128).T + f["embed.b"] + f["pos"].reshape(64, d)
@@ -105,9 +116,12 @@ def kernel_forward(f: dict[str, np.ndarray], planes: np.ndarray):
     q, k = qk[..., :d], qk[..., d:]
     ft = q @ k.transpose(0, 2, 1)
     pt = f["promo"].astype(np.float32).reshape(4, d) @ k.transpose(0, 2, 1)
-    code = f["vocab"].astype(np.int64)
+    code = f["vocab"].astype(np.int64)[None].repeat(len(planes), 0)
+    if canonical:
+        code[mirror] = f["vocab_b"].astype(np.int64)
     frm, to, promo, special = code & 63, (code >> 6) & 63, (code >> 12) & 3, code >> 15
-    logits = ft[:, frm, to] + pt[:, promo, to]
+    rows = np.arange(len(planes))[:, None]
+    logits = ft[rows, frm, to] + pt[rows, promo, to]
     logits = np.where(special == 1, f["special"][0], logits)
 
     pooled = h.mean(1)
@@ -125,10 +139,11 @@ def kernel_forward(f: dict[str, np.ndarray], planes: np.ndarray):
     return logits, wdl, mlh, outs[:, 3 * n_wdl + 1] if mlhq else mlh
 
 
+@pytest.mark.parametrize("canonical", [False, True])
 @pytest.mark.parametrize("heads", sorted(HEADS))
-def test_packed_file_matches_pytorch(tmp_path, heads):
+def test_packed_file_matches_pytorch(tmp_path, heads, canonical):
     torch.manual_seed(0)
-    model = EncoderModel().eval()
+    model = EncoderModel(canonical=canonical).eval()
     with torch.no_grad():  # the trained-only parameters start at zero; make them count
         model.pair_bias.normal_(0, 1.0)
         model.promo.normal_(0, 0.5)
@@ -143,6 +158,7 @@ def test_packed_file_matches_pytorch(tmp_path, heads):
     rng = np.random.default_rng(0)
     planes = (rng.random((3, 64, 111)) < 0.1).astype(np.float32)
     planes[:, :, 110] = 0.37  # the halfmove plane is fractional
+    planes[:, :, 104] = [[1.0], [0.0], [0.0]]  # side to move: white, then black twice
     got = kernel_forward(f, planes)
     with torch.no_grad():
         ref = [

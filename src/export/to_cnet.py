@@ -3,7 +3,9 @@
 The file holds exactly what cpp/net/encoder_kernel.cu reads, so the C++ side only copies
 it to the GPU: weight matrices in FP16, pre-packed in the order mma.sync wants its B
 fragments, FP32 vectors, the pair bias in attention-score fragment order, and the policy
-vocab as one 16-bit code per entry. Two scales are folded in: the attention one
+vocab as one 16-bit code per entry (a canonical network has two tables, "vocab" for the positions with white
+to move and "vocab_b" for black, each giving the canonical move that fills an absolute slot). Two scales are
+folded in: the attention one
 (1/sqrt(head_dim), and log2(e) because the kernel's softmax uses exp2) and the policy
 one (1/sqrt(d_model), into pol_q and the promotion vectors).
 
@@ -24,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.models.encoder import _vocab_tables
+from src.models.encoder import ABSENT_LOGIT, CANONICAL_VOCAB, _vocab_tables, canonical_maps
 from src.models.factory import model_from_checkpoint
 
 MAGIC = b"CHESSNET"
@@ -75,12 +77,22 @@ def pack_pair_bias(bias: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(bias[h, row, col], dtype=np.float16)
 
 
-def vocab_codes() -> np.ndarray:
+def vocab_codes(vocab=None) -> np.ndarray:
     """Per vocab entry: from token | to token << 6 | promotion << 12 | special << 15."""
-    frm, to, promo = (x.numpy() for x in _vocab_tables())
+    frm, to, promo = (x.numpy() for x in (_vocab_tables(vocab) if vocab else _vocab_tables()))
     special = promo < 0
     codes = frm | (to << 6) | (np.maximum(promo, 0) << 12) | (special.astype(np.int64) << 15)
     return codes.astype(np.uint16)
+
+
+def canonical_vocab_codes() -> tuple[np.ndarray, np.ndarray]:
+    """For a canonical network, per absolute vocab slot: the code of the canonical move that fills it with white
+    to move, and with black to move; the special bit (the kernel then writes ABSENT_LOGIT) where none does."""
+    canon = vocab_codes(CANONICAL_VOCAB)
+    out = []
+    for idx in (m.numpy() for m in canonical_maps()):
+        out.append(np.where(idx >= 0, canon[np.maximum(idx, 0)], np.uint16(1 << 15)).astype(np.uint16))
+    return out[0], out[1]
 
 
 # The sizes cpp/net/encoder_kernel.cu is compiled for (any depth up to MAX_LAYERS).
@@ -108,7 +120,10 @@ def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
     out: list[tuple[str, np.ndarray]] = [
         (
             "config",
-            np.array([d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32),
+            np.array(
+                [d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q), int(cfg.get("canonical", False))],
+                np.int32,
+            ),
         ),
         ("embed.w", pack_b(embed)),
         ("embed.b", sd["embed.bias"]),
@@ -135,8 +150,13 @@ def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
         ("pol.w", pack_b(pol_w)),
         ("pol.b", pol_b),
         ("promo", (sd["promo"] * pol_scale).astype(np.float16)),
-        ("special", sd["special_logit"].reshape(1)),
-        ("vocab", vocab_codes()),
+    ]
+    if cfg.get("canonical"):
+        white, black = canonical_vocab_codes()
+        out += [("special", np.array([ABSENT_LOGIT], np.float32)), ("vocab", white), ("vocab_b", black)]
+    else:
+        out += [("special", sd["special_logit"].reshape(1)), ("vocab", vocab_codes())]
+    out += [
         # First layers transposed to [mlp][in][out] so the kernel's per-unit loop reads
         # consecutive units per thread; second layers stacked in output order.
         ("mlp1.w", np.stack([sd[f"{m}.0.weight"].T for m in mlps]).astype(np.float16)),

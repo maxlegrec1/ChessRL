@@ -195,16 +195,17 @@ PYBIND11_MODULE(_inference_cpp, m)
 
     m.def(
         "fused_benchmark",
-        [](const std::string& path, int batch, int iterations, int streams) {
+        [](const std::string& path, int batch, int iterations, int streams, bool black_to_move) {
             py::gil_scoped_release release;
             const chessrl::net::EncoderNet net(path);
-            return chessrl::net::benchmark(net, batch, iterations, streams);
+            return chessrl::net::benchmark(net, batch, iterations, streams, black_to_move);
         },
         py::arg("path"),
         py::arg("batch"),
         py::arg("iterations") = 200,
         py::arg("streams") = 1,
-        "Fused-network throughput (positions/s) on the start position.");
+        py::arg("black_to_move") = false,
+        "Fused-network throughput (positions/s) on the start position (with black to move if asked).");
 
     m.def(
         "small_mcts_search_batch",

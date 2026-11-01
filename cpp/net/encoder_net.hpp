@@ -33,6 +33,7 @@ public:
 
     const std::string& path() const { return path_; }
     int layers() const { return params_.layers; }
+    bool canonical() const { return params_.canonical != 0; }
 
 private:
     std::vector<unsigned char> run_host(const void* input, size_t bytes, bool packed, int batch) const;
@@ -46,7 +47,8 @@ private:
 bool is_cnet_path(const std::string& path);
 
 // Kernel throughput in positions per second: `streams` streams, each running `iterations`
-// batches of `batch` copies of the start position back to back (the output copy included).
-double benchmark(const EncoderNet& net, int batch, int iterations, int streams);
+// batches of `batch` copies of the start position back to back (the output copy included). With
+// `black_to_move` the start position has black to move (a canonical network then reads it mirrored).
+double benchmark(const EncoderNet& net, int batch, int iterations, int streams, bool black_to_move = false);
 
 } // namespace chessrl::net

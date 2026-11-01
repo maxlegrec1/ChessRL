@@ -24,7 +24,7 @@ def normalize_spec(spec) -> dict:
         }
     if arch == "encoder":
         keys = ("d_model", "layers", "heads", "d_ff")
-        return {"arch": "encoder", **{k: int(spec[k]) for k in keys}}
+        return {"arch": "encoder", **{k: int(spec[k]) for k in keys}, "canonical": bool(spec.get("canonical", False))}
     raise ValueError(f"unknown arch {arch!r}")
 
 

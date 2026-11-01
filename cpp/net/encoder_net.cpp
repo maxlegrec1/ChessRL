@@ -78,11 +78,15 @@ EncoderNet::EncoderNet(std::string path)
         return v;
     };
 
-    std::int32_t cfg[7];
-    std::memcpy(cfg, data.data() + get("config", kI32, 7).offset, sizeof(cfg));
+    // Seven values, or eight with the canonical flag (older files have seven).
+    std::int32_t cfg[8] = {};
+    const auto cfg_it = entries.find("config");
+    const std::uint64_t n_cfg = cfg_it == entries.end() ? 0 : cfg_it->second.bytes / 4;
+    if (n_cfg != 7 && n_cfg != 8) throw std::runtime_error("EncoderNet: " + path_ + ": bad config");
+    std::memcpy(cfg, data.data() + get("config", kI32, n_cfg).offset, n_cfg * 4);
     const int d = cfg[0], layers = cfg[1], heads = cfg[2], d_ff = cfg[3], planes = cfg[4];
     if (d != 128 || heads != 8 || d_ff != 256 || planes != kPackPlanes || layers < 1 || layers > kMaxLayers
-        || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0 || cfg[6] > 1)
+        || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0 || cfg[6] > 1 || cfg[7] < 0 || cfg[7] > 1)
     {
         throw std::runtime_error("EncoderNet: the fused kernel runs d_model 128, 8 heads, d_ff 256 and up to 16 "
                                  "layers; " + path_ + " has d_model " + std::to_string(d) + ", "
@@ -92,6 +96,7 @@ EncoderNet::EncoderNet(std::string path)
     params_.layers = layers;
     params_.n_wdl = cfg[5];
     params_.mlhq_from_q = cfg[6];
+    params_.canonical = cfg[7];
     const std::uint64_t n_mlp = params_.n_wdl + 1 + params_.mlhq_from_q;
     const std::uint64_t n_out = 3 * params_.n_wdl + 1 + params_.mlhq_from_q;
 
@@ -129,6 +134,9 @@ EncoderNet::EncoderNet(std::string path)
         params_.promo = dev("promo", kF16, 4 * 128);
         params_.special = host_f32("special");
         params_.vocab = static_cast<const std::uint16_t*>(dev("vocab", kU16, kPolicySize));
+        params_.vocab_b = params_.canonical
+            ? static_cast<const std::uint16_t*>(dev("vocab_b", kU16, kPolicySize))
+            : params_.vocab;
         params_.mlp1_w = dev("mlp1.w", kF16, n_mlp * 128 * 128);
         params_.mlp1_b = f32("mlp1.b", n_mlp * 128);
         params_.mlp2_w = f32("mlp2.w", n_out * 128);
@@ -186,7 +194,7 @@ std::vector<unsigned char> EncoderNet::run_host(const void* input, size_t bytes,
     return out;
 }
 
-double benchmark(const EncoderNet& net, int batch, int iterations, int streams)
+double benchmark(const EncoderNet& net, int batch, int iterations, int streams, bool black_to_move)
 {
     using mcts::single::SmallPackedPosition;
     SmallPackedPosition start{};  // white pieces on ranks 1-2, black on 7-8, every right
@@ -199,7 +207,7 @@ double benchmark(const EncoderNet& net, int batch, int iterations, int streams)
         start.bitboards[0][6 + k] = back[k] << 56;
     }
     start.slot_valid = 1;
-    start.stm = 1;
+    start.stm = black_to_move ? 0 : 1;
     start.castling = 0xF;
     std::vector<SmallPackedPosition> host(static_cast<size_t>(batch), start);
 
