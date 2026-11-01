@@ -49,7 +49,10 @@ Launcher flags (`python -m src.run`):
 | `device` | `cuda` | `cuda` | Torch device for training. Self-play always runs on the GPU (the fused CUDA network). |
 | `batch_size` | 2048 | 256 | Records per training step. |
 | `learning_rate` | 0.001 | 1e-5 | Peak learning rate; `lr_schedule` and growth re-warmup scale it. |
-| `optimizer` | `adamw` | `adam` | `adamw`: `torch.optim.AdamW`, decoupled weight decay. `adam`: `torch.optim.Adam`, where `weight_decay` becomes an L2 term in the gradient. |
+| `optimizer` | `adamw` | `adam` | `adamw`: `torch.optim.AdamW`, decoupled weight decay. `adam`: `torch.optim.Adam`, where `weight_decay` becomes an L2 term in the gradient. `muon` (`src/train/muon.py`, encoder only): Muon on the layers' weight matrices (q, k, v and the feed-forward's gate and up halves orthogonalised separately), AdamW with `learning_rate`, the betas and `weight_decay` on every other parameter; the schedule scales both learning rates alike. |
+| `muon_lr` | *unset* | 0.006 | Muon's learning rate (the chess speedrun's value). |
+| `muon_momentum` | *unset* | 0.95 | Muon's momentum (Nesterov). |
+| `muon_weight_decay` | *unset* | 0.01 | Muon's decoupled weight decay (the speedrun's value). |
 | `weight_decay` | 0.05 | 0.0 | Applied only to parameters with two or more dimensions (weight matrices, embeddings, the attention pair bias); norm gains, biases and scalar gains are exempt. Decoupled only with `optimizer: adamw`. The recipe uses it to keep the encoder's activations inside FP16 range. |
 | `beta1`, `beta2` | 0.9, 0.999 | 0.9, 0.999 | Adam betas. |
 | `grad_clip` | 1.0 | 0.0 | Maximum global gradient norm, applied after unscaling the FP16 loss scale. 0 = off. |

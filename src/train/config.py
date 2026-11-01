@@ -178,7 +178,12 @@ class TrainingConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     growth: GrowthConfig = field(default_factory=GrowthConfig)
     lr_schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
-    optimizer: str = "adam"  # "adam" | "adamw"
+    optimizer: str = "adam"  # "adam" | "adamw" | "muon"
+    # optimizer: muon (src/train/muon.py): Muon on the encoder layers' weight matrices, AdamW (learning_rate,
+    # betas, weight_decay) on the other parameters. The schedule scales both learning rates alike.
+    muon_lr: float = 0.006
+    muon_momentum: float = 0.95
+    muon_weight_decay: float = 0.01
     grad_clip: float = 0.0  # 0 = off
     # "played": one-hot on the move actually played. "visits": MCTS visit
     # distribution stored in the v2 record.

@@ -196,6 +196,14 @@ class EncoderModel(nn.Module):
     def spec(self) -> dict:
         return {"arch": "encoder", **self.cfg}
 
+    def muon_matrices(self) -> list[tuple[nn.Parameter, int]]:
+        """The layers' weight matrices for Muon (src/train/muon.py), each with the number of row blocks it is
+        orthogonalised in: q, k and v; the feed-forward's gate and up halves."""
+        out = []
+        for b in self.blocks:
+            out += [(b.qkv.weight, 3), (b.out.weight, 1), (b.up.weight, 2), (b.down.weight, 1)]
+        return out
+
     def forward(self, x, *, return_all: bool = False):
         b = x.shape[0]
         x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos

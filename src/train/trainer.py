@@ -31,6 +31,7 @@ from .dataset import (
     decode_fields,
     dense_target,
 )
+from .muon import MuonAdamW
 
 AMP_DTYPES: dict[str, torch.dtype] = {
     "float16": torch.float16,
@@ -129,10 +130,17 @@ class Trainer:
     def param_count(self) -> int:
         return sum(p.numel() for p in self.model.parameters())
 
-    def _make_optimizer(self) -> optim.Optimizer:
+    def _make_optimizer(self) -> optim.Optimizer | MuonAdamW:
         cfg = self.config
         kwargs = dict(lr=cfg.learning_rate, betas=(cfg.beta1, cfg.beta2))
         params = list(self.model.parameters())
+        matrices = []
+        if cfg.optimizer == "muon":
+            if not hasattr(self.model, "muon_matrices"):
+                raise ValueError(f"optimizer: muon needs the encoder, not {self.model.spec()['arch']}")
+            matrices = self.model.muon_matrices()
+            on_muon = {id(p) for p, _ in matrices}
+            params = [p for p in params if id(p) not in on_muon]
         if cfg.weight_decay > 0:
             # Decay matrices only: norm weights, biases and scalar gains stay free.
             params = [
@@ -142,6 +150,13 @@ class Trainer:
         # One fused kernel for all parameters on the GPU (with the FP16 loss scaler it also skips
         # an overflowed step on the GPU, without the host sync of the unfused path).
         kwargs["fused"] = self.device.type == "cuda"
+        if cfg.optimizer == "muon":
+            if not isinstance(params[0], dict):
+                params = [{"params": params}]
+            return MuonAdamW(
+                matrices, params, muon_lr=cfg.muon_lr, momentum=cfg.muon_momentum,
+                muon_weight_decay=cfg.muon_weight_decay, **kwargs,
+            )  # fmt: skip
         if cfg.optimizer == "adamw":
             return optim.AdamW(params, **kwargs)
         return optim.Adam(params, **kwargs)
@@ -382,7 +397,7 @@ class Trainer:
         log = log or expensive
         lr = self.lr_at(self.step)
         for group in self.optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = lr * group.get("lr_scale", 1.0)
         self.optimizer.zero_grad(set_to_none=True)
 
         fields = {name: getattr(batch, name) for name in _STEP_FIELDS}
