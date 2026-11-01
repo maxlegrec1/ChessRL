@@ -9,12 +9,8 @@ head scoring (from-square, to-square) pairs. Attention runs as one fused kernel
 (scaled_dot_product_attention, the pair bias as its additive mask); cpp/net/encoder_kernel.cu
 runs the same network for self-play.
 
-Canonical boards (canonical=True): with black to move the network sees the position mirrored (ranks reversed,
-colours and castling rights swapped, the side-to-move plane set to white), so it always plays white. It scores the
-moves of white's vocabulary, CANONICAL_VOCAB (policy_index without black's promotions and the special tokens: lc0's
-1,858 moves), and returns them in the usual 1,929 absolute slots, mirrored back for black; the slots the side to
-move cannot play hold ABSENT_LOGIT. Inputs and outputs keep the absolute convention, so records, the trainer's
-targets and the search are the same for both kinds of network.
+Inputs are canonical (src/models/small/fen_encoder.py: the side to move plays white) and the policy
+covers white's 1,858 moves (src/models/small/vocab.py).
 """
 
 from __future__ import annotations
@@ -53,59 +49,15 @@ def _token(square: int) -> int:
     return (7 - square // 8) * 8 + square % 8
 
 
-def _is_board_move(move: str) -> bool:
-    return len(move) >= 4 and move[0] in "abcdefgh" and move[1].isdigit()
-
-
-def _mirror_move(move: str) -> str:
-    """The move with ranks 1-8 reversed, files unchanged (python-chess Board.mirror())."""
-    return f"{move[0]}{9 - int(move[1])}{move[2]}{9 - int(move[3])}{move[4:]}"
-
-
-# White's moves: the board moves of policy_index without black's promotions (to rank 1), in policy_index order.
-CANONICAL_VOCAB = [m for m in policy_index if _is_board_move(m) and not (len(m) == 5 and m[3] == "1")]
-# The logit of an absolute slot the side to move cannot play (finite: a zero target times its log-probability
-# stays 0; exact in FP16).
-ABSENT_LOGIT = -1.0e4
-# Input planes (src/models/small/fen_encoder.py): 8 history slots of 13 (white P N B R Q K, black P N B R Q K,
-# repetition), then side to move, en passant, castling WK WQ BK BQ, halfmove clock.
-_STM_PLANE = 104
-
-
-def canonical_maps() -> tuple[torch.Tensor, torch.Tensor]:
-    """Per absolute vocab entry, its CANONICAL_VOCAB entry with white to move (the same move) and with black to
-    move (the move rank-mirrored); -1 where that side cannot play it."""
-    idx = {m: i for i, m in enumerate(CANONICAL_VOCAB)}
-    white = [idx.get(m, -1) if _is_board_move(m) else -1 for m in policy_index]
-    black = [idx.get(_mirror_move(m), -1) if _is_board_move(m) else -1 for m in policy_index]
-    return torch.tensor(white), torch.tensor(black)
-
-
-def _canonical_plane_order() -> torch.Tensor:
-    """For each input plane of a mirrored position, the plane it is read from: white's and black's pieces
-    swapped in every history slot, and the castling rights."""
-    order = list(range(INPUT_PLANES))
-    for slot in range(8):
-        for k in range(6):
-            order[13 * slot + k], order[13 * slot + 6 + k] = 13 * slot + 6 + k, 13 * slot + k
-    order[106], order[108], order[107], order[109] = 108, 106, 109, 107
-    return torch.tensor(order)
-
-
-def _vocab_tables(vocab: list[str] = policy_index) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Per vocab entry: from-token, to-token, promotion type (0 none, -1 special)."""
+def _vocab_tables() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per vocab entry: from-token, to-token, promotion type (0 none or knight, 1-3 queen, rook, bishop)."""
     frm, to, promo = [], [], []
-    for move in vocab:
-        if _is_board_move(move):
-            f = (int(move[1]) - 1) * 8 + "abcdefgh".index(move[0])
-            t = (int(move[3]) - 1) * 8 + "abcdefgh".index(move[2])
-            frm.append(_token(f))
-            to.append(_token(t))
-            promo.append(_PROMO.get(move[4:], 0))
-        else:
-            frm.append(0)
-            to.append(0)
-            promo.append(-1)
+    for move in policy_index:
+        f = (int(move[1]) - 1) * 8 + "abcdefgh".index(move[0])
+        t = (int(move[3]) - 1) * 8 + "abcdefgh".index(move[2])
+        frm.append(_token(f))
+        to.append(_token(t))
+        promo.append(_PROMO.get(move[4:], 0))
     return torch.tensor(frm), torch.tensor(to), torch.tensor(promo)
 
 
@@ -208,11 +160,9 @@ class Block(nn.Module):
 
 
 class EncoderModel(nn.Module):
-    def __init__(
-        self, d_model: int = 128, layers: int = 4, heads: int = 8, d_ff: int = 256, canonical: bool = False
-    ):
+    def __init__(self, d_model: int = 128, layers: int = 4, heads: int = 8, d_ff: int = 256):
         super().__init__()
-        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff, "canonical": canonical}
+        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff}
         d = d_model
         self.embed = nn.Linear(INPUT_PLANES, d)
         self.pos = nn.Parameter(torch.randn(64, d) * 0.02)
@@ -223,25 +173,10 @@ class EncoderModel(nn.Module):
         self.pol_q = nn.Linear(d, d)
         self.pol_k = nn.Linear(d, d)
         self.promo = nn.Parameter(torch.zeros(4, d))
-        if canonical:
-            frm, to, promo = _vocab_tables(CANONICAL_VOCAB)
-            white, black = canonical_maps()
-            self.register_buffer("canon_white", white, persistent=False)
-            self.register_buffer("canon_black", black, persistent=False)
-            self.register_buffer("canon_planes", _canonical_plane_order(), persistent=False)
-            stm = F.one_hot(torch.tensor(_STM_PLANE), INPUT_PLANES).float()
-            self.register_buffer("stm_keep", 1.0 - stm, persistent=False)
-            self.register_buffer("stm_white", stm, persistent=False)
-        else:
-            self.special_logit = nn.Parameter(torch.full((), -10.0))
-            frm, to, promo = _vocab_tables()
-        self.register_buffer("v_from", frm, persistent=False)
-        self.register_buffer("v_to", to, persistent=False)
-        self.register_buffer("v_promo", promo.clamp_min(0), persistent=False)
-        self.register_buffer("v_special", promo < 0, persistent=False)
+        frm, to, promo = _vocab_tables()
         # Flat indices into the [64 x 64] from/to scores and [4 x 64] promotion scores.
         self.register_buffer("v_ft", frm * 64 + to, persistent=False)
-        self.register_buffer("v_pt", promo.clamp_min(0) * 64 + to, persistent=False)
+        self.register_buffer("v_pt", promo * 64 + to, persistent=False)
 
         def mlp(out: int) -> nn.Sequential:
             return nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, out))
@@ -264,13 +199,7 @@ class EncoderModel(nn.Module):
 
     def forward(self, x, *, return_all: bool = False):
         b = x.shape[0]
-        x = x.reshape(b, 64, INPUT_PLANES)
-        if self.cfg["canonical"]:
-            # Black to move: ranks reversed (rows are ranks 8 to 1), colours swapped; every row then plays white.
-            black = x[:, 0, _STM_PLANE] < 0.5
-            mirrored = x.view(b, 8, 8, INPUT_PLANES).flip(1).reshape(b, 64, INPUT_PLANES)[..., self.canon_planes]
-            x = torch.where(black[:, None, None], mirrored, x) * self.stm_keep + self.stm_white
-        x0 = self.embed(x) + self.pos
+        x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos
         # The copy re-injected into every layer is FP16 under autocast, as the self-play kernel keeps
         # it: half the bytes of each layer's FP32 read and of its gradient. The residual stream
         # starts from it with FP16_RESIDUAL, from the FP32 embedding otherwise.
@@ -290,11 +219,6 @@ class EncoderModel(nn.Module):
         ft = (q @ kt).reshape(b, 64 * 64)
         pt = (self.promo @ kt).reshape(b, 4 * 64)
         logits = (ft[:, self.v_ft] + pt[:, self.v_pt]) * scale
-        if self.cfg["canonical"]:
-            idx = torch.where(black[:, None], self.canon_black, self.canon_white)  # [B, 1929]
-            logits = torch.where(idx >= 0, logits.gather(1, idx.clamp_min(0)), ABSENT_LOGIT)
-        else:
-            logits = torch.where(self.v_special, self.special_logit.to(logits.dtype), logits)
         if not return_all:
             return logits
 

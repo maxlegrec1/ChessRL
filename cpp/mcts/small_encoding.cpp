@@ -53,28 +53,6 @@ size_t encodeSmallIndex(int row, int col, int plane)
         + static_cast<size_t>(plane);
 }
 
-// Fill 12 piece planes in `features` starting at channel `base` for one
-// position represented by its 12 piece bitboards (W:PNBRQK then B:PNBRQK).
-// Convention matches the Python encoder: `tensor[7-rank, file, base+plane]`.
-void fillPiecePlanesFromBitboards(
-    std::vector<float>& features,
-    const std::array<std::uint64_t, 12>& bbs,
-    int base)
-{
-    for (int plane = 0; plane < kSmallPiecePlanes; ++plane)
-    {
-        std::uint64_t bb = bbs[static_cast<size_t>(plane)];
-        while (bb != 0ULL)
-        {
-            const int squareIndex = __builtin_ctzll(bb);
-            bb &= bb - 1;
-            const int rank = squareIndex / kSmallBoardSize;
-            const int file = squareIndex % kSmallBoardSize;
-            features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, base + plane)] = 1.0F;
-        }
-    }
-}
-
 // Snapshot a chess::Board into the 12 piece bitboards (same order as the
 // PiecePlanes struct). Inline duplicate of snapshot_piece_planes() in
 // common.cpp — keeping it here avoids dragging that dependency into the
@@ -98,75 +76,20 @@ std::array<std::uint64_t, 12> currentBoardBitboards(const chess::Board& board)
     return bbs;
 }
 
+void pack_small_position_impl(
+    const chess::Board& board,
+    const chessrl::mcts::HistoryStack& history,
+    SmallPackedPosition& out);
+std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p);
+
+// The dense planes: the packed (canonical) position expanded on the CPU, so the two paths cannot differ.
 std::vector<float> encodeSmallFeatures(
     const chess::Board& board,
     const chessrl::mcts::HistoryStack& history)
 {
-    std::vector<float> features(
-        static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes, 0.0F);
-
-    auto fillPlane = [&](int plane, float value) {
-        for (int r = 0; r < kSmallBoardSize; ++r)
-        {
-            for (int c = 0; c < kSmallBoardSize; ++c)
-            {
-                features[encodeSmallIndex(r, c, plane)] = value;
-            }
-        }
-    };
-
-    // Slot 0: current position. We always use `board`'s actual bitboards
-    // (rather than history[0]) so that a stale or incorrectly-maintained
-    // ring buffer cannot poison the current planes.
-    const auto current_bbs = currentBoardBitboards(board);
-    fillPiecePlanesFromBitboards(features, current_bbs, /*base=*/0);
-    if (history[0].repetition)
-    {
-        fillPlane(kSmallPiecePlanes, 1.0F);  // plane 12
-    }
-
-    // Slots 1..7: historical positions. base = 13 + (slot-1)*13.
-    for (int slot = 1; slot < kSmallHistoryDepth; ++slot)
-    {
-        const auto& past = history[static_cast<size_t>(slot)];
-        if (!past.valid)
-        {
-            continue;
-        }
-        const int base = kSmallPiecePlanes + 1 + (slot - 1) * kSmallHistBlock;
-        fillPiecePlanesFromBitboards(features, past.bitboards, base);
-        if (past.repetition)
-        {
-            fillPlane(base + kSmallPiecePlanes, 1.0F);
-        }
-    }
-
-    // Globals (planes 104..110).
-    fillPlane(kSmallPlaneSTM, board.sideToMove() == chess::Color::WHITE ? 1.0F : 0.0F);
-
-    const auto enPassant = board.enpassantSq();
-    if (enPassant.is_valid())
-    {
-        const int idxSq = enPassant.index();
-        const int rank = idxSq / kSmallBoardSize;
-        const int file = idxSq % kSmallBoardSize;
-        features[encodeSmallIndex(kSmallBoardSize - 1 - rank, file, kSmallPlaneEP)] = 1.0F;
-    }
-
-    const auto castling = board.castlingRights();
-    fillPlane(kSmallPlaneCastlingWK,
-        castling.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::KING_SIDE) ? 1.0F : 0.0F);
-    fillPlane(kSmallPlaneCastlingWQ,
-        castling.has(chess::Color::WHITE, chess::Board::CastlingRights::Side::QUEEN_SIDE) ? 1.0F : 0.0F);
-    fillPlane(kSmallPlaneCastlingBK,
-        castling.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::KING_SIDE) ? 1.0F : 0.0F);
-    fillPlane(kSmallPlaneCastlingBQ,
-        castling.has(chess::Color::BLACK, chess::Board::CastlingRights::Side::QUEEN_SIDE) ? 1.0F : 0.0F);
-
-    const float halfMoveNorm = std::min(1.0F, static_cast<float>(board.halfMoveClock()) / 100.0F);
-    fillPlane(kSmallPlaneHMC, halfMoveNorm);
-
-    return features;
+    SmallPackedPosition packed;
+    pack_small_position_impl(board, history, packed);
+    return expand_packed_to_dense_impl(packed);
 }
 
 // Convenience wrapper: encode a board with no history (slots 1..7 zero,
@@ -234,10 +157,12 @@ void pack_small_position_impl(
 
     const auto hm = board.halfMoveClock();
     out.halfmove = static_cast<std::uint8_t>(hm > 255u ? 255u : hm);
+
+    // Canonical: the network always plays white.
+    if (!out.stm) mirror_to_white(out);
 }
 
-// CPU reference expansion. Bit-identical to encodeSmallFeatures() — same
-// plane indices, same rank-flip (row = 7 - rank), same globals. The GPU
+// CPU reference expansion of a (canonical) packed position: the dense planes, row = 7 - rank. The GPU
 // kernel must reproduce this exactly.
 std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p)
 {

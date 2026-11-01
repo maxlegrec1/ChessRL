@@ -46,4 +46,35 @@ constexpr int kPackPlaneCBQ    = kPackPlaneSTM + 5;               // 109
 constexpr int kPackPlaneHMC    = kPackPlaneSTM + 6;               // 110
 constexpr int kPackElems       = kPackBoard * kPackBoard * kPackPlanes; // 7104
 
+// The canonical view: the network always plays white, so a position with black to move is seen mirrored, ranks
+// reversed and white's and black's pieces and castling rights swapped (python-chess Board.mirror(),
+// src/models/small/fen_encoder.py). Squares are a1 = 0 .. h8 = 63.
+inline int mirror_square(int sq) { return sq ^ 56; }
+
+// 12 piece bitboards, W:PNBRQK then B:PNBRQK, in the other side's view.
+inline void mirror_bitboards(std::uint64_t* bbs)
+{
+    for (int k = 0; k < 6; ++k)
+    {
+        const std::uint64_t white = bbs[k];
+        bbs[k] = __builtin_bswap64(bbs[k + 6]);
+        bbs[k + 6] = __builtin_bswap64(white);
+    }
+}
+
+// Castling rights WK = 1, WQ = 2, BK = 4, BQ = 8 in the other side's view.
+inline std::uint8_t mirror_castling(std::uint8_t c)
+{
+    return static_cast<std::uint8_t>(((c >> 2) & 0x3u) | ((c & 0x3u) << 2));
+}
+
+// A packed position with black to move as white sees it: every history slot mirrored, side to move white.
+inline void mirror_to_white(SmallPackedPosition& p)
+{
+    for (auto& slot : p.bitboards) mirror_bitboards(slot);
+    if (p.ep_square >= 0) p.ep_square = static_cast<std::int16_t>(mirror_square(p.ep_square));
+    p.castling = mirror_castling(p.castling);
+    p.stm = 1;
+}
+
 } // namespace chessrl::mcts::single

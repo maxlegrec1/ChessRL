@@ -119,9 +119,6 @@ class ModelConfig:
     layers: int = 4
     heads: int = 8
     d_ff: int = 256
-    # Canonical boards (encoder): with black to move the network sees the position mirrored, colours swapped,
-    # so it always plays white (src/models/encoder.py).
-    canonical: bool = False
 
 
 @dataclass
@@ -198,7 +195,6 @@ class TrainingConfig:
     # value and mlh, trained on game results / true plies left (AlphaZero).
     # "q_value" and "blend" change only the value (see ExportWrapper in src/export/heads.py).
     search_heads: str = "search"
-    mirror_prob: float = 0.5  # colour-flip augmentation probability
     compile: bool = False  # torch.compile the training step's forward and losses
     # FP16 accumulators in the FP16 matrix multiplies (torch.backends.cuda.matmul.
     # allow_fp16_accumulation): twice the tensor-core rate on GeForce cards. Neutral at today's

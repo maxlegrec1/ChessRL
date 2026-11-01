@@ -60,7 +60,6 @@ Launcher flags (`python -m src.run`):
 | `log_every` | 5 | 50 | Steps between rows of `metrics/train.jsonl` (and W&B). The console prints every 10 rows. |
 | `policy_target` | `visits` | `played` | `visits`: cross-entropy to the record's visit distribution. `played`: cross-entropy to the move played. Both losses are logged either way. The default `loss_weights.policy` (0.1) is the one for `played`; the recipe pairs `visits` with 1.0. |
 | `search_heads` | `outcome` | `search` | Which heads the engine gives MCTS. `outcome`: value and mlh, trained on game results. `search`: value_q and mlh_q, trained on the search's own estimates. `q_value` (value_q with mlh) and `blend` (the average of both WDLs, with mlh) are value-only variants. Applied at export from the config saved in each checkpoint, so a change affects networks exported from later checkpoints; `src.export.to_cnet --search_heads` overrides it. |
-| `mirror_prob` | 0.5 | 0.5 | Probability that a sampled record is colour-flipped (ranks mirrored, colours swapped, moves remapped). The only augmentation. |
 | `compile` | true | false | Wrap the model in `torch.compile` for training: the step takes 34 ms instead of 102 on an RTX 4090 (batch 2,048, the 128 x 4 encoder); the first step compiles, about a minute, and growing the network compiles again. |
 | `fp16_accumulation` | true | false | FP16 accumulators in the trainer's FP16 matrix multiplies (`torch.backends.cuda.matmul.allow_fp16_accumulation`), as in the self-play kernel: twice the tensor-core rate on GeForce cards. Neutral at the 128 x 4 encoder's size (the multiplies are bound by memory). The weight gradients, summed over the whole batch, keep FP32 accumulators. |
 | `fp16_residual` | true | false | The encoder's residual stream in FP16 during training (under CUDA autocast), its gradient too: half the bytes the fused kernels move through it. Its rounding adds about a quarter to the FP16 noise the step already has (`docs/TRAINER_SPEED.md`). The self-play kernel keeps the stream in FP32. false: FP32. |
@@ -84,7 +83,6 @@ trainer rebuilds the architecture stored in its checkpoint (`model_spec`) instea
 | `layers` | 4 | 4 | Encoder blocks. |
 | `heads` | 8 | 8 | Attention heads (`d_model` must divide by it). |
 | `d_ff` | 256 | 256 | Hidden width of the SwiGLU feed-forward. |
-| `canonical` | false | false | Encoder only. With black to move the network reads the position mirrored (ranks reversed, colours and castling rights swapped, side to move white), so it always plays white, and scores white's 1,858 moves (lc0's vocabulary); its outputs are mapped back to the 1,929 absolute policy slots, so records, the trainer and the search do not change. The colour-flip augmentation (`mirror_prob`) is then an exact no-op. The fused kernel (`.cnet` config value 8) mirrors on the GPU. |
 | `blocks` | *unset* | 4 | ResNet residual blocks. |
 | `channels` | *unset* | 64 | ResNet trunk width. |
 

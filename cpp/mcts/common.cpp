@@ -12,6 +12,45 @@
 namespace chessrl::mcts
 {
 
+std::string mirror_uci(const std::string& uci)
+{
+    std::string out = uci;
+    if (out.size() >= 4)
+    {
+        out[1] = static_cast<char>('1' + '8' - out[1]);
+        out[3] = static_cast<char>('1' + '8' - out[3]);
+    }
+    return out;
+}
+
+std::string mirror_fen(const std::string& fen)
+{
+    std::istringstream in(fen);
+    std::string placement, side, castling, ep, rest;
+    in >> placement >> side >> castling >> ep;
+    std::getline(in, rest);  // " halfmove fullmove", unchanged
+    std::vector<std::string> ranks;
+    std::stringstream rows(placement);
+    for (std::string row; std::getline(rows, row, '/');) ranks.push_back(row);
+    std::string mirrored;
+    for (auto it = ranks.rbegin(); it != ranks.rend(); ++it)
+    {
+        if (!mirrored.empty()) mirrored += '/';
+        for (const char c : *it)
+            mirrored += std::isupper(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(c))
+                                                                    : static_cast<char>(std::toupper(c));
+    }
+    std::string rights;
+    for (const char c : std::string("KQkq"))  // white's rights become black's and the reverse, in FEN order
+    {
+        const char from = std::isupper(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(c))
+                                                                     : static_cast<char>(std::toupper(c));
+        if (castling.find(from) != std::string::npos) rights += c;
+    }
+    if (ep.size() == 2) ep[1] = static_cast<char>('1' + '8' - ep[1]);
+    return mirrored + (side == "w" ? " b " : " w ") + (rights.empty() ? "-" : rights) + " " + ep + rest;
+}
+
 PiecePlanes snapshot_piece_planes(const chess::Board& board)
 {
     PiecePlanes snap;

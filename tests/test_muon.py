@@ -95,7 +95,7 @@ def test_trainer_with_muon(tmp_path):
     assert isinstance(trainer.optimizer, MuonAdamW)
     losses = []
     for _ in range(3):
-        batch = trainer.buffer.sample_batch(cfg.batch_size, mirror_prob=0.5)
+        batch = trainer.buffer.sample_batch(cfg.batch_size)
         metrics = trainer._train_step(batch, expensive=False, log=True)
         losses.append(float(metrics["loss/total"]))
         trainer.step += 1

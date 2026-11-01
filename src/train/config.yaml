@@ -28,7 +28,6 @@ fp16_accumulation: true
 # The encoder's residual stream in FP16 during training: half its traffic, rounding noise of the
 # same size as the FP16 matrix multiplies already add (docs/TRAINER_SPEED.md).
 fp16_residual: true
-mirror_prob: 0.5 # colour-flip augmentation
 log_every: 5
 
 model:

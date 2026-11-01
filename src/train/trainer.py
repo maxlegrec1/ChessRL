@@ -41,18 +41,19 @@ AMP_DTYPES: dict[str, torch.dtype] = {
     "bf16": torch.bfloat16,
 }
 
-_CASTLE_IDX = torch.tensor(sorted(CASTLE_INDEX))
-_E1, _E8 = 4, 60
+_CASTLE_IDX = torch.tensor(CASTLE_INDEX)
+_E1 = 4
 # The batch fields the step's compiled part reads (the FENs stay outside it).
 _STEP_FIELDS = (
-    "cur_bb", "past_bb", "cur_rep", "past_rep", "white_to_move", "castling", "ep", "halfmove",
-    "mirror", "flags", "played_idx", "policy_idx", "policy_prob", "value_outcome", "value_mcts",
+    "cur_bb", "past_bb", "cur_rep", "past_rep", "castling", "ep", "halfmove",
+    "flags", "played_idx", "policy_idx", "policy_prob", "value_outcome", "value_mcts",
     "plies_remaining", "backed_plies",
 )  # fmt: skip
 
 
 def legal_move_probability(probs: torch.Tensor, fens: list[str]) -> float:
-    """Mean policy mass on legal moves (python-chess; call on a handful of rows)."""
+    """Mean policy mass on legal moves (python-chess; call on a handful of rows). The records' FENs are
+    canonical (white to move), so the legal moves are already in the vocabulary's view."""
     total = 0.0
     for p, fen in zip(probs, fens, strict=True):
         board = chess.Board(fen)
@@ -302,7 +303,7 @@ class Trainer:
         self._wait_for_warmup()
         cfg = self.config
         target_k = max(0.1, float(cfg.data.target_k))
-        prefetch = Prefetcher(self.buffer, cfg.batch_size, cfg.mirror_prob)
+        prefetch = Prefetcher(self.buffer, cfg.batch_size)
 
         # Token-bucket pacing: the trainer may consume target_k samples per
         # record self-play has written since training started, re-checked every
@@ -426,8 +427,7 @@ class Trainer:
         the scalars to log (the diagnostics too when with_metrics) and the policy's log-probs."""
         cfg = self.config
         inputs = decode_fields(
-            f["cur_bb"], f["past_bb"], f["cur_rep"], f["past_rep"], f["white_to_move"],
-            f["castling"], f["ep"], f["halfmove"], f["mirror"],
+            f["cur_bb"], f["past_bb"], f["cur_rep"], f["past_rep"], f["castling"], f["ep"], f["halfmove"],
         )  # fmt: skip
         full = (f["flags"] & FLAG_FULL_SEARCH) > 0
         target_mlh = (f["plies_remaining"].clamp_min(0.0) / 25.0).clamp_max(4.0)
@@ -485,7 +485,7 @@ class Trainer:
             vm = value_mcts
             castle_cand = torch.isin(played_idx, _CASTLE_IDX.to(played_idx.device))
             cur_bb = f["cur_bb"]
-            kings_home = (((cur_bb[:, 5] >> _E1) & 1) > 0) | (((cur_bb[:, 11] >> _E8) & 1) > 0)
+            kings_home = ((cur_bb[:, 5] >> _E1) & 1) > 0
             metrics = {
                 "loss/total": total_loss.detach(),
                 "loss/policy": policy_loss.detach(),

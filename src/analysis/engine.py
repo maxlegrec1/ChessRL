@@ -1,8 +1,9 @@
 """CPU analysis engine: a checkpoint's policy/value heads plus a PUCT search.
 
-Mirrors the self-play engine's conventions (cpp/mcts/mcts_small.cpp): absolute
-111-plane input with 7 plies of history and repetition flags, UCI policy
-vocabulary (castling as the king's move, knight promotions as the bare move),
+Mirrors the self-play engine's conventions (cpp/mcts/mcts_small.cpp): canonical
+111-plane input with 7 plies of history and repetition flags (a position with
+black to move is seen mirrored, as white), UCI policy vocabulary in white's view
+(castling as the king's move, knight promotions as the bare move),
 WDL from the side to move, values in [-1, 1], unvisited children at Q = 0,
 U = cpuct * P * sqrt(N_parent) / (1 + N). No root noise (this is analysis).
 Leaves are evaluated in small batches with virtual loss.
@@ -37,15 +38,15 @@ import torch
 
 from src.models.factory import model_from_checkpoint
 from src.models.small.fen_encoder import fen_to_tensor
-from src.models.small.vocab import policy_to_idx
+from src.models.small.vocab import canonical_key, policy_to_idx
 
 HISTORY = 7
 
 
-def policy_key(move: chess.Move) -> str:
-    """The vocabulary's name for a move (knight promotions are the bare move)."""
-    u = move.uci()
-    return u[:4] if move.promotion == chess.KNIGHT else u
+def policy_key(move: chess.Move, white_to_move: bool = True) -> str:
+    """The vocabulary's name for a move of the side to move: in white's view (mirrored when black moves), knight
+    promotions as the bare move."""
+    return canonical_key(move.uci(), white_to_move)
 
 
 def encode(board: chess.Board) -> np.ndarray:
@@ -97,7 +98,7 @@ class Net:
         out = []
         for i, b in enumerate(boards):
             moves = list(b.legal_moves)
-            idx = [policy_to_idx.get(policy_key(m), -1) for m in moves]
+            idx = [policy_to_idx.get(policy_key(m, b.turn == chess.WHITE), -1) for m in moves]
             lg = np.array([logits[i, j] if j >= 0 else -1e9 for j in idx], dtype=np.float64)
             pr = np.exp(lg - lg.max()) if len(lg) else lg
             pr = pr / pr.sum() if len(pr) else pr

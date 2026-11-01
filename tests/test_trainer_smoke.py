@@ -41,7 +41,7 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     losses = []
     for _ in range(4):
         trainer._maybe_grow()
-        batch = trainer.buffer.sample_batch(cfg.batch_size, mirror_prob=0.5)
+        batch = trainer.buffer.sample_batch(cfg.batch_size)
         metrics = trainer._train_step(batch, expensive=True)
         losses.append(float(metrics["loss/total"]))
         trainer.step += 1

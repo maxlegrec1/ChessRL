@@ -27,7 +27,7 @@ constexpr int kSmallPlaneCastlingWQ = kSmallPlaneSTM + 3;                  // 10
 constexpr int kSmallPlaneCastlingBK = kSmallPlaneSTM + 4;                  // 108
 constexpr int kSmallPlaneCastlingBQ = kSmallPlaneSTM + 5;                  // 109
 constexpr int kSmallPlaneHMC = kSmallPlaneSTM + 6;                         // 110
-constexpr int kSmallPolicySize = 1929;
+constexpr int kSmallPolicySize = 1858;
 constexpr int kSmallValueSize = 3;
 
 // Drift guard: the kernel-shared constants in packed_position.hpp MUST

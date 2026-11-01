@@ -1,6 +1,7 @@
 #pragma once
 
-// The policy vocabulary: the network's 1,929 move tokens, read once from
+// The policy vocabulary: the side to move's moves in white's view (positions with black to move are
+// mirrored), the network's 1,858 move tokens (lc0's set), read once from
 // cpp/policy_index.txt (relative to the working directory, so run from the repo root).
 // Implemented in policy_vocab.cpp, which needs no CUDA, so the search and the C++ tests
 // build without it.
@@ -17,7 +18,7 @@ namespace chessrl::vocab
 class PolicyVocab
 {
 public:
-    static constexpr std::size_t kSize = 1929;
+    static constexpr std::size_t kSize = 1858;
 
     PolicyVocab();
 

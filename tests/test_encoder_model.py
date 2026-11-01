@@ -1,7 +1,7 @@
 import chess
 import torch
 
-from src.models.encoder import EncoderModel, _token
+from src.models.encoder import EncoderModel, _token, _vocab_tables
 from src.models.factory import build_model, model_from_checkpoint
 from src.models.small.vocab import policy_to_idx
 
@@ -9,7 +9,7 @@ from src.models.small.vocab import policy_to_idx
 def test_shapes_and_spec():
     m = build_model({"arch": "encoder", "d_model": 64, "layers": 2, "heads": 4, "d_ff": 128})
     out = m(torch.rand(3, 8, 8, 111), return_all=True)
-    assert [tuple(o.shape) for o in out] == [(3, 1929), (3, 3), (3, 3), (3,), (3,)]
+    assert [tuple(o.shape) for o in out] == [(3, 1858), (3, 3), (3, 3), (3,), (3,)]
     assert m.spec()["arch"] == "encoder"
     m2 = model_from_checkpoint({"model": m.state_dict(), "model_spec": m.spec()})
     x = torch.rand(2, 8, 8, 111)
@@ -18,9 +18,9 @@ def test_shapes_and_spec():
 
 def test_policy_logit_uses_from_and_to_squares():
     # e2e4 must read the query at e2's token and the key at e4's token.
-    m = EncoderModel(d_model=32, layers=1, heads=4, d_ff=64)
+    frm, to, _ = _vocab_tables()
     i = policy_to_idx["e2e4"]
-    assert int(m.v_from[i]) == _token(chess.E2) and int(m.v_to[i]) == _token(chess.E4)
+    assert int(frm[i]) == _token(chess.E2) and int(to[i]) == _token(chess.E4)
     assert _token(chess.A1) == 56 and _token(chess.H8) == 7
 
 
@@ -38,9 +38,9 @@ def test_policy_head_matches_naive_formula():
         h = blk(h, x0, m.pair_bias)
     h = m.norm(h)
     q, k = m.pol_q(h), m.pol_k(h)
-    naive = ((q[:, m.v_from] + m.promo[m.v_promo]) * k[:, m.v_to]).sum(-1) / 32**0.5
-    real = ~m.v_special
-    torch.testing.assert_close(logits[:, real], naive[:, real], rtol=1e-4, atol=1e-5)
+    frm, to, promo = _vocab_tables()
+    naive = ((q[:, frm] + m.promo[promo]) * k[:, to]).sum(-1) / 32**0.5
+    torch.testing.assert_close(logits, naive, rtol=1e-4, atol=1e-5)
 
 
 def test_rmsnorm_is_fp16_safe_on_a_grown_residual_stream():

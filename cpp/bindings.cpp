@@ -38,7 +38,7 @@ py::dict summary_to_python(const chessrl::mcts::MctsSummary& summary)
     return result;
 }
 
-// Fused-network output records as numpy arrays: policy logits [B, 1929], value WDL
+// Fused-network output records as numpy arrays: policy logits [B, 1858], value WDL
 // [B, 3], mlh [B], mlh_q [B].
 py::dict records_to_python(const std::vector<unsigned char>& records, int batch)
 {
@@ -195,17 +195,16 @@ PYBIND11_MODULE(_inference_cpp, m)
 
     m.def(
         "fused_benchmark",
-        [](const std::string& path, int batch, int iterations, int streams, bool black_to_move) {
+        [](const std::string& path, int batch, int iterations, int streams) {
             py::gil_scoped_release release;
             const chessrl::net::EncoderNet net(path);
-            return chessrl::net::benchmark(net, batch, iterations, streams, black_to_move);
+            return chessrl::net::benchmark(net, batch, iterations, streams);
         },
         py::arg("path"),
         py::arg("batch"),
         py::arg("iterations") = 200,
         py::arg("streams") = 1,
-        py::arg("black_to_move") = false,
-        "Fused-network throughput (positions/s) on the start position (with black to move if asked).");
+        "Fused-network throughput (positions/s) on the start position.");
 
     m.def(
         "small_mcts_search_batch",

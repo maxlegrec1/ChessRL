@@ -8,7 +8,7 @@ def test_small_forward_policy_only():
     x = torch.zeros(2, 8, 8, 111)
     with torch.no_grad():
         policy = m(x)
-    assert policy.shape == (2, 1929)
+    assert policy.shape == (2, 1858)
 
 
 def test_small_forward_return_all():
@@ -16,7 +16,7 @@ def test_small_forward_return_all():
     x = torch.zeros(2, 8, 8, 111)
     with torch.no_grad():
         policy, value, value_q, mlh, mlh_q = m(x, return_all=True)
-    assert policy.shape == (2, 1929)
+    assert policy.shape == (2, 1858)
     assert value.shape == (2, 3)
     assert value_q.shape == (2, 3)
     assert mlh.shape == (2,)

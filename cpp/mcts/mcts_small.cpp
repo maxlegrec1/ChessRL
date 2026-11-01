@@ -116,10 +116,13 @@ const std::array<int32_t, kVocabLutSize>& vocab_lut()
     return lut;
 }
 
-inline int vocab_index_for_move_fast(const chess::Move& move) noexcept
+// `mirror`: black to move, the move looked up in white's view (the vocabulary is the side to move's moves as
+// white; mcts/packed_position.hpp).
+inline int vocab_index_for_move_fast(const chess::Move& move, bool mirror) noexcept
 {
-    const int from = static_cast<int>(move.from().index());
-    const int to   = static_cast<int>(move.to().index());
+    const int flip = mirror ? 56 : 0;
+    const int from = static_cast<int>(move.from().index()) ^ flip;
+    const int to   = static_cast<int>(move.to().index()) ^ flip;
     int promo = 0;
     if (move.typeOf() == chess::Move::PROMOTION)
     {
@@ -748,6 +751,7 @@ private:
         int mapped_count = 0;
 
         const bool use_fast_lut = !board.chess960();
+        const bool mirror = board.sideToMove() == chess::Color::BLACK;
         for (const auto& move : legal_moves)
         {
             MovePrior entry;
@@ -762,12 +766,12 @@ private:
             int policy_index = -1;
             if (use_fast_lut && move.typeOf() != chess::Move::CASTLING)
             {
-                policy_index = vocab_index_for_move_fast(move);
+                policy_index = vocab_index_for_move_fast(move, mirror);
             }
             if (policy_index < 0)
             {
                 const std::string key = move_to_vocab_key(board, move);
-                auto it = vocab_index_.find(key);
+                auto it = vocab_index_.find(mirror ? mirror_uci(key) : key);
                 if (it != vocab_index_.end()) policy_index = it->second;
             }
             if (policy_index >= 0)

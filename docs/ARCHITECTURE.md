@@ -140,10 +140,8 @@ are drawn uniformly from a window over the newest records that grows with N, the
 written (KataGo's rule): W = c (1 + β ((N/c)^α - 1) / α) for N > c and W = N below, capped by the
 buffer, with c = `window_c` (250,000), α 0.75, β 0.4 (751k records at N = 2M, the whole buffer
 from about 8.5M). The window needs the FIFO ring; otherwise the whole buffer is sampled. Torn
-rows (wrong version byte) are drawn again. With
-probability `mirror_prob` (0.5) a sample is colour-flipped (ranks mirrored;
-colours, castling rights and side to move swapped; move indices remapped). The planes are decoded
-from the bitboards on the GPU (`decode_planes`).
+rows (wrong version byte) are drawn again. Records are canonical (below), so there is no colour
+flip to apply. The planes are decoded from the bitboards on the GPU (`decode_planes`).
 
 **Losses**, summed with the `loss_weights`:
 
@@ -223,13 +221,22 @@ Self-play reopens the buffer, cuts a partial trailing record, takes the write co
 architecture and its sizes; none means the 4 x 64 ResNet). Both networks take the same input, have
 the same five heads, and return the policy logits, or all five outputs with `return_all=True`.
 
+**Canonical positions.** The network always plays white: a position with black to move is seen
+mirrored, ranks reversed and white's and black's pieces, castling rights and en passant square
+swapped, history included (python-chess's `Board.mirror()`), and black's moves are looked up the
+same way. The mirror happens once, where a position enters the system: `pack_small_position`
+(C++, the search and the ladder), `fen_to_tensor` (Python), and the self-play records, which are
+stored canonical (record version 3: FEN, bitboards and move indices as white sees them;
+`FLAG_BLACK_TO_MOVE` keeps the side that moved). Nothing downstream (the trainer, the kernel, the
+network) depends on the colour, and there is no colour-flip augmentation.
+
 **Input** (`src/models/small/fen_encoder.py`; `decode_planes` and the C++ encoder match it):
-8 x 8 x 111 planes in absolute orientation (not flipped for the side to move). Eight history slots
-(the position and the 7 before it) of 12 piece planes and a repetition flag, then side to move,
-en passant square, the four castling rights and the halfmove clock / 100 (capped at 1). The
-**policy vocabulary** (`src/models/small/vocab.py`, `cpp/policy_index.txt`) has 1,929 entries:
-1,924 UCI moves (castling as the king's move, knight promotions sharing the plain move's entry)
-and 5 special tokens that are never played.
+8 x 8 x 111 planes, canonical. Eight history slots (the position and the 7 before it) of 12 piece
+planes and a repetition flag, then the side to move (always 1), en passant square, the four
+castling rights and the halfmove clock / 100 (capped at 1). The **policy vocabulary**
+(`src/models/small/vocab.py`, `cpp/policy_index.txt`) is white's 1,858 moves (lc0's set): UCI moves
+with castling as the king's move, knight promotions sharing the plain move's entry, queen, rook and
+bishop promotions with their suffix.
 
 **Encoder** (`src/models/encoder.py`, the recipe; 812,557 parameters at d_model 128, 4 layers,
 8 heads, d_ff 256):
@@ -245,8 +252,8 @@ and 5 special tokens that are never played.
   overflows past |x| = 256) when the norm runs in FP16, as it did in the TensorRT engine
   self-play used before the fused network. The fused kernel computes norms in FP32.
 - Policy head: logit(from, to, promotion) = (q_from + p_promotion) · k_to / sqrt(d_model), with q
-  and k linear projections of the final tokens and p one of four learned vectors (none, queen,
-  rook, bishop). The special tokens share one learned logit, initialised at -10.
+  and k linear projections of the final tokens and p one of four learned vectors (none or knight,
+  queen, rook, bishop), one logit per vocabulary entry.
 - value, value_q, mlh, mlh_q: the mean of the 64 tokens, then a two-layer MLP each (3 WDL logits,
   or one scalar in units of 25 plies).
 

@@ -49,6 +49,11 @@ struct SearchInput
 // position chain.
 PiecePlanes snapshot_piece_planes(const chess::Board& board);
 
+// The canonical view (the network always plays white; mcts/packed_position.hpp): a move or position of black's
+// seen from white's side, ranks reversed and colours swapped (python-chess Board.mirror()).
+std::string mirror_uci(const std::string& uci);
+std::string mirror_fen(const std::string& fen);
+
 // Push `snap` onto the front of `stack` (slot 0), shifting older entries
 // down by one. The oldest (formerly slot 7) is dropped.
 void history_stack_push(HistoryStack& stack, const PiecePlanes& snap);

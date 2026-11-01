@@ -63,6 +63,7 @@ struct Args
     int warmup_steps{30};
     int fast_sims{50};
     bool tree_reuse{false};
+    bool keep_buffer{false};  // leave the records for scripts/check_buffer.py
     std::string buffer{"cpp/build/bench/selfplay_bench.bin"};
     chessrl::bench::FakeNetworkConfig net;
 };
@@ -98,6 +99,7 @@ Args parse(int argc, char** argv)
         else if (k == "--fast-sims") a.fast_sims = std::stoi(next());
         else if (k == "--tree-reuse") a.tree_reuse = std::stoi(next()) != 0;
         else if (k == "--buffer") a.buffer = next();
+        else if (k == "--keep-buffer") a.keep_buffer = std::stoi(next()) != 0;
         else throw std::runtime_error("unknown argument " + k);
     }
     if (a.mode != "full" && a.mode != "fast" && a.mode != "selfplay" && a.mode != "reusecheck")
@@ -275,7 +277,7 @@ int run_selfplay(const Args& a)
         evals = chessrl::bench::fake_network_stats().evaluations - e0;
         s1 = worker.stats();
     }
-    remove_buffer(a.buffer);
+    if (!a.keep_buffer) remove_buffer(a.buffer);
     const auto moves = static_cast<std::uint64_t>((s1.full_searches - s0.full_searches)
         + (s1.fast_searches - s0.fast_searches) + (s1.policy_moves - s0.policy_moves));
     char line[1024];

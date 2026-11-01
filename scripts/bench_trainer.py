@@ -63,7 +63,7 @@ def main() -> None:
     out: dict = {"batch_size": cfg.batch_size, "compile": cfg.compile, "amp": cfg.amp_dtype,
                  "gpu": torch.cuda.get_device_name(), "params": trainer.param_count()}  # fmt: skip
 
-    prefetch = Prefetcher(trainer.buffer, cfg.batch_size, cfg.mirror_prob)
+    prefetch = Prefetcher(trainer.buffer, cfg.batch_size)
     for _ in range(5):
         prefetch.get()
     t0 = time.perf_counter()

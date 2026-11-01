@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .fen_encoder import INPUT_PLANES
+from .vocab import policy_index
 
 
 class ResBlock(nn.Module):
@@ -44,7 +45,7 @@ class SmallModel(nn.Module):
         self.policy_conv = nn.Conv2d(channels, 16, 1, bias=False)
         self.policy_bn = nn.BatchNorm2d(16)
         self.policy_fc1 = nn.Linear(16 * 8 * 8, 256)
-        self.policy_fc2 = nn.Linear(256, 1929)
+        self.policy_fc2 = nn.Linear(256, len(policy_index))
 
         # Value Head
         self.value_conv = nn.Conv2d(channels, 8, 1, bias=False)

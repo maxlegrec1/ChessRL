@@ -21,11 +21,11 @@ struct CacheEntry
 class TranspositionTable
 {
 public:
-    // Each entry stores a SmallPolicyValue (1929 float logits + 3 WDL floats); entries are
+    // Each entry stores a SmallPolicyValue (1858 float logits + 3 WDL floats); entries are
     // sharded into 1024-bucket lock groups for low-contention concurrent access.
     explicit TranspositionTable(size_t size_mb)
     {
-        const size_t entry_size = sizeof(CacheEntry) + 1929 * sizeof(float);
+        const size_t entry_size = sizeof(CacheEntry) + 1858 * sizeof(float);
         num_entries_ = std::max<size_t>(1024, (size_mb * 1024 * 1024) / entry_size);
 
         entries_.resize(num_entries_);

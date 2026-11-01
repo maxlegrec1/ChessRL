@@ -44,10 +44,13 @@ int searches_per_thread()
     return n;
 }
 
-// On-disk record layout v2 (1280 bytes, fixed). Bytes [0..832) keep the v1
-// layout; v2 appends the current position's bitboards and scalar state (so the
+// On-disk record layout v3 (1280 bytes, fixed). Bytes [0..832) keep the v1
+// layout; v2 appended the current position's bitboards and scalar state (so the
 // trainer builds input planes without parsing FEN) and the MCTS visit
-// distribution (the soft policy target).
+// distribution (the soft policy target). v3 is canonical: a position with black to
+// move is stored as white sees it (FEN, moves, bitboards, castling, en passant all
+// mirrored, mcts/packed_position.hpp), and the move indices are in the 1,858-move
+// vocabulary; kFlagBlackToMove keeps the side that actually moved.
 //   [0..100)    FEN (null-padded)
 //   [100..116)  played move, UCI (null-padded)
 //   [116..128)  value_outcome (3 x f32), side-to-move WDL from the game result
@@ -59,7 +62,7 @@ int searches_per_thread()
 //   [156..160)  padding
 //   [160..832)  past bitboards: 7 slots x 12 u64 (W:PNBRQK, B:PNBRQK), newest first
 //   [832..928)  current bitboards: 12 u64, same order
-//   [928]       record version (u8) = 2
+//   [928]       record version (u8) = 3
 //   [929]       flags (u8), kFlag* below
 //   [930]       castling rights (u8): WK=1, WQ=2, BK=4, BQ=8
 //   [931]       en-passant square 0..63 (a1=0), 255 = none
@@ -106,13 +109,14 @@ static_assert(kCurrentBitboardsOffset + kBitboardSlotBytes == kVersionOffset,
 static_assert(kPolicyEntriesOffset + kMaxPolicyEntries * 4 == kRecordSize,
               "record layout math is inconsistent");
 
-constexpr std::uint8_t kRecordVersion = 2;
+constexpr std::uint8_t kRecordVersion = 3;
 constexpr std::uint8_t kFlagFullSearch = 1;   // policy target comes from a full search
 constexpr std::uint8_t kFlagSampledMove = 2;  // move chosen with root temperature > 0
 constexpr std::uint8_t kFlagResigned = 4;     // game ended by resignation
 constexpr std::uint8_t kFlagPlaythrough = 8;  // resignation disabled in this game
 constexpr std::uint8_t kFlagCurriculum = 16;  // game started from a curriculum position
 constexpr std::uint8_t kFlagMaxPlies = 32;    // game adjudicated a draw at max_plies
+constexpr std::uint8_t kFlagBlackToMove = 64; // black moved here (the record is stored mirrored)
 
 enum class EndReason
 {
@@ -355,8 +359,11 @@ struct SelfPlayWorker::Impl
                                int simulations, bool full_search, bool sampled_move) const
     {
         SelfPlayRecord record;
-        record.fen = slot.board.getFen();
-        record.policy = summary.action;
+        // Canonical: stored as the side to move sees it, white (the network's view).
+        const bool mirror = slot.board.sideToMove() == chess::Color::BLACK;
+        const auto view = [mirror](const std::string& uci) { return mirror ? chessrl::mcts::mirror_uci(uci) : uci; };
+        record.fen = mirror ? chessrl::mcts::mirror_fen(slot.board.getFen()) : slot.board.getFen();
+        record.policy = view(summary.action);
         // value_mcts is the MCTS-backed-up WDL (always populated).
         // value_outcome is filled in at game end; zero until then.
         record.value_mcts = summary.value;
@@ -369,6 +376,7 @@ struct SelfPlayWorker::Impl
         {
             const auto& past = slot.past_planes[k];
             record.past_bitboards[k] = past.bitboards;
+            if (mirror) chessrl::mcts::single::mirror_bitboards(record.past_bitboards[k].data());
             record.past_repetition_flags[k] = past.repetition ? 1u : 0u;
         }
         record.current_repetition_flag = slot.board.isRepetition(1) ? 1u : 0u;
@@ -378,14 +386,22 @@ struct SelfPlayWorker::Impl
         record.castling = static_cast<std::uint8_t>(slot.board.castlingRights().hashIndex());
         const chess::Square ep = slot.board.enpassantSq();
         record.ep_square = ep == chess::Square::NO_SQ ? 255 : static_cast<std::uint8_t>(ep.index());
+        if (mirror)
+        {
+            chessrl::mcts::single::mirror_bitboards(record.current_bitboards.data());
+            record.castling = chessrl::mcts::single::mirror_castling(record.castling);
+            if (record.ep_square != 255)
+                record.ep_square = static_cast<std::uint8_t>(chessrl::mcts::single::mirror_square(record.ep_square));
+        }
         record.halfmove = static_cast<std::uint16_t>(std::min<std::uint32_t>(slot.board.halfMoveClock(), 0xFFFF));
         record.fullmove = static_cast<std::uint16_t>(std::min<std::uint32_t>(slot.board.fullMoveNumber(), 0xFFFF));
         record.simulations = static_cast<std::uint16_t>(std::min(simulations, 0xFFFF));
         record.flags = static_cast<std::uint8_t>((full_search ? kFlagFullSearch : 0) |
                                                  (sampled_move ? kFlagSampledMove : 0) |
                                                  (slot.playthrough ? kFlagPlaythrough : 0) |
-                                                 (slot.curriculum ? kFlagCurriculum : 0));
-        const int played = vocab_index_of(summary.action);
+                                                 (slot.curriculum ? kFlagCurriculum : 0) |
+                                                 (mirror ? kFlagBlackToMove : 0));
+        const int played = vocab_index_of(view(summary.action));
         record.played_index = played < 0 ? 0xFFFF : static_cast<std::uint16_t>(played);
 
         // summary.policy is sorted by visit fraction, descending.
@@ -393,7 +409,7 @@ struct SelfPlayWorker::Impl
         for (const auto& [uci, fraction] : summary.policy)
         {
             if (record.policy_entries.size() >= kMaxPolicyEntries) break;
-            const int idx = vocab_index_of(uci);
+            const int idx = vocab_index_of(view(uci));
             const long q = std::lround(static_cast<double>(fraction) * 65535.0);
             if (idx < 0 || q <= 0) continue;
             record.policy_entries.emplace_back(static_cast<std::uint16_t>(idx),
