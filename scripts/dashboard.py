@@ -636,12 +636,15 @@ class Dashboard:
     def data_payload(self, ids: list[str], xkey: str, k: int, n: int) -> dict:
         known = {r["id"]: r["path"] for r in self.discover()}
         by_path = {p: rid for rid, p in known.items()}
+        by_name = {p.name: rid for rid, p in known.items()}  # a parent synced from another box
+
+        def resolve(path: Path) -> Run | None:
+            rid = by_path.get(path) or by_name.get(path.name)
+            return run(rid) if rid else None
 
         def run(rid: str) -> Run:
             if rid not in self.runs:
-                self.runs[rid] = Run(
-                    rid, known[rid], lambda path: run(by_path[path]) if path in by_path else None
-                )
+                self.runs[rid] = Run(rid, known[rid], resolve)
             return self.runs[rid]
 
         out = []
