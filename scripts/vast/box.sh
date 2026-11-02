@@ -70,7 +70,7 @@ case "$cmd" in
     echo "ladder for $dir"
     ;;
   dash)
-    tmux new -d -s dash "source /workspace/env.sh && CHESSRL_RUNS_ROOT=$RUNS uv run streamlit run scripts/dashboard.py --server.port 8501 --server.headless true"
+    tmux new -d -s dash "source /workspace/env.sh && CHESSRL_RUNS_ROOT=$RUNS uv run python scripts/dashboard.py --port 8501"
     ;;
   calibrate)
     tmux new -d -s calib "source /workspace/env.sh && uv run python scripts/ladder_daemon.py --calibrate 2>&1 | tee /workspace/calib.log"

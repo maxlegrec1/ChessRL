@@ -288,10 +288,11 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
 - **Network parity**: `scripts/net_parity.py` compares each checkpoint's fused network with
   PyTorch FP32 on puzzle positions (top-1 agreement, policy KL, value error), and the packed input
   path with the dense one.
-- **Dashboard and analysis board**: `scripts/dashboard.py` (Streamlit, read-only) reads the metrics
-  and ladder files of the runs under `artifacts/runs/` or `$CHESSRL_RUNS_ROOT`. Its analysis page
-  embeds `scripts/analysis_server.py`, which runs a checkpoint's policy, value and PUCT search on
-  the CPU (`src/analysis/engine.py`, following the self-play search's conventions).
+- **Dashboard and analysis board**: `scripts/dashboard.py` (a small HTTP server and the page in
+  `scripts/dashboard_ui/`, read-only) reads the metrics and ladder files of the runs under
+  `artifacts/runs/` or `$CHESSRL_RUNS_ROOT` incrementally and serves each curve smoothed and reduced
+  to a few hundred points. `scripts/analysis_server.py` runs a checkpoint's policy, value and PUCT
+  search on the CPU (`src/analysis/engine.py`, following the self-play search's conventions).
 
 ## Where things live
 
@@ -311,7 +312,7 @@ heads. The trainer then rebuilds the optimizer and re-warms the learning rate.
 | Network export; search heads | `src/export/to_cnet.py`, `scripts/build_net.sh`; `src/export/heads.py` |
 | Rating ladder | `src/rating/ladder.py`, `src/rating/anchors.json`, `src/rating/anchors_sf.json`, `scripts/ladder_daemon.py`, `scripts/rerate.py`, `scripts/calibrate_finish.py`; data in `data/openings/`, `data/puzzles/` (built by `scripts/make_sf_openings.py`, `scripts/make_puzzle_set.py`) |
 | Stockfish test | `scripts/stockfish_match.py`, `scripts/sf_benchmark.py`, `scripts/cpu_stockfish_match.py` |
-| CPU search (PUCT; Gumbel root search), dashboard, analysis board | `src/analysis/engine.py`, `src/analysis/gumbel.py`, `scripts/puzzle_scan.py`, `scripts/search_quality.py`; `scripts/dashboard.py`, `scripts/pages/1_Analysis.py`, `scripts/analysis_server.py`, `scripts/analysis/` |
+| CPU search (PUCT; Gumbel root search), dashboard, analysis board | `src/analysis/engine.py`, `src/analysis/gumbel.py`, `scripts/puzzle_scan.py`, `scripts/search_quality.py`; `scripts/dashboard.py`, `scripts/dashboard_ui/`, `scripts/analysis_server.py`, `scripts/analysis/` |
 | Diagnostics and benchmarks | `scripts/net_parity.py`, `scripts/check_buffer.py`, `scripts/bench_selfplay.py`, `scripts/perfreport.py`, `scripts/showcase_games.py`; CPU search benchmark (fake network, no GPU): `cpp/bench/`, `scripts/build_cpu_bench.sh`, `scripts/bench_cpu_search.sh`, `scripts/make_bench_positions.py`, `data/bench/positions.txt`; self-play speed A/B on a rented GPU: `scripts/perf/selfplay_ab.sh`; results in `docs/PERF.md` |
 | Rented GPUs | `scripts/vast/` |
 | Tests | `tests/` (Python); `cpp/mcts/tests.cpp`, built by `scripts/build_cpp_tests.sh` (C++) |

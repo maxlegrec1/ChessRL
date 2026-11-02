@@ -169,14 +169,18 @@ the same positions (top-move agreement, policy KL divergence, value error).
 ## Dashboard and analysis board
 
 ```bash
-uv run streamlit run scripts/dashboard.py          # http://localhost:8501
+uv run python scripts/dashboard.py --port 8501     # http://localhost:8501
 uv run python scripts/analysis_server.py --port 8510
 ```
 
 The dashboard is read-only. It shows every run under `artifacts/runs/` (or the directories in
-`$CHESSRL_RUNS_ROOT`, separated by colons): ladder Elo and puzzles by hours of training, losses,
-self-play speed and game statistics. Its "Analysis" page embeds the analysis board, which runs a
-checkpoint's search on the CPU for any position.
+`$CHESSRL_RUNS_ROOT`, separated by colons): ladder Elo and puzzles by hours of training, steps or
+self-play positions, the first-move probe, opening diversity, the opening and value schedules,
+losses, game statistics, self-play speed, and the settings that differ between the selected runs.
+The server reads each metrics file incrementally and sends every curve smoothed and reduced to
+600 points, so the page stays fast however long the runs. A run whose `metrics/branch.json` names
+a parent (`{"parent_run": "<run dir>"}`) is drawn after it. `--analysis-url` adds a link to the
+analysis board, which runs a checkpoint's search on the CPU for any position.
 
 ## Scripts
 
@@ -198,7 +202,8 @@ checkpoint's search on the CPU for any position.
 | `search_quality.py`, `search_quality_report.py` | Training-target quality per network evaluation on the CPU: self-play's PUCT search against Gumbel root search, judged by Stockfish (results in `docs/PERF.md`). |
 | `check_buffer.py` | Checks buffer records against python-chess. |
 | `bench_selfplay.py`, `perfreport.py` | Self-play speed benchmark with the training config, and a side-by-side report of two benchmarks. |
-| `dashboard.py`, `pages/1_Analysis.py`, `analysis_server.py` | The dashboard and the analysis board. |
+| `dashboard.py` (page in `dashboard_ui/`), `analysis_server.py` | The dashboard and the analysis board. |
+| `opening_diversity.py` | Opening diversity of a run's newest self-play records, per ply (`--every-min N` appends to `metrics/diversity.jsonl`). |
 | `perf/` | Self-play speed A/B on a rented GPU box (`selfplay_ab.sh`; results in `docs/PERF.md`). |
 | `vast/` | Running on rented Vast.ai GPUs: launch with a budget guard, box setup, metric sync. |
 
