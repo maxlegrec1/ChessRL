@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import _inference_cpp  # noqa: E402
 
-from src.export.heads import ExportWrapper  # noqa: E402
+from src.export.heads import ExportWrapper, search_q_weight  # noqa: E402
 from src.export.to_cnet import export  # noqa: E402
 from src.models.factory import model_from_checkpoint  # noqa: E402
 from src.models.small.fen_encoder import fen_to_tensor  # noqa: E402
@@ -60,11 +60,9 @@ def main() -> None:
         ckpt = torch.load(path, map_location="cuda", weights_only=False)
         model = model_from_checkpoint(ckpt, "cuda").eval()
         heads = (ckpt.get("config") or {}).get("search_heads", "search")
+        wrapper = ExportWrapper(model, heads, search_q_weight(ckpt))
         with torch.no_grad():
-            ref = [
-                t.float().cpu().numpy()
-                for t in ExportWrapper(model, heads)(torch.from_numpy(x).cuda())
-            ]
+            ref = [t.float().cpu().numpy() for t in wrapper(torch.from_numpy(x).cuda())]
         with tempfile.TemporaryDirectory() as tmp:
             net = Path(tmp) / (path.stem + ".cnet")
             export(path, net)

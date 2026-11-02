@@ -405,7 +405,7 @@ PYBIND11_MODULE(_inference_cpp, m)
                          bool use_dirichlet,
                          float dirichlet_alpha,
                          float dirichlet_epsilon,
-                         int random_opening_plies,
+                         float random_opening_plies,
                          int virtual_loss_width) {
             chessrl::SelfPlayConfig config;
             config.engine_path = engine_path;
@@ -444,7 +444,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("use_dirichlet") = true,
         py::arg("dirichlet_alpha") = 0.12f,
         py::arg("dirichlet_epsilon") = 0.05f,
-        py::arg("random_opening_plies") = 0,
+        py::arg("random_opening_plies") = 0.0f,
         py::arg("virtual_loss_width") = 1)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
         .def("inference_stats", &chessrl::SelfPlayWorker::inference_stats)

@@ -3,7 +3,8 @@
 The file holds exactly what cpp/net/encoder_kernel.cu reads, so the C++ side only copies
 it to the GPU: weight matrices in FP16, pre-packed in the order mma.sync wants its B
 fragments, FP32 vectors, the pair bias in attention-score fragment order, and the policy
-vocab as one 16-bit code per entry. Two scales are folded in: the attention one
+vocab as one 16-bit code per entry, and the weights of the value MLPs in the WDL the search
+reads (wdl_w; search_heads blend). Two scales are folded in: the attention one
 (1/sqrt(head_dim), and log2(e) because the kernel's softmax uses exp2) and the policy
 one (1/sqrt(d_model), into pol_q and the promotion vectors).
 
@@ -24,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from src.export.heads import search_q_weight
 from src.models.encoder import _vocab_tables
 from src.models.factory import model_from_checkpoint
 
@@ -31,8 +33,8 @@ MAGIC = b"CHESSNET"
 VERSION = 2  # 2: the canonical 1,858-move vocabulary (1: 1,929 absolute moves and 5 special tokens)
 DTYPES = {np.float16: 0, np.float32: 1, np.uint16: 2, np.int32: 3}
 LOG2E = 1.0 / math.log(2.0)
-# src/export/heads.py's ExportWrapper modes: the MLPs whose softmax is averaged into "value", and whether
-# "mlh_q" comes from the mlh_q head (otherwise it repeats mlh).
+# src/export/heads.py's ExportWrapper modes: the MLPs whose softmaxes are mixed into "value" (weights wdl_w),
+# and whether "mlh_q" comes from the mlh_q head (otherwise it repeats mlh).
 HEADS = {
     "search": (["value_q"], True),
     "outcome": (["value"], False),
@@ -86,7 +88,8 @@ KERNEL_DIMS = {"d_model": 128, "heads": 8, "d_ff": 256}
 MAX_LAYERS = 16
 
 
-def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
+def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[str, np.ndarray]]:
+    """The .cnet entries; q_weight is value_q's weight in the WDL under search_heads blend."""
     cfg = model.cfg
     d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
     if any(cfg[k] != v for k, v in KERNEL_DIMS.items()) or not 1 <= layers <= MAX_LAYERS:
@@ -97,6 +100,7 @@ def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
     hd = d // heads
     sd = {k: v.detach().float().cpu().numpy() for k, v in model.state_dict().items()}
     wdl_mlps, mlhq_from_q = HEADS[search_heads]
+    wdl_w = [1.0 - q_weight, q_weight] if search_heads == "blend" else [1.0]
     mlps = [*wdl_mlps, "mlh"] + (["mlh_q"] if mlhq_from_q else [])
     planes = sd["embed.weight"].shape[1]
     embed = np.zeros((d, 128), np.float32)  # input planes padded to the 128-wide k loop
@@ -134,6 +138,7 @@ def entries_for(model, search_heads: str) -> list[tuple[str, np.ndarray]]:
         ("pol.b", pol_b),
         ("promo", (sd["promo"] * pol_scale).astype(np.float16)),
         ("vocab", vocab_codes()),
+        ("wdl_w", np.array(wdl_w, np.float32)),
         # First layers transposed to [mlp][in][out] so the kernel's per-unit loop reads
         # consecutive units per thread; second layers stacked in output order.
         ("mlp1.w", np.stack([sd[f"{m}.0.weight"].T for m in mlps]).astype(np.float16)),
@@ -170,6 +175,7 @@ def write_cnet(path: Path, entries: list[tuple[str, np.ndarray]]) -> None:
 
 
 def export(ckpt_path: Path, out_path: Path, search_heads: str | None = None) -> str:
+    """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "model" in ckpt):
         ckpt = {"model": ckpt}
@@ -177,8 +183,9 @@ def export(ckpt_path: Path, out_path: Path, search_heads: str | None = None) -> 
     if not hasattr(model, "cfg"):
         raise SystemExit("the fused network supports the encoder architecture only")
     heads = search_heads or (ckpt.get("config") or {}).get("search_heads", "search")
-    write_cnet(out_path, entries_for(model, heads))
-    return heads
+    q_weight = search_q_weight(ckpt)
+    write_cnet(out_path, entries_for(model, heads, q_weight))
+    return f"{heads} {q_weight:.3f}" if heads == "blend" else heads
 
 
 def main() -> None:

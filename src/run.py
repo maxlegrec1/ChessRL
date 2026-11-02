@@ -103,7 +103,7 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
         {
             "model": model.state_dict(),
             "model_spec": model.spec(),
-            "config": {"search_heads": cfg.search_heads},
+            "config": cfg.to_dict(),  # the export reads search_heads and the blend weight
         },
         init_pt,
     )

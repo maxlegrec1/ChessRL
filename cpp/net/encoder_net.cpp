@@ -92,6 +92,10 @@ EncoderNet::EncoderNet(std::string path)
     }
     params_.layers = layers;
     params_.n_wdl = cfg[5];
+    for (int k = 0; k < params_.n_wdl; ++k) params_.wdl_weight[k] = 1.f / static_cast<float>(params_.n_wdl);
+    if (entries.count("wdl_w"))
+        std::memcpy(params_.wdl_weight, data.data() + get("wdl_w", kF32, params_.n_wdl).offset,
+                    sizeof(float) * params_.n_wdl);
     params_.mlhq_from_q = cfg[6];
     const std::uint64_t n_mlp = params_.n_wdl + 1 + params_.mlhq_from_q;
     const std::uint64_t n_out = 3 * params_.n_wdl + 1 + params_.mlhq_from_q;

@@ -119,13 +119,15 @@ def kernel_forward(f: dict[str, np.ndarray], planes: np.ndarray):
     wdl = 0
     for j in range(n_wdl):
         e = np.exp(outs[:, 3 * j : 3 * j + 3] - outs[:, 3 * j : 3 * j + 3].max(1, keepdims=True))
-        wdl = wdl + e / e.sum(1, keepdims=True) / n_wdl
+        wdl = wdl + e / e.sum(1, keepdims=True) * f["wdl_w"][j]
     mlh = outs[:, 3 * n_wdl]
     return logits, wdl, mlh, outs[:, 3 * n_wdl + 1] if mlhq else mlh
 
 
-@pytest.mark.parametrize("heads", sorted(HEADS))
-def test_packed_file_matches_pytorch(tmp_path, heads):
+@pytest.mark.parametrize(
+    "heads,q_weight", [(h, 0.5) for h in sorted(HEADS)] + [("blend", 0.25), ("blend", 1.0)]
+)
+def test_packed_file_matches_pytorch(tmp_path, heads, q_weight):
     torch.manual_seed(0)
     model = EncoderModel().eval()
     with torch.no_grad():  # the trained-only parameters start at zero; make them count
@@ -136,7 +138,7 @@ def test_packed_file_matches_pytorch(tmp_path, heads):
             blk.q_norm.weight.uniform_(0.5, 1.5)
             blk.k_norm.weight.uniform_(0.5, 1.5)
     path = tmp_path / "net.cnet"
-    write_cnet(path, entries_for(model, heads))
+    write_cnet(path, entries_for(model, heads, q_weight))
     f = read_cnet(path)
 
     rng = np.random.default_rng(0)
@@ -147,7 +149,9 @@ def test_packed_file_matches_pytorch(tmp_path, heads):
     with torch.no_grad():
         ref = [
             t.numpy()
-            for t in ExportWrapper(model, heads)(torch.from_numpy(planes).reshape(3, 8, 8, 111))
+            for t in ExportWrapper(model, heads, q_weight)(
+                torch.from_numpy(planes).reshape(3, 8, 8, 111)
+            )
         ]
     # FP16 weights against FP32: logits within a few hundredths, probabilities closer.
     assert np.abs(got[0] - ref[0]).max() < 0.05

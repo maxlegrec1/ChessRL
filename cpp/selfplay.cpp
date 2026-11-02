@@ -334,7 +334,9 @@ struct SelfPlayWorker::Impl
             }
         }
 
-        const int n = config.random_opening_plies;
+        const float plies = std::max(0.0f, config.random_opening_plies);
+        int n = static_cast<int>(plies);
+        if (uniform01() < plies - static_cast<float>(n)) ++n;
         for (int i = 0; i < n; ++i)
         {
             if (slot.board.isGameOver().second != chess::GameResult::NONE) break;

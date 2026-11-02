@@ -48,6 +48,29 @@ class DataConfig:
 
 
 @dataclass
+class RampConfig:
+    """A setting moved linearly from `start` to `end` between trainer steps `start_step` and `end_step`
+    (`start` before, `end` after). Off while end_step is 0: the setting keeps its own value."""
+
+    start: float = 0.0
+    end: float = 0.0
+    start_step: int = 0
+    end_step: int = 0
+
+    @property
+    def on(self) -> bool:
+        return self.end_step > 0
+
+    def at(self, step: int) -> float:
+        if step <= self.start_step:
+            return self.start
+        if step >= self.end_step:
+            return self.end
+        frac = (step - self.start_step) / (self.end_step - self.start_step)
+        return self.start + (self.end - self.start) * frac
+
+
+@dataclass
 class SelfPlayConfig:
     # parallelism / batching
     boards: int = 1024
@@ -71,8 +94,12 @@ class SelfPlayConfig:
     save_pgn: bool = False
     pgn_dir: Path = Path("artifacts/pgns")
     # Uniform-random legal plies at the start of every game before MCTS takes over
-    # (0 = start every game from the initial position).
-    random_opening_plies: int = 0
+    # (0 = start every game from the initial position). A fraction adds one more ply to that
+    # share of games: 2.25 plays 3 random plies in a quarter of the games, 2 in the others.
+    random_opening_plies: float = 0.0
+    # Ramp random_opening_plies over the networks' trainer steps (self-play applies the value
+    # at each network it loads), e.g. from 8 to 0: random openings, then searched ones.
+    random_opening_ramp: RampConfig = field(default_factory=RampConfig)
     temperature_plies: int = -1  # -1: temperature_at_root for the whole game
     temperature_late: float = 0.0  # root temperature after temperature_plies (0 = argmax)
     resign_threshold: float = 0.0  # expected score below which the side to move resigns; 0 = off
@@ -195,6 +222,11 @@ class TrainingConfig:
     # value and mlh, trained on game results / true plies left (AlphaZero).
     # "q_value" and "blend" change only the value (see ExportWrapper in src/export/heads.py).
     search_heads: str = "search"
+    # search_heads "blend": the weight of value_q (trained on the search's values) in the WDL the
+    # search reads, the rest on value (trained on game results). search_q_ramp moves it over
+    # trainer steps: each network is exported with the weight at its own step.
+    search_q_weight: float = 0.5
+    search_q_ramp: RampConfig = field(default_factory=RampConfig)
     compile: bool = False  # torch.compile the training step's forward and losses
     # FP16 accumulators in the FP16 matrix multiplies (torch.backends.cuda.matmul.
     # allow_fp16_accumulation): twice the tensor-core rate on GeForce cards. Neutral at today's

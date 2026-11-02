@@ -32,7 +32,9 @@ struct SelfPlayConfig
     size_t max_buffer_size = 1000000; // Max number of positions in buffer
     bool save_pgn = false;
     std::string pgn_dir = "pgns";
-    int random_opening_plies = 0; // 0 = always start from the standard startpos
+    // Uniformly random plies before the first search; 0 = always the standard start position. A
+    // fraction adds one more ply to that share of games (2.25: 3 plies in a quarter of them).
+    float random_opening_plies = 0.0f;
 
     // ---- Game and record options. The defaults here switch them off; src/train/config.yaml
     // sets the values the training recipe uses (self-play copies every field). ----

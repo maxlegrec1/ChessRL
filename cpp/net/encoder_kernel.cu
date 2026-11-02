@@ -691,7 +691,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             const float* z = s.heads + 3 * k;
             const float mx = fmaxf(z[0], fmaxf(z[1], z[2]));
             const float e0 = expf(z[0] - mx), e1 = expf(z[1] - mx), e2 = expf(z[2] - mx);
-            const float scale = 1.f / ((e0 + e1 + e2) * P.n_wdl);
+            const float scale = P.wdl_weight[k] / (e0 + e1 + e2);
             wdl[0] += e0 * scale;
             wdl[1] += e1 * scale;
             wdl[2] += e2 * scale;

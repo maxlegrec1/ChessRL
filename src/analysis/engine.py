@@ -36,6 +36,7 @@ import chess
 import numpy as np
 import torch
 
+from src.export.heads import search_q_weight
 from src.models.factory import model_from_checkpoint
 from src.models.small.fen_encoder import fen_to_tensor
 from src.models.small.vocab import canonical_key, policy_to_idx
@@ -73,7 +74,10 @@ class Net:
         self.model = model_from_checkpoint(ckpt, "cpu").eval()
         self.spec = dict(ckpt.get("model_spec") or {})
         self.params = sum(p.numel() for p in self.model.parameters())
-        self.outcome_heads = (ckpt.get("config") or {}).get("search_heads", "search") == "outcome"
+        heads = (ckpt.get("config") or {}).get("search_heads", "search")
+        # As the search reads them: value_q's weight in the WDL, and moves-left from mlh_q or mlh.
+        self.q_weight = {"outcome": 0.0, "blend": search_q_weight(ckpt)}.get(heads, 1.0)
+        self.mlh_q = heads == "search"
         self.step = int(ckpt.get("step", 0) or 0)
 
     @classmethod
@@ -82,7 +86,7 @@ class Net:
         net = cls.__new__(cls)
         net.model, net.spec, net.step = model.eval(), {}, 0
         net.params = sum(p.numel() for p in model.parameters())
-        net.outcome_heads = outcome_heads
+        net.q_weight, net.mlh_q = (0.0, False) if outcome_heads else (1.0, True)
         return net
 
     @torch.no_grad()
@@ -92,8 +96,9 @@ class Net:
         """Per board: legal-move priors, WDL for the side to move, estimated plies left."""
         x = torch.from_numpy(np.stack([encode(b) for b in boards]))
         p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
-        wdl = torch.softmax(v if self.outcome_heads else vq, dim=-1).numpy()
-        plies = (mlh if self.outcome_heads else mlh_q).float().clamp_min(0).numpy() * 25.0
+        w = self.q_weight
+        wdl = ((1.0 - w) * torch.softmax(v, dim=-1) + w * torch.softmax(vq, dim=-1)).numpy()
+        plies = (mlh_q if self.mlh_q else mlh).float().clamp_min(0).numpy() * 25.0
         logits = p.float().numpy()
         out = []
         for i, b in enumerate(boards):

@@ -127,9 +127,25 @@ def main() -> int:
     window_steps = 0
     window_runtime = 0.0
 
+    def apply_ramps() -> bool:
+        """random_opening_ramp at the current network's step; True when the value changed."""
+        if not sp.random_opening_ramp.on:
+            return False
+        plies = round(sp.random_opening_ramp.at(engine_watcher.engine_step), 3)
+        if plies == sp.random_opening_plies:
+            return False
+        console.log(
+            f"[ramp] random_opening_plies {sp.random_opening_plies} -> {plies} "
+            f"(network step {engine_watcher.engine_step})"
+        )
+        sp.random_opening_plies = plies
+        return True
+
     try:
         while True:
             new_engine = engine_watcher.maybe_refresh()
+            if (new_engine or worker is None) and apply_ramps() and worker is not None:
+                worker.set_config(build_cpp_config(sp, engine_watcher.engine_path, buffer_path))
             if worker is None:
                 engine_path = engine_watcher.engine_path
                 if not engine_path:
@@ -194,6 +210,7 @@ def main() -> int:
                     "step_seconds": window_runtime / max(1, window_steps),
                     "buffer_records": worker.get_buffer_size(),
                     "resign_threshold": sp.resign_threshold,
+                    "random_opening_plies": sp.random_opening_plies,
                     **{f"total_{k}": getattr(stats, k) for k in _STAT_FIELDS},
                 }
                 with metrics_file.open("a", encoding="utf-8") as fh:
