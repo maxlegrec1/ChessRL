@@ -96,12 +96,14 @@ The learning rate is `learning_rate` x schedule factor x warmup factor (and the 
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `kind` | `constant` | `constant` | `constant` or `cosine`. |
+| `kind` | `constant` | `constant` | `constant`, `cosine` or `step`. |
 | `warmup_steps` | 1000 | 0 | Linear warmup from `learning_rate / warmup_steps` to `learning_rate`, counted from `start_step`. |
 | `start_step` | *unset* | 0 | Step the warmup and the cosine count from. -1: the step the run resumes at, resolved once and saved in checkpoints (`lr_start_step`) so later resumes keep it. |
 | `total_steps` | *unset* | 0 | Cosine only: length of the schedule from `start_step`, including `hold_steps`. 0 disables the cosine. |
 | `hold_steps` | *unset* | 0 | Cosine only: steps at the full rate before the decay starts. |
 | `final_ratio` | *unset* | 0.1 | Cosine only: the final rate as a fraction of `learning_rate`. |
+| `milestones` | *unset* | [] | Step only: steps (counted from `start_step`, like the cosine's) at which the rate is multiplied by `gamma`. `[70000]` with `gamma: 0.5` halves it from step 70,000 on. |
+| `gamma` | *unset* | 0.5 | Step only: the factor applied at each milestone. |
 
 ## `loss_weights`
 
@@ -165,6 +167,7 @@ ply.
 | `temperature_at_root` | 1.0 | 1.0 | Move choice during the first `temperature_plies`: sampled with probability proportional to visits^(1 / T). 0 = the most visited move. |
 | `temperature_plies` | 30 | -1 | Searched plies that use `temperature_at_root`. -1 = the whole game. |
 | `temperature_late` | 0.0 | 0.0 | Root temperature after `temperature_plies`. 0 = the most visited move. |
+| `fast_temperature_at_root` | *unset* | -1.0 | Root temperature of the fast searches (`pcr_fast_simulations`) during `temperature_plies`; below 0 they use `temperature_at_root`. Their 50-simulation visit counts are flat (about 11 effective moves against the policy's 6), so sampling them at 1 plays many weak moves; 0.7 samples them more sharply while the full searches keep `temperature_at_root`. |
 | `virtual_loss_width` | 8 | 8 | Leaves each search collects with virtual loss before one network round. 1 = strictly sequential search. |
 | `use_dirichlet` | true | true | Root Dirichlet noise on full searches (never on fast ones). |
 | `dirichlet_alpha` | 0.3 | 0.12 | Dirichlet α. |

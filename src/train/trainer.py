@@ -138,7 +138,9 @@ class Trainer:
         matrices = []
         if cfg.optimizer == "muon":
             if not hasattr(self.model, "muon_matrices"):
-                raise ValueError(f"optimizer: muon needs the encoder, not {self.model.spec()['arch']}")
+                raise ValueError(
+                    f"optimizer: muon needs the encoder, not {self.model.spec()['arch']}"
+                )
             matrices = self.model.muon_matrices()
             on_muon = {id(p) for p, _ in matrices}
             params = [p for p in params if id(p) not in on_muon]
@@ -177,6 +179,8 @@ class Trainer:
             factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (
                 1.0 + math.cos(math.pi * progress)
             )
+        elif sched.kind == "step":
+            factor = sched.gamma ** sum(1 for m in sched.milestones if rel >= m)
         warm = 1.0
         if sched.warmup_steps > 0:
             warm = min(1.0, (rel + 1) / sched.warmup_steps)
@@ -516,7 +520,9 @@ class Trainer:
                 "buffer/decisive_outcome": (value_labels != 1).float().mean(),
                 "buffer/wdl_agreement": (value_labels == value_q_labels).float().mean(),
                 "buffer/castle_rate": (castle_cand & kings_home).float().mean(),
-                "mlh/pred_plies": (mlh_pred * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0) * 25.0,
+                "mlh/pred_plies": (mlh_pred * mlh_mask).sum()
+                / mlh_mask.sum().clamp_min(1.0)
+                * 25.0,
                 "mlh/target_plies": (target_mlh * mlh_mask).sum()
                 / mlh_mask.sum().clamp_min(1.0)
                 * 25.0,

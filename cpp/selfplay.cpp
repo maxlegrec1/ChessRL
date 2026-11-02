@@ -677,7 +677,9 @@ struct SelfPlayWorker::Impl
         // produce no training record and no root noise.
         const bool full = cfg.pcr_full_prob >= 1.0f || uniform01() < cfg.pcr_full_prob;
         const bool early = cfg.temperature_plies < 0 || slot.ply_count < cfg.temperature_plies;
-        const float root_temp = early ? cfg.temperature_at_root : cfg.temperature_late;
+        const float early_temp = !full && cfg.fast_temperature_at_root >= 0.0f ? cfg.fast_temperature_at_root
+                                                                               : cfg.temperature_at_root;
+        const float root_temp = early ? early_temp : cfg.temperature_late;
         // A cheap move in the sampling phase can sample the raw policy instead: with
         // no simulations the search only expands the root, and summarize() samples
         // its priors; prior temperature 1 makes those softmax(logit), so the move is

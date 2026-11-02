@@ -75,6 +75,19 @@ def test_lr_schedule_counts_from_resume_step(tmp_path):
     assert trainer.lr_at(50) == pytest.approx(cfg.learning_rate)  # before the start: no decay yet
 
 
+def test_lr_schedule_step(tmp_path):
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    cfg.lr_schedule.kind = "step"
+    cfg.lr_schedule.warmup_steps = 0
+    cfg.lr_schedule.milestones = [70, 90]
+    cfg.lr_schedule.gamma = 0.5
+    trainer = Trainer(cfg)
+    assert trainer.lr_at(69) == pytest.approx(cfg.learning_rate)
+    assert trainer.lr_at(70) == pytest.approx(cfg.learning_rate * 0.5)
+    assert trainer.lr_at(95) == pytest.approx(cfg.learning_rate * 0.25)
+
+
 def test_lr_schedule_cosine_and_growth_rewarmup(tmp_path):
     cfg = _config(tmp_path, "visits")
     trainer = Trainer(cfg)

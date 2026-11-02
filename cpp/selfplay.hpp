@@ -42,6 +42,10 @@ struct SelfPlayConfig
     // of a game; afterwards `temperature_late` (0 = argmax). -1 = whole game.
     int temperature_plies = -1;
     float temperature_late = 0.0f;
+    // Root temperature of the fast (playout-cap) searches during those plies; below 0 they use
+    // temperature_at_root like the full ones. 0.7 samples their flat 50-simulation visit counts
+    // more sharply while the full searches keep temperature_at_root.
+    float fast_temperature_at_root = -1.0f;
     // Resign when the side to move's root expected score (W + D/2) stays below
     // `resign_threshold` for `resign_consecutive` of its own moves. 0 disables.
     // A `resign_playthrough` fraction of games never resigns; they measure the

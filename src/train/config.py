@@ -102,6 +102,9 @@ class SelfPlayConfig:
     random_opening_ramp: RampConfig = field(default_factory=RampConfig)
     temperature_plies: int = -1  # -1: temperature_at_root for the whole game
     temperature_late: float = 0.0  # root temperature after temperature_plies (0 = argmax)
+    # Root temperature of the fast searches (pcr_fast_simulations) during temperature_plies; below
+    # 0 they use temperature_at_root. Their visit counts are flat, so sampling them at 1 blunders.
+    fast_temperature_at_root: float = -1.0
     resign_threshold: float = 0.0  # expected score below which the side to move resigns; 0 = off
     resign_consecutive: int = 2
     resign_playthrough: float = 0.1  # fraction of games that never resign (false-positive audit)
@@ -171,7 +174,7 @@ class GrowthConfig:
 class ScheduleConfig:
     """Learning-rate schedule on top of `learning_rate`."""
 
-    kind: str = "constant"  # "constant" | "cosine"
+    kind: str = "constant"  # "constant" | "cosine" | "step"
     # Step the warmup / cosine count from; -1 = the step the run resumes at
     # (resolved once, then saved in checkpoints so later resumes keep it).
     start_step: int = 0
@@ -179,6 +182,10 @@ class ScheduleConfig:
     total_steps: int = 0  # cosine horizon (including hold_steps)
     hold_steps: int = 0  # cosine: constant LR for this many steps, then decay
     final_ratio: float = 0.1  # cosine floor as a fraction of learning_rate
+    # step: the rate is multiplied by gamma at each milestone (steps counted like the cosine's,
+    # from start_step), e.g. milestones [70000], gamma 0.5 halves it from step 70,000 on.
+    milestones: list = field(default_factory=list)
+    gamma: float = 0.5
 
 
 @dataclass

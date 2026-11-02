@@ -32,6 +32,7 @@ _CPP_FIELDS = (
     "random_opening_plies",
     "temperature_plies",
     "temperature_late",
+    "fast_temperature_at_root",
     "resign_threshold",
     "resign_consecutive",
     "resign_playthrough",
