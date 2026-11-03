@@ -6,6 +6,8 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 #include "mcts/packed_position.hpp"
 
@@ -65,5 +67,12 @@ cudaError_t launch_encoder_forward(const EncoderParams& params,
                                    int batch,
                                    void* out,
                                    cudaStream_t stream);
+
+// CHESSRL_KERNEL_TIMING=1 runs an instrumented build of the kernel (two blocks per SM, FP16 sums): thread 0 of
+// every block adds the clock cycles each phase took to device counters. kernel_phase_cycles reads them (and zeroes
+// them with `reset`), in the order of kernel_phase_names. For finding where the kernel's time goes; the
+// instrumentation itself costs a few percent.
+std::vector<unsigned long long> kernel_phase_cycles(bool reset);
+std::vector<std::string> kernel_phase_names();
 
 } // namespace chessrl::net

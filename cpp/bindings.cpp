@@ -209,6 +209,19 @@ PYBIND11_MODULE(_inference_cpp, m)
         "Fused-network throughput (positions/s) on the start position.");
 
     m.def(
+        "fused_phase_cycles",
+        [](bool reset) {
+            const auto cycles = chessrl::net::kernel_phase_cycles(reset);
+            const auto names = chessrl::net::kernel_phase_names();
+            py::dict out;
+            for (size_t i = 0; i < names.size(); ++i) out[py::str(names[i])] = cycles[i];
+            return out;
+        },
+        py::arg("reset") = true,
+        "Cycles per kernel phase summed over every block, from runs with CHESSRL_KERNEL_TIMING=1 (the "
+        "instrumented build); `reset` zeroes the counters.");
+
+    m.def(
         "small_mcts_search_batch",
         [](const std::vector<std::string>& fens,
            int simulations,

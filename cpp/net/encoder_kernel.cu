@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "net/encoder_params.hpp"
 
@@ -43,6 +45,15 @@ constexpr int kLdH = kD + 8;   // FP16 row strides, padded so the 8 rows of an l
 constexpr int kLdV = kTok + 8; // land on distinct banks
 constexpr int kLdS = kTok + 4;  // FP32 policy score rows
 constexpr float kEps = 1e-6f;
+
+// The instrumented build's phases (CHESSRL_KERNEL_TIMING=1): cycles thread 0 spends from one mark to the next,
+// so a phase ending in a barrier includes the wait for the other warps. Per-layer phases sum over the layers.
+constexpr int kPhases = 15;
+const char* const kPhaseNames[kPhases] = {
+    "input planes", "embedding", "norm1", "v projection", "q k projection + head norms", "attention",
+    "out projection", "norm2", "ffn up + swiglu", "ffn down", "final norm + pooling", "policy q k projection",
+    "policy scores", "policy output", "value heads"};
+__device__ unsigned long long g_phase[kPhases];
 
 // 41 KB, so that two blocks fit on an SM. Two FP16 buffers do all the work. h: the input planes,
 // each norm's output, the attention output (written once every warp has its q, k and v) and the
@@ -135,7 +146,10 @@ __device__ __forceinline__ void zero(float (&a)[4][NT][4])
 // added into acc (FP32) every kChunk k-pairs (32·kChunk terms) and at the end. KS, p0: the
 // weights hold KS k-pairs per n-tile and this call multiplies k-pairs p0..p0 + KP - 1 of them
 // (A holding just those KP·32 columns).
-template <int KP, int NT, int kChunk, int KS = KP>
+// kMock (timing experiments only, wrong results; CHESSRL_KERNEL_MOCK): bit 1 loads the weights of every other
+// n-tile only (half the weight bytes), bit 2 skips the second k16 multiply of each k-pair (half the multiplies),
+// bit 4 reuses the first k16 A fragment for the second (half the A loads). 7 = what INT8 would do to this loop.
+template <int KP, int NT, int kChunk, int KS = KP, int kMock = 0>
 __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* a, int lda,
                                           const void* weights, const int (&tile)[NT], int lane, int p0 = 0)
 {
@@ -143,7 +157,8 @@ __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* 
     const __half* arow = a + (lane & 15) * lda + (lane >> 4) * 8;
     uint4 b[NT];
 #pragma unroll
-    for (int n = 0; n < NT; ++n) b[n] = __ldg(w + (tile[n] * KS + p0) * 32 + lane);
+    for (int n = 0; n < NT; ++n)
+        b[n] = ((kMock & 1) && (n & 1)) ? b[n - 1] : __ldg(w + (tile[n] * KS + p0) * 32 + lane);
     uint32_t h[4][NT][2];
     if constexpr (kChunk > 0)
     {
@@ -159,16 +174,32 @@ __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* 
         if (p + 1 < KP)
         {
 #pragma unroll
-            for (int n = 0; n < NT; ++n) next[n] = __ldg(w + (tile[n] * KS + p0 + p + 1) * 32 + lane);
+            for (int n = 0; n < NT; ++n)
+                next[n] = ((kMock & 1) && (n & 1)) ? next[n - 1] : __ldg(w + (tile[n] * KS + p0 + p + 1) * 32 + lane);
         }
+        uint32_t af0[4][4];  // mock bit 4: the s = 0 fragments, reused for s = 1
 #pragma unroll
         for (int s = 0; s < 2; ++s)
         {
+            if ((kMock & 2) && s == 1) continue;
 #pragma unroll
             for (int m = 0; m < 4; ++m)
             {
                 uint32_t af[4];
-                ldsm4(af, arow + m * 16 * lda + p * 32 + s * 16);
+                if ((kMock & 4) && s == 1)
+                {
+#pragma unroll
+                    for (int r = 0; r < 4; ++r) af[r] = af0[m][r];
+                }
+                else
+                {
+                    ldsm4(af, arow + m * 16 * lda + p * 32 + s * 16);
+                    if constexpr ((kMock & 4) != 0)
+                    {
+#pragma unroll
+                        for (int r = 0; r < 4; ++r) af0[m][r] = af[r];
+                    }
+                }
 #pragma unroll
                 for (int n = 0; n < NT; ++n)
                 {
@@ -420,7 +451,7 @@ __device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int c
     }
 }
 
-template <int kChunk, int kMinBlocks>
+template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0>
 __global__ void __launch_bounds__(kThreads, kMinBlocks)
     encoder_forward(__grid_constant__ const EncoderParams P, const SmallPackedPosition* __restrict__ packed,
                     const float* __restrict__ dense, unsigned char* __restrict__ out)
@@ -429,6 +460,20 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     Smem& s = *reinterpret_cast<Smem*>(smem_raw);
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
     const int b = blockIdx.x;
+    // Instrumented build only: thread 0 adds the cycles since the previous mark to phase k's counter.
+    long long t_mark = 0;
+    if constexpr (kTime) t_mark = clock64();
+    const auto mark = [&](int k) {
+        if constexpr (kTime)
+        {
+            if (tid == 0)
+            {
+                const long long now = clock64();
+                atomicAdd(&g_phase[k], static_cast<unsigned long long>(now - t_mark));
+                t_mark = now;
+            }
+        }
+    };
 
     // ---- Input planes into s.h as [token][plane], FP16.
     if (packed)
@@ -450,12 +495,13 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
     }
     __syncthreads();
+    mark(0);
 
     // ---- Embedding: x0 = planes · We + be + pos. x (FP32) and x0 (FP16) stay in registers.
     const int cols[2] = {2 * warp, 2 * warp + 1};
     float x[4][2][4];
     zero(x);
-    warp_gemm<4, 2, kChunk>(x, s.h, kLdH, P.embed_w, cols, lane);
+    warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, P.embed_w, cols, lane);
     uint32_t x0[4][2][2];
 #pragma unroll
     for (int n = 0; n < 2; ++n)
@@ -474,6 +520,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                 x0[m][n][i] = h2(x[m][n][2 * i], x[m][n][2 * i + 1]);
             }
     }
+    mark(1);
 
     for (int l = 0; l < P.layers; ++l)
     {
@@ -490,6 +537,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                     x[m][n][2 * i + 1] += L.gain * v.y;
                 }
         norm_to_smem(x, L.norm1, s.h, s.red, warp, lane);
+        mark(2);
 
         // ---- Attention, head = warp. V first, transposed into the warp's own slice.
         __half* vt = s.v + warp * kHd * kLdV;
@@ -497,7 +545,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             float v[4][2][4];
             zero(v);
             const int vtile[2] = {32 + 2 * warp, 33 + 2 * warp};
-            warp_gemm<4, 2, kChunk>(v, s.h, kLdH, L.qkv, vtile, lane);
+            warp_gemm<4, 2, kChunk, 4, kMock>(v, s.h, kLdH, L.qkv, vtile, lane);
 #pragma unroll
             for (int m = 0; m < 4; ++m)
 #pragma unroll
@@ -507,22 +555,27 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                         vt[(8 * n + 2 * t + (r & 1)) * kLdV + 16 * m + g + 8 * (r >> 1)] =
                             __float2half(v[m][n][r]);
         }
+        mark(3);
         {
             float qk[4][4][4];
             zero(qk);
             const int qktile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-            warp_gemm<4, 4, kChunk>(qk, s.h, kLdH, L.qkv, qktile, lane);
+            warp_gemm<4, 4, kChunk, 4, kMock>(qk, s.h, kLdH, L.qkv, qktile, lane);
             head_norm(qk, 0, L.qnorm, t);
             head_norm(qk, 2, L.knorm, t);
             __syncthreads();  // every warp has read h for its q, k and v: the attention output goes there
+            mark(4);
             attention(qk, vt, P.pair_bias, s.h, warp, lane);
         }
         __syncthreads();
-        warp_gemm<4, 2, kChunk>(x, s.h, kLdH, L.out, cols, lane);
+        mark(5);
+        warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, L.out, cols, lane);
+        mark(6);
 
         // ---- SwiGLU feed-forward in two halves of 128 hidden columns (16 gate + 16 up per warp),
         // each through v (free until the next layer's V) and then its half of the down projection.
         norm_to_smem(x, L.norm2, s.h, s.red, warp, lane);
+        mark(7);
 #pragma unroll
         for (int half = 0; half < 2; ++half)
         {
@@ -530,7 +583,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             zero(u);
             const int c0 = 16 * half + 2 * warp;
             const int utile[4] = {c0, c0 + 1, 32 + c0, 33 + c0};
-            warp_gemm<4, 4, kChunk>(u, s.h, kLdH, L.up, utile, lane);
+            warp_gemm<4, 4, kChunk, 4, kMock>(u, s.h, kLdH, L.up, utile, lane);
 #pragma unroll
             for (int n = 0; n < 2; ++n)
             {
@@ -547,9 +600,11 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                     }
             }
             __syncthreads();
-            warp_gemm<4, 2, kChunk, 8>(x, s.v, kLdH, L.down, cols, lane, 4 * half);
+            mark(8);
+            warp_gemm<4, 2, kChunk, 8, kMock>(x, s.v, kLdH, L.down, cols, lane, 4 * half);
             // Before the second half overwrites v; after it, the next norm's barrier comes first.
             if (half == 0) __syncthreads();
+            mark(9);
         }
     }
 
@@ -589,6 +644,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
     }
     __syncthreads();
+    mark(10);
 
     // ---- Policy: the q and k projections (q pre-scaled by 1/sqrt(d) in the file), q into h and k
     // into v once every warp has read h.
@@ -596,7 +652,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         float a[4][4][4];
         zero(a);
         const int ptile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-        warp_gemm<4, 4, kChunk>(a, s.h, kLdH, P.pol_w, ptile, lane);
+        warp_gemm<4, 4, kChunk, 4, kMock>(a, s.h, kLdH, P.pol_w, ptile, lane);
         __syncthreads();
 #pragma unroll
         for (int n = 0; n < 4; ++n)
@@ -616,6 +672,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
     }
     __syncthreads();
+    mark(11);
 
     // Scores for to-tokens 8·warp..8·warp+7: ft[from][to] = q_from · k_to and
     // pt[promotion][to] = promo · k_to (promotion rows 0-3 of one extra row tile).
@@ -654,6 +711,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         if (g < 4) *reinterpret_cast<float2*>(sc + (kTok + g) * kLdS + col) = make_float2(pt[0], pt[1]);
     }
     __syncthreads();
+    mark(12);
     auto* policy = reinterpret_cast<__half*>(out + static_cast<size_t>(b) * kRecordBytes);
     for (int i = tid; i < kPolicySize; i += kThreads)
     {
@@ -661,6 +719,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         const int to = (code >> 6) & 63;
         policy[i] = __float2half(sc[(code & 63) * kLdS + to] + sc[(kTok + ((code >> 12) & 3)) * kLdS + to]);
     }
+    mark(13);
 
     // ---- Value heads: MLPs on the pooled vector (first layers stored [mlp][in][out]).
     const int n_mlp = P.n_wdl + 1 + P.mlhq_from_q;
@@ -704,24 +763,45 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         aux[3] = s.heads[3 * P.n_wdl];
         aux[4] = P.mlhq_from_q ? s.heads[3 * P.n_wdl + 1] : aux[3];
     }
+    mark(14);
 }
 
-template <int kChunk, int kMinBlocks>
+template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0>
 cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packed, const float* dense,
                    int batch, void* out, cudaStream_t stream)
 {
     static const cudaError_t setup = [] {
-        const cudaError_t e = cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks>,
+        const cudaError_t e = cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock>,
                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                    static_cast<int>(sizeof(Smem)));
         if (e != cudaSuccess) return e;
-        return cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks>,
+        return cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock>,
                                     cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
     }();
     if (setup != cudaSuccess) return setup;
-    encoder_forward<kChunk, kMinBlocks><<<batch, kThreads, sizeof(Smem), stream>>>(
+    encoder_forward<kChunk, kMinBlocks, kTime, kMock><<<batch, kThreads, sizeof(Smem), stream>>>(
         params, packed, dense, static_cast<unsigned char*>(out));
     return cudaGetLastError();
+}
+
+bool kernel_timing()
+{
+    static const bool on = [] {
+        const char* env = std::getenv("CHESSRL_KERNEL_TIMING");
+        return env != nullptr && std::atoi(env) == 1;
+    }();
+    return on;
+}
+
+// CHESSRL_KERNEL_MOCK=1..7: the projection loop's timing experiments (warp_gemm's kMock; wrong outputs).
+int kernel_mock()
+{
+    static const int mock = [] {
+        const char* env = std::getenv("CHESSRL_KERNEL_MOCK");
+        const int v = env ? std::atoi(env) : 0;
+        return v >= 0 && v <= 7 ? v : 0;
+    }();
+    return mock;
 }
 
 // With the default FP16 accumulation the kernel keeps two blocks on each SM (at most 128 registers
@@ -765,15 +845,48 @@ cudaError_t launch_encoder_forward(const EncoderParams& params,
                                    cudaStream_t stream)
 {
     if (batch <= 0) return cudaSuccess;
+    if (kernel_timing()) return launch<8, 2, true>(params, packed, dense, batch, out, stream);
+    switch (kernel_mock())
+    {
+    case 1: return launch<8, 2, false, 1>(params, packed, dense, batch, out, stream);
+    case 2: return launch<8, 2, false, 2>(params, packed, dense, batch, out, stream);
+    case 3: return launch<8, 2, false, 3>(params, packed, dense, batch, out, stream);
+    case 4: return launch<8, 2, false, 4>(params, packed, dense, batch, out, stream);
+    case 6: return launch<8, 2, false, 6>(params, packed, dense, batch, out, stream);
+    case 7: return launch<8, 2, false, 7>(params, packed, dense, batch, out, stream);
+    default: break;
+    }
+    // Every accumulation mode honours CHESSRL_KERNEL_BLOCKS (two blocks per SM by default), so the modes compare
+    // at the same occupancy: the 32-bit ones then show what 32-bit sums cost under the 128-register cap.
+    const bool two = kernel_blocks() == 2;
     switch (fp16_chunk())
     {
-    case 1: return launch<1, 1>(params, packed, dense, batch, out, stream);
-    case 2: return launch<2, 1>(params, packed, dense, batch, out, stream);
-    case 8:
-        return kernel_blocks() == 2 ? launch<8, 2>(params, packed, dense, batch, out, stream)
-                                    : launch<8, 1>(params, packed, dense, batch, out, stream);
-    default: return launch<0, 1>(params, packed, dense, batch, out, stream);
+    case 1: return two ? launch<1, 2>(params, packed, dense, batch, out, stream)
+                       : launch<1, 1>(params, packed, dense, batch, out, stream);
+    case 2: return two ? launch<2, 2>(params, packed, dense, batch, out, stream)
+                       : launch<2, 1>(params, packed, dense, batch, out, stream);
+    case 8: return two ? launch<8, 2>(params, packed, dense, batch, out, stream)
+                       : launch<8, 1>(params, packed, dense, batch, out, stream);
+    default: return two ? launch<0, 2>(params, packed, dense, batch, out, stream)
+                        : launch<0, 1>(params, packed, dense, batch, out, stream);
     }
+}
+
+std::vector<unsigned long long> kernel_phase_cycles(bool reset)
+{
+    std::vector<unsigned long long> out(kPhases, 0ull);
+    cudaMemcpyFromSymbol(out.data(), g_phase, sizeof(unsigned long long) * kPhases);
+    if (reset)
+    {
+        const std::vector<unsigned long long> zeros(kPhases, 0ull);
+        cudaMemcpyToSymbol(g_phase, zeros.data(), sizeof(unsigned long long) * kPhases);
+    }
+    return out;
+}
+
+std::vector<std::string> kernel_phase_names()
+{
+    return std::vector<std::string>(kPhaseNames, kPhaseNames + kPhases);
 }
 
 } // namespace chessrl::net
