@@ -218,6 +218,17 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
 
 } // namespace
 
+// A search's RNG seed when the caller gives none: from a per-thread generator, seeded once per thread
+// (std::random_device per search was a system call each, 19k searches a second in self-play).
+inline std::uint32_t thread_seed()
+{
+    thread_local std::mt19937 seeder{std::random_device{}()};
+    return static_cast<std::uint32_t>(seeder());
+}
+
+// Tree nodes reserved per simulation: an expansion adds its legal moves as children.
+constexpr size_t kNodesPerSimulation = 32;
+
 class SmallMctsRunner
 {
 public:
@@ -232,7 +243,7 @@ public:
                             : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
         , cache_(std::move(cache))
         , rng_(options_.seed != 0 ? static_cast<std::uint32_t>(options_.seed ^ (options_.seed >> 32))
-                                  : std::random_device{}())
+                                  : thread_seed())
     {
         const bool ph = mcts_phases_on();
         const std::uint64_t t_ctor = ph ? now_ns() : 0;
@@ -265,8 +276,10 @@ public:
             root_history_stack_ = build_root_history_stack(
                 options_.request.fen, options_.request.history, root_board_);
         }
-        const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
-        tree_.reserve(expected_nodes);
+        // Every expansion adds a node per legal move (about 30 in the middlegame): reserve for the whole search
+        // at once, on top of a reused subtree (kept at its exact size), so the node array is allocated once rather
+        // than grown and copied several times (large arrays come from fresh, zeroed pages).
+        tree_.reserve(tree_.nodes.size() + 1 + static_cast<size_t>(std::max(0, options_.simulations)) * kNodesPerSimulation);
         path_buffer_.reserve(64);
         if (ph) g_ph_ctor_ns.fetch_add(now_ns() - t_ctor, std::memory_order_relaxed);
     }
@@ -716,7 +729,8 @@ private:
         node.value_prior = node.wdl[0] - node.wdl[2];
         node.leaf_plies = std::max(0.0F, eval.mlh_q * 25.0F);
 
-        std::vector<MovePrior> priors = compute_priors(board_state, eval);
+        thread_local std::vector<MovePrior> priors;  // capacity kept across expansions
+        compute_priors(board_state, eval, priors);
         if (priors.empty())
         {
             node.terminal = true;
@@ -738,12 +752,14 @@ private:
     }
 
 
-    std::vector<MovePrior> compute_priors(const chess::Board& board, const SmallPolicyValue& eval) const
+    // Into `entries` (cleared; its capacity is kept: expand_node passes a per-thread scratch vector).
+    void compute_priors(const chess::Board& board, const SmallPolicyValue& eval,
+                        std::vector<MovePrior>& entries) const
     {
         chess::Movelist legal_moves;
         chess::movegen::legalmoves(legal_moves, board);
 
-        std::vector<MovePrior> entries;
+        entries.clear();
         entries.reserve(legal_moves.size());
 
         float max_logit = -std::numeric_limits<float>::infinity();
@@ -797,7 +813,7 @@ private:
 
         if (entries.empty())
         {
-            return entries;
+            return;
         }
 
         if (mapped_count == 0)
@@ -807,7 +823,7 @@ private:
             {
                 entry.prior = uniform;
             }
-            return entries;
+            return;
         }
 
         if (options_.temperature <= 1e-5F)
@@ -820,7 +836,7 @@ private:
                 const bool is_best = (entry.policy_index >= 0) && (&entry == &*best_it);
                 entry.prior = is_best ? 1.0F : 0.0F;
             }
-            return entries;
+            return;
         }
 
         const float inv_temp = 1.0F / options_.temperature;
@@ -852,7 +868,7 @@ private:
                     entry.prior = uniform;
                 }
             }
-            return entries;
+            return;
         }
 
         const float inv_sum = static_cast<float>(1.0 / sum);
@@ -864,7 +880,7 @@ private:
             }
         }
 
-        return entries;
+        return;
     }
 
     void apply_dirichlet_noise(std::vector<MovePrior>& priors)
