@@ -52,13 +52,15 @@ Between steps the Python loop looks for a new engine and, every 30 s, appends to
   moves end up with and only the missing ones are run (a fast move after a full search is
   usually free). A full search mixes fresh Dirichlet noise into a reused root.
 - *Temperatures*: the priors are softmax(logits / `temperature`) (1.3) at every node. For the
-  first `temperature_plies` (30) searched plies the move is sampled with probability proportional
-  to visits^(1/`temperature_at_root`) (1.0); after that `temperature_late` (0) plays the most
-  visited move.
+  first `temperature_plies` (40) searched plies the move is sampled with probability proportional
+  to visits^(1/T): T = `temperature_at_root` (1.0) on full searches, `fast_temperature_at_root`
+  (0.7) on fast ones, whose 50-simulation visit counts are flat. After that `temperature_late` (0)
+  plays the most visited move.
 - *Dirichlet noise*, on full searches only: the root priors become (1 - ε) P + ε Dir(α), with
   α = `dirichlet_alpha` (0.3) and ε = `dirichlet_epsilon` (0.25).
-- *Random opening plies*: each game starts with `random_opening_plies` (8) uniformly random legal
-  moves. They are in the history planes but give no records and do not count towards
+- *Random opening plies* (`random_opening_plies`, 0 in the recipe: games start from the initial
+  position and the sampled plies make the openings): uniformly random legal moves before the
+  first search. They are in the history planes but give no records and do not count towards
   `temperature_plies` or `max_plies`.
 
 **The search** (`cpp/mcts/mcts_small.cpp`, one tree per game) selects children by PUCT. A child's
@@ -119,7 +121,7 @@ game's flags, and the game's records are written together. Unfinished games are 
 | 942 | 2 | `played_idx` | u16 vocabulary index of the played move, 0xFFFF = none |
 | 944 | 336 | `policy` | 84 x (u16 vocabulary index, u16 visit share x 65535), most visited first; the first K are used |
 
-Records are appended until the file holds `max_buffer_size` (2,000,000: 2.56 GB). After that,
+Records are appended until the file holds `max_buffer_size` (6,000,000: 7.68 GB). After that,
 with `fifo_buffer: true` the file is a ring (write n goes to slot n mod capacity, replacing the
 oldest record); with `false` each write replaces a random slot. After every step self-play
 rewrites, by atomic rename, `buffer.bin.writes` (records ever written) and

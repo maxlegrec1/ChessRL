@@ -96,12 +96,12 @@ The learning rate is `learning_rate` x schedule factor x warmup factor (and the 
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `kind` | `constant` | `constant` | `constant`, `cosine` or `step`. |
+| `kind` | `cosine` | `constant` | `constant`, `cosine` or `step`. The recipe holds `learning_rate` to step 70,000 (~2 h on an RTX 4090 + Ryzen 7950X), then decays to a tenth at step 280,000 (~8 h): a constant rate plateaus around 2,300-2,400 on the ladder, the decay carried a run to ~2,520. The schedule counts steps, so a longer run should stretch `total_steps`. |
 | `warmup_steps` | 1000 | 0 | Linear warmup from `learning_rate / warmup_steps` to `learning_rate`, counted from `start_step`. |
 | `start_step` | *unset* | 0 | Step the warmup and the cosine count from. -1: the step the run resumes at, resolved once and saved in checkpoints (`lr_start_step`) so later resumes keep it. |
-| `total_steps` | *unset* | 0 | Cosine only: length of the schedule from `start_step`, including `hold_steps`. 0 disables the cosine. |
-| `hold_steps` | *unset* | 0 | Cosine only: steps at the full rate before the decay starts. |
-| `final_ratio` | *unset* | 0.1 | Cosine only: the final rate as a fraction of `learning_rate`. |
+| `total_steps` | 280000 | 0 | Cosine only: length of the schedule from `start_step`, including `hold_steps`. 0 disables the cosine. |
+| `hold_steps` | 70000 | 0 | Cosine only: steps at the full rate before the decay starts. |
+| `final_ratio` | 0.1 | 0.1 | Cosine only: the final rate as a fraction of `learning_rate`. |
 | `milestones` | *unset* | [] | Step only: steps (counted from `start_step`, like the cosine's) at which the rate is multiplied by `gamma`. `[70000]` with `gamma: 0.5` halves it from step 70,000 on. |
 | `gamma` | *unset* | 0.5 | Step only: the factor applied at each milestone. |
 
@@ -165,14 +165,14 @@ ply.
 | `cpuct` | 0.65 | 0.65 | PUCT exploration constant. |
 | `temperature` | 1.3 | 1.3 | Prior temperature: priors are softmax(logits / `temperature`) at every node. 0 puts the whole prior on the top move. |
 | `temperature_at_root` | 1.0 | 1.0 | Move choice during the first `temperature_plies`: sampled with probability proportional to visits^(1 / T). 0 = the most visited move. |
-| `temperature_plies` | 30 | -1 | Searched plies that use `temperature_at_root`. -1 = the whole game. |
+| `temperature_plies` | 40 | -1 | Searched plies that use `temperature_at_root`. -1 = the whole game. |
 | `temperature_late` | 0.0 | 0.0 | Root temperature after `temperature_plies`. 0 = the most visited move. |
-| `fast_temperature_at_root` | *unset* | -1.0 | Root temperature of the fast searches (`pcr_fast_simulations`) during `temperature_plies`; below 0 they use `temperature_at_root`. Their 50-simulation visit counts are flat (about 11 effective moves against the policy's 6), so sampling them at 1 plays many weak moves; 0.7 samples them more sharply while the full searches keep `temperature_at_root`. |
+| `fast_temperature_at_root` | 0.7 | -1.0 | Root temperature of the fast searches (`pcr_fast_simulations`) during `temperature_plies`; below 0 they use `temperature_at_root`. Their 50-simulation visit counts are flat (about 11 effective moves against the policy's 6), so sampling them at 1 plays many weak moves; 0.7 samples them more sharply while the full searches keep `temperature_at_root`. |
 | `virtual_loss_width` | 8 | 8 | Leaves each search collects with virtual loss before one network round. 1 = strictly sequential search. |
 | `use_dirichlet` | true | true | Root Dirichlet noise on full searches (never on fast ones). |
 | `dirichlet_alpha` | 0.3 | 0.12 | Dirichlet α. |
 | `dirichlet_epsilon` | 0.25 | 0.05 | Noise weight ε: root prior = (1 - ε) P + ε noise. |
-| `random_opening_plies` | 8 | 0 | Uniformly random legal plies at the start of every game. They produce no records. A fraction adds one more ply to that share of games (2.25: 3 plies in a quarter of them, 2 in the others). |
+| `random_opening_plies` | 0 | 0 | Uniformly random legal plies at the start of every game. They produce no records. A fraction adds one more ply to that share of games (2.25: 3 plies in a quarter of them, 2 in the others). |
 | `random_opening_ramp` | *unset* | off | Moves `random_opening_plies` over the networks' trainer steps, `{start, end, start_step, end_step}` as for `search_q_ramp`; self-play applies the value at each network it loads (logged as `[ramp]`, and in `metrics/selfplay.jsonl`). From 8 to 0: random openings early, searched and sampled ones later. Off while `end_step` is 0. |
 | `max_plies` | 600 | 600 | Searched plies after which a game is a draw (flag 32 in its records). |
 | `resign_threshold` | 0.05 | 0.0 | Root expected score (W + D/2) below which the side to move counts towards resigning. 0 = never resign, and no playthrough games. |
@@ -180,7 +180,7 @@ ply.
 | `resign_playthrough` | 0.1 | 0.1 | Fraction of games that never resign; in them a would-be resignation is counted, and counted as wrong if that side did not lose. |
 | `resign_target_fp` | *unset* | 0.0 | Optional calibration. When > 0 (with `resign_threshold` > 0): after every `resign_calibration_window` would-be resignations in playthrough games, the threshold is multiplied by 0.8 if the wrong share exceeded this target, or by 1.1 if it was under half of it, within 0.005 to 0.2. 0 = fixed threshold. |
 | `resign_calibration_window` | *unset* | 400 | Would-be resignations per calibration step (`resign_target_fp` only). |
-| `max_buffer_size` | 2000000 | 10000000 | Buffer capacity in records (1,280 bytes each: 2.56 GB for the recipe). |
+| `max_buffer_size` | 6000000 | 10000000 | Buffer capacity in records (1,280 bytes each: 7.68 GB for the recipe). With 2M, the sampling window stopped growing at 8 minutes of self-play and the value head overfitted the newest games. |
 | `fifo_buffer` | true | false | When the buffer is full: true = ring, the oldest record is overwritten; false = a random record is replaced. `data.window_c` needs true. |
 | `poll_seconds` | 300 | 300 | How often self-play checks `.iteration` for a new engine. |
 | `save_pgn` | false | false | Write each finished game as a PGN file in `pgn_dir`. |

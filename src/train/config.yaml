@@ -14,9 +14,16 @@ weight_decay: 0.05
 beta1: 0.9
 beta2: 0.999
 grad_clip: 1.0
+# Flat for the first 70k steps (~2 h on an RTX 4090 + Ryzen 7950X, ~35k steps/h), then a cosine
+# down to a tenth by step 280k (~8 h), and a tenth after that. The decay is what carries a run past
+# the ~2,300-2,400 plateau of a constant rate (docs/NEXT_ROUND.md, round 3). It counts steps, so a
+# longer run should stretch total_steps.
 lr_schedule:
-  kind: constant
+  kind: cosine
   warmup_steps: 1000
+  hold_steps: 70000
+  total_steps: 280000
+  final_ratio: 0.1
 amp_dtype: float16
 # torch.compile the network for training: the step is memory-bound element-wise work (norms,
 # attention scores) that compiling fuses, 3 times faster (docs/TRAINER_SPEED.md). The first
@@ -97,27 +104,35 @@ selfplay:
   tree_reuse: true
   cpuct: 0.65
   temperature: 1.3 # prior temperature inside the tree
-  # Moves are sampled from the visit counts for the first 30 searched plies; after that the
-  # most visited move is played.
+  # Every game starts from the initial position, and its first 40 searched plies are sampled from
+  # the visit counts: the full searches at temperature 1 (with Dirichlet noise), the fast ones at
+  # 0.7, since their 50-simulation visit counts are flat (~11 effective moves against the policy's
+  # ~6) and sampling them at 1 plays many weak moves. After that the most visited move is played.
+  # Openings sampled this way stayed varied over 8 hours (6-7 effective first moves, ~4,400
+  # distinct positions at ply 8 in 400k records); round 2's run C, which drew its fast moves from
+  # the raw policy at 0.7, collapsed onto 1.e4 (docs/NEXT_ROUND.md).
   temperature_at_root: 1.0
-  temperature_plies: 30
+  temperature_plies: 40
   temperature_late: 0.0
+  fast_temperature_at_root: 0.7
   # Virtual-loss width: each thread collects 8 leaves per network call (bigger GPU batches,
   # slightly blurrier search). 1 = strictly sequential search.
   virtual_loss_width: 8
   use_dirichlet: true
   dirichlet_alpha: 0.3 # AlphaZero's chess values, on full searches only
   dirichlet_epsilon: 0.25
-  # Uniform-random plies at the start of every game, for opening variety.
-  random_opening_plies: 8
+  # No uniformly random plies: the openings come from the sampled plies above.
+  random_opening_plies: 0
   # Resign below 5% expected score for 3 own moves in a row. 10% of games never resign,
   # to measure how often resigning would have been wrong.
   resign_threshold: 0.05
   resign_consecutive: 3
   resign_playthrough: 0.1
   max_plies: 600
-  # Ring buffer: 2M records x 1,280 bytes = 2.6 GB, the oldest records overwritten first.
-  max_buffer_size: 2000000
+  # Ring buffer: 6M records x 1,280 bytes = 7.7 GB, the oldest records overwritten first. The
+  # sampling window (data.window_*) grows past 2M records by hour ~1; capping it at 2M (8 minutes
+  # of self-play) let the value head overfit the newest games (+50 to +100 Elo with 6M).
+  max_buffer_size: 6000000
   fifo_buffer: true
   poll_seconds: 300
   save_pgn: false

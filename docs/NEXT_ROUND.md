@@ -717,3 +717,57 @@ base-main 15% vs UCI_Elo 1400; base-wd 100% vs 1400 and 79% vs 2000 (31/1/8). Wi
 (0 sims) base-wd scores 42.5% vs 1400, 25% vs 1700, 7.5% vs 2000, and solves 58 of the 286
 puzzles rated 2,000+. An earlier main run needed 21 h to reach 1,000 on the same scale: the
 original code's speed varies a lot between runs.
+
+## Round 3: the plateau and the new recipe (2026-11-02/03)
+
+Canonical stack (round-three), RTX 4090 + Ryzen 7950X boxes (perf5-10), ladder every 10 minutes on the
+balanced Stockfish openings, opening diversity from `scripts/opening_diversity.py` (effective positions =
+2^entropy per ply over the newest 400k records). Elo values are ladder means over half hours (±~30).
+
+**Resuming into an empty buffer.** r3canon's step 114k resumed with a fresh buffer lost ~150-400 Elo for an
+hour (puzzles 0.731 -> 0.656): the window (W(N), counted on this buffer's writes) was 170k-800k records, the
+outcome value head memorised them (train loss 0.55 -> 0.43 in 500 steps), the overconfident value resigned
+earlier (82% resignations, 36-ply games, 3% draws), and `buffer/wdl_agreement` / `decisive_outcome` rose as
+symptoms. Branches since copy their parent's `buffer.bin*`.
+
+**Branches from P** (plateau checkpoint, step 183.5k, with P's buffer; 2 h each; control 2,300 ± 14, puzzles
+0.719, last hour):
+
+| branch | change | Elo | Δ | puzzles |
+|---|---|---|---|---|
+| temp12 | `temperature_plies` 12 | 2,377 ± 12 | +77 | 0.752 |
+| qpol07 | fast moves from the raw policy at 0.7 (1.6 h) | 2,373 ± 22 | +73 | 0.752 |
+| cosine | LR cosine to 0 over 70k steps | 2,325 ± 27 | +25 | 0.760 |
+| openings0 | `random_opening_plies` 0 | 2,303 ± 21 | +3 | 0.728 |
+| poll60 | `poll_seconds` 60 | 2,248 ± 22 | −52 | 0.724 |
+| resignfp | `resign_target_fp` 0.03 | 2,234 ± 12 | −66 | 0.725 |
+| qvalue | `search_heads: q_value` | 2,131 ± 27 | −169 | 0.703 |
+
+The search reading the search-trained value spirals into overconfidence (24-ply games, 1.4% draws, 86%
+resignations), at the plateau and from scratch (the "phase" run, which ramped random plies 8 -> 0 and the value
+weight 0 -> 1 over hours 1-3, fell from 2,213 to 2,115 once the ramp ended).
+
+**From scratch, 4 h** (mean Elo over hours 2-4):
+
+| run | change from the old recipe | Elo, h 2-4 | puzzles, h 3.5-4 |
+|---|---|---|---|
+| r3canon | (old recipe) | ~2,215 | 0.731 (h 3-3.5) |
+| openramp | random plies ramped 8 -> 0 over hours 0.5-1.5 | ~2,230 | 0.704 |
+| win6m | `max_buffer_size` 6M | 2,317 | 0.749 |
+| t07 | 6M, `fast_temperature_at_root` 0.7 | 2,326 | 0.746 |
+| open40t07 | 6M, fast 0.7, no random plies, `temperature_plies` 40 | 2,327 | 0.755 |
+| combo | 6M, `temperature_plies` 12 | 2,348 | 0.777 |
+| combolr | combo, LR halved at step 70k | 2,391 | 0.779 |
+
+open40t07's openings narrowed to 1.e4 70% at 1.4 h (policy 87% 1.e4) and broadened again (7 effective first
+moves, top 26%, ~4,100 effective positions at ply 8 at 4 h): the full searches keep T = 1 and root noise.
+
+**open40cos (8 h)**: open40t07 with the LR flat to step 70k, then a cosine to 0.1x at 280k. Half-hour means:
+2,242 (h 2-2.5), 2,325 (3-3.5), 2,395 (4-4.5), 2,365 (5-5.5), 2,451 (6-6.5), 2,515 (7-7.5), **2,525 / puzzles
+0.806 (7.5-8)**; last six ratings 2,467-2,549. Diversity at the end: 6 effective first moves (top 33%), 4,433
+at ply 8. Every flat-LR run had stalled at ~2,300-2,400. 116 checkpoints synced home (every ~2,500 steps).
+
+**New recipe** (`src/train/config.yaml`, 2026-11-03): open40cos's settings: `random_opening_plies` 0,
+`temperature_plies` 40, `fast_temperature_at_root` 0.7, `max_buffer_size` 6M, `lr_schedule` cosine (hold 70k,
+total 280k, final 0.1). Single 8 h run: how much of the gain is the schedule rather than the openings and the
+buffer is not separated (control: the old recipe with the same schedule).

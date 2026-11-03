@@ -75,13 +75,15 @@ The charts are drawn by `docs/blog/make_charts.py --readme` from the data of the
 - **Training targets**: the policy learns the search's visit counts (`policy_target: visits`); the
   search reads the value output trained on game results (`search_heads: outcome`).
 - **Search**: playout-cap randomisation, 25% of moves at 400 simulations (saved) and 75% at 50.
-  Moves are sampled from the visit counts for the first 30 plies, then the most visited move is
-  played. Dirichlet noise (α 0.3, ε 0.25) on full searches. Every game starts with 8 random plies.
+  Every game starts from the initial position. Moves are sampled from the visit counts for the
+  first 40 plies (full searches at temperature 1, fast ones at 0.7), then the most visited move is
+  played. Dirichlet noise (α 0.3, ε 0.25) on full searches.
 - **Resignation** below 5% expected score for 3 moves in a row; 10% of games are played to the end
   to check that resigning was right.
-- **Optimiser**: AdamW, learning rate 1e-3 with a 1,000-step warmup, weight decay 0.05 on weight
+- **Optimiser**: AdamW, learning rate 1e-3 with a 1,000-step warmup, flat to step 70,000 (~2 h on
+  an RTX 4090), then a cosine down to 1e-4 at step 280,000 (~8 h); weight decay 0.05 on weight
   matrices (it keeps activations inside FP16 range).
-- **Buffer**: a 2M-record ring, sampled through a window that grows with the data.
+- **Buffer**: a 6M-record ring (7.7 GB), sampled through a window that grows with the data.
 
 Every field is described in [`docs/CONFIG.md`](docs/CONFIG.md).
 

@@ -37,8 +37,10 @@ before starting anything that costs money.
 
 ## Self-play buffer
 
-- A ring buffer (`selfplay.fifo_buffer: true`) of `max_buffer_size` records (2,000,000 x
-  1,280 bytes); the trainer samples a window over the newest records (`data.window_*`).
+- A ring buffer (`selfplay.fifo_buffer: true`) of `max_buffer_size` records (6,000,000 x
+  1,280 bytes = 7.7 GB); the trainer samples a window over the newest records (`data.window_*`).
+- A run resumed into an empty buffer trains on a tiny window and overfits for ~1 h (−150 Elo or
+  more): branch runs should copy their parent's `buffer.bin*` (records + `.writes`).
 - Once full, the file stops growing. **Use the `<buffer>.writes` sidecar** for the insertion
   count. Trainer pacing is a token bucket on it: at most `target_k` samples per record written
   since training started. The 30-second rate window is only for the logs.
