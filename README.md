@@ -1,248 +1,119 @@
 # ChessRL
 
-A small AlphaZero, trained from scratch on one GPU.
+AlphaZero for chess, trained from scratch on a single RTX 4090.
 
-ChessRL learns chess only by playing against itself: no human games, no opening book. C++ workers
-play thousands of games at once with Monte Carlo tree search (MCTS), running the network with a
-fused CUDA kernel in 16-bit floating point; a PyTorch trainer learns from the positions they save
-and publishes new networks back into the running games.
+ChessRL learns chess only by playing against itself: no human games, no opening book, no endgame
+tables. C++ workers play 1,024 games at once with Monte Carlo tree search (MCTS) and run the network
+in one fused CUDA kernel; a PyTorch trainer learns from the positions they save and publishes new
+networks back into the running games every 500 steps.
 
-With the default recipe, on one RTX 4090, the network passes 1,000 Elo after about 2 hours and
-reaches about 2,230 after 24 hours on our rating ladder. Searching 800 simulations per move, it
-then scores 79% against Stockfish 16 limited to 2000 Elo (31 wins, 1 draw, 8 losses).
+## Where it stands
 
-## Results
+On a single RTX 4090 with a Ryzen 9 7950X, ratings on the project's ladder (random play = 0, about
+±45 per rating) and the share of 1,000 Lichess puzzles solved:
 
-The default recipe against the code of the [first post](#write-ups) (commit
-[`128893c`](https://github.com/maxlegrec1/ChessRL/tree/128893c96f2921fda19d1d940617b198754aff75)),
-24 hours each on one RTX 4090. Ratings are on the ladder described under
-[Measuring strength](#measuring-strength), where random play is 0.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/elo_dark.png">
-  <img alt="Ladder Elo by hours of training: the new recipe reaches 1,000 Elo after 2.1 hours and 2,228 after 24; the original code reaches 1,000 after 11.8 hours and 1,170 after 24." src="docs/img/elo_light.png">
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/puzzles_dark.png">
-  <img alt="Share of 1,000 Lichess puzzles solved by hours of training: 70% for the new recipe after 24 hours, 27% for the original code." src="docs/img/puzzles_light.png">
-</picture>
-
-| | 1,000 Elo after | after 24 h | puzzles solved after 24 h |
+| Recipe | Around 4 h | Later | Puzzles solved |
 |---|---|---|---|
-| Original code (first post) | 11.8 h | 1,170 | 27% |
-| Default recipe | **2.1 h** | **2,230** | **70%** |
+| Previous recipe (constant learning rate) | ~2,300 | levels off at 2,300-2,400 | 0.73 (3.3 h) |
+| **Current recipe** (`src/train/config.yaml`) | ~2,360 | **~2,520 at 8 h** | **0.80 (8 h)** |
 
-The charts are drawn by `docs/blog/make_charts.py --readme` from the data of the second post.
+How we got here, and what did not work, is in [`docs/RESULTS.md`](docs/RESULTS.md). The two blog
+posts tell the longer story:
 
-## Write-ups
+- [AlphaZero from scratch: training a chess AI on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu/)
+  (the first version, commit `128893c`)
+- [AlphaZero from scratch, continued: 6× faster on a single RTX 4090](https://mvdbk.fr/blog/alphazero-from-scratch-rtx-4090/)
 
-- [AlphaZero from scratch: training a chess AI on a single consumer GPU](https://mvdbk.fr/blog/chessrl-alphazero-single-gpu):
-  the architecture, the self-play loop, the performance work, and the bugs that taught the most.
-  It describes commit `128893c`.
-- [AlphaZero from scratch, continued: 6× faster on a single RTX 4090](https://mvdbk.fr/blog/alphazero-from-scratch-rtx-4090):
-  better training targets, a small transformer and a cheaper search, an FP16 bug that looked like a
-  collapse, and a network that beats Stockfish limited to 2000 Elo. The lab log behind it is
-  [`docs/NEXT_ROUND.md`](docs/NEXT_ROUND.md).
+## Quickstart
 
-## How it works
-
-1. `python -m src.run` creates `artifacts/runs/<id>/`, copies the config there, exports a randomly
-   initialised network, and starts two processes: self-play and the trainer.
-2. **Self-play** (`src/self_play`, C++ in `cpp/`) plays 1,024 games at once. A quarter of the moves
-   get a full 400-simulation search and are saved to the buffer file with the search's visit
-   counts; the others get a 50-simulation search that only moves the game forward.
-3. **The trainer** (`src/train`) samples batches of 2,048 positions from the newest part of the
-   buffer and trains the network's outputs: the move probabilities (towards the visit counts), the
-   expected result (towards the game's result) and the number of moves left.
-4. Every 500 steps it saves a checkpoint and exports it for self-play (`scripts/build_net.sh`, a
-   `.cnet` file in a fraction of a second). Self-play loads each new network between moves,
-   without restarting.
-5. The two processes share nothing but files: the buffer and `engines/.iteration`, which points at
-   the newest network. Either can be stopped and resumed on its own.
-6. Self-play runs the whole network in one CUDA kernel launch per batch (`cpp/net/`): one thread
-   block per position, weights pre-packed by `src/export/to_cnet.py`. It is written for the
-   encoder at 128 wide, 8 heads, feed-forward 256 and up to 16 layers.
-
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the details.
-
-## The recipe
-
-[`src/train/config.yaml`](src/train/config.yaml) is the default config. Its main settings:
-
-- **Network**: a transformer with one token per square (0.81M parameters, `model.arch: encoder`).
-  A ResNet is also available (`model.arch: resnet`).
-- **Training targets**: the policy learns the search's visit counts (`policy_target: visits`); the
-  search reads the value output trained on game results (`search_heads: outcome`).
-- **Search**: playout-cap randomisation, 25% of moves at 400 simulations (saved) and 75% at 50.
-  Every game starts from the initial position. Moves are sampled from the visit counts for the
-  first 40 plies (full searches at temperature 1, fast ones at 0.7), then the most visited move is
-  played. Dirichlet noise (α 0.3, ε 0.25) on full searches.
-- **Resignation** below 5% expected score for 3 moves in a row; 10% of games are played to the end
-  to check that resigning was right.
-- **Optimiser**: AdamW, learning rate 1e-3 with a 1,000-step warmup, flat to step 70,000 (~2 h on
-  an RTX 4090), then a cosine down to 1e-4 at step 280,000 (~8 h); weight decay 0.05 on weight
-  matrices (it keeps activations inside FP16 range).
-- **Buffer**: a 6M-record ring (7.7 GB), sampled through a window that grows with the data.
-
-Every field is described in [`docs/CONFIG.md`](docs/CONFIG.md).
-
-## Prerequisites
-
-- **GPU**: an NVIDIA card with compute capability 8.0 or higher (Ampere, Ada, Hopper). Used on an
-  RTX 4090 and an H200.
-- **CUDA Toolkit** 12.x with `nvcc`: https://developer.nvidia.com/cuda-downloads.
-- **uv**: `curl -LsSf https://astral.sh/uv/install.sh | sh`. It installs Python 3.13 itself.
-- A C++17 compiler (the system `g++` is fine).
-- **Stockfish 16** for the rating ladder (`apt install stockfish`). Training runs without it.
-
-## Install
+You need an NVIDIA GPU with compute capability 8.0 or higher, the CUDA Toolkit 12.x with `nvcc`, a
+C++17 compiler, [uv](https://docs.astral.sh/uv/) (it installs Python 3.13 itself), and Stockfish 16
+for the rating ladder (`apt install stockfish`; training runs without it).
 
 ```bash
 git clone --recurse-submodules https://github.com/maxlegrec1/ChessRL.git && cd ChessRL
+bash scripts/check_install.sh            # checks uv, the GPU, nvcc, Stockfish; hints for anything missing
+export CHESSRL_CUDA_ARCH=sm_89           # sm_89 RTX 4090, sm_90 H100/H200, sm_86 RTX 3090, sm_80 A100
+uv sync                                  # builds the C++ extension, installs the Python dependencies
 
-# 1) Check the host (fails with a hint for anything missing).
-bash scripts/check_install.sh
-
-# 2) Which GPU architecture to compile for.
-export CHESSRL_CUDA_ARCH=sm_89        # sm_89 RTX 4090, sm_90 H100/H200, sm_86 RTX 3090, sm_80 A100
-
-# 3) Build the C++ extension and install the Python dependencies.
-uv sync
-
-# 4) Run the tests that need no GPU.
-uv run pytest -m "not gpu"
+uv run python -m src.run --name my-run                 # a run with the current recipe
+uv run python -m src.run --resume artifacts/runs/<id>  # resume from its latest checkpoint
+uv run python scripts/ladder_daemon.py --run-dir artifacts/runs/<id>   # rate it every 30 min
+uv run python scripts/dashboard.py --port 8501         # http://localhost:8501
+uv run python scripts/analysis_server.py --port 8510   # play through positions with a checkpoint
 ```
 
-## Run
+A run lives in `artifacts/runs/<id>/`: its config, buffer, checkpoints, exported networks, metrics
+(`metrics/*.jsonl`), ladder ratings and logs. The dashboard reads every run there.
 
-All commands run from the repository root.
+If `uv sync` cannot find `nvcc`, point `CUDA_ROOT` at your CUDA install (for example
+`/usr/local/cuda-12.8`). If self-play is slow, the extension was built for another GPU: set
+`CHESSRL_CUDA_ARCH` and run `uv sync` again.
 
-```bash
-# Start a run with the default recipe. Creates artifacts/runs/<id>/ (buffer, engines,
-# checkpoints, metrics, logs and a copy of the config).
-uv run python -m src.run --name my-run
+## How it works
 
-# Start a run with another config (for example an edited copy of src/train/config.yaml).
-uv run python -m src.run --config my_config.yaml --name my-variant
+- `src/run.py` starts two processes that share nothing but files: self-play and the trainer.
+- **Self-play** (`src/self_play/`, C++ in `cpp/`) writes the positions of finished games to a ring
+  buffer file, with the search's visit counts and the game result.
+- **The trainer** (`src/train/`) samples batches from the newest part of that buffer and trains the
+  network to predict the visit counts, the result and the number of moves left.
+- Every 500 steps it saves a checkpoint and exports it to `.cnet`, the fused kernel's format;
+  self-play loads the new network between moves, without restarting.
+- The network sees every position from the side to move, as white, and scores moves from one
+  1,858-move vocabulary.
+- Strength is measured by a rating ladder against fixed opponents (random players and reduced
+  Stockfish levels) from balanced openings, plus 1,000 puzzles.
 
-# Resume a run from its latest checkpoint, with its own config.
-uv run python -m src.run --resume artifacts/runs/<id>
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the details.
 
-# Follow the logs.
-tail -f artifacts/runs/<id>/selfplay.log artifacts/runs/<id>/training.log
+## The current recipe
 
-# Only one side, for debugging.
-uv run python -m src.run --no-train      # self-play only
-uv run python -m src.run --no-selfplay   # trainer only
+- **Network**: a transformer with one token per square, 0.81M parameters.
+- **Targets**: the policy learns the search's visit counts; the search reads the value trained on
+  game results.
+- **Search**: 25% of moves get a full 400-simulation search (recorded), 75% a 50-simulation one that
+  only moves the game forward. Dirichlet noise on full searches.
+- **Openings**: every game starts from the initial position; the first 40 searched plies are
+  sampled from the visit counts (full searches at temperature 1, fast ones at 0.7), then the most
+  visited move is played.
+- **Buffer**: a 6M-record ring (7.7 GB), sampled through a window that grows with the run.
+- **Optimiser**: AdamW at 1e-3, flat to step 70,000 (~2 h), then a cosine down to 1e-4 at step
+  280,000 (~8 h).
 
-# Export a checkpoint for self-play by hand (appends it to the .iteration file).
-scripts/build_net.sh artifacts/runs/<id>/checkpoints/step_00010000.pt 10000 /tmp/engines /tmp/engines/.iteration
-```
+Every setting is described in [`docs/CONFIG.md`](docs/CONFIG.md).
 
-The trainer writes `metrics/train.jsonl` and self-play `metrics/selfplay.jsonl` in the run
-directory. Weights & Biases logging is off by default (`wandb.enabled` in the config).
+## Repository map
 
-## Measuring strength
-
-**The rating ladder** (`scripts/ladder_daemon.py`) rates the newest engine of a run every 30 minutes:
-
-```bash
-uv run python scripts/ladder_daemon.py --run-dir artifacts/runs/<id>
-```
-
-Each rating is 96 games at 100 simulations per move against the two reference opponents nearest the
-network's level (a random player, a player that always captures, and Stockfish 16 at several reduced
-strengths, rated once among themselves with random play at 0), plus 48 more against the next one up
-(or down) each time the network scores 85% or more (or 15% or less), up to three times. Every game starts from one of 24
-openings that Stockfish judges balanced. Each rating also solves 1,000 Lichess puzzles. Results go to
-`<run>/ladder/ladder.jsonl`; a rating is about ±45 Elo.
-
-**The first post's test**, Stockfish 16 limited to a given Elo at 100 ms per move, with the network
-searching 800 simulations per move:
-
-```bash
-uv run python scripts/sf_benchmark.py --engines a.cnet b.cnet --elo 1400 2000 --games 40 --out bench.jsonl
-```
-
-**Network check**: `scripts/net_parity.py ckpt.pt` compares the fused CUDA network with PyTorch on
-the same positions (top-move agreement, policy KL divergence, value error).
-
-## Dashboard and analysis board
-
-```bash
-uv run python scripts/dashboard.py --port 8501     # http://localhost:8501
-uv run python scripts/analysis_server.py --port 8510
-```
-
-The dashboard is read-only. It shows every run under `artifacts/runs/` (or the directories in
-`$CHESSRL_RUNS_ROOT`, separated by colons): ladder Elo and puzzles by hours of training, steps or
-self-play positions, the first-move probe, opening diversity, the opening and value schedules,
-losses, game statistics, self-play speed, and the settings that differ between the selected runs.
-The server reads each metrics file incrementally and sends every curve smoothed and reduced to
-600 points, so the page stays fast however long the runs. A run whose `metrics/branch.json` names
-a parent (`{"parent_run": "<run dir>"}`) is drawn after it. `--analysis-url` adds a link to the
-analysis board, which runs a checkpoint's search on the CPU for any position.
-
-## Scripts
-
-| Script | What it does |
+| Path | What is there |
 |---|---|
-| `check_install.sh` | Checks uv, the GPU, `nvcc`, Stockfish and the target architecture. Run it first. |
-| `build_net.sh` | Exports a checkpoint to the fused network format (`.cnet`) and appends it to a run's `.iteration` file. |
-| `build_cpp_tests.sh` | Builds the C++ tests (`cpp/build/tests/cpp_tests`). Needs only g++. |
-| `bench_cpu_search.sh` | CPU benchmark of the self-play search with a fake network, no GPU: CPU time per evaluation and a digest of the search results (built by `build_cpu_bench.sh`; positions from `make_bench_positions.py`). |
-| `ladder_daemon.py` | Rates a run's newest engine on the ladder, every 30 minutes. |
-| `rerate.py` | Re-rates saved checkpoints on a chosen opening set. |
-| `calibrate_finish.py` | Finishes an interrupted calibration of the ladder's reference opponents. |
-| `make_sf_openings.py`, `make_puzzle_set.py` | Build the ladder's balanced openings and its 1,000-puzzle set (both are in `data/`). |
-| `sf_benchmark.py` | The first post's Stockfish test, for several engines and Stockfish levels in parallel. |
-| `stockfish_match.py` | One match of an engine against Stockfish at a fixed Elo. |
-| `cpu_stockfish_match.py` | The same test with the network searching on the CPU (no GPU needed). |
-| `puzzle_scan.py`, `showcase_games.py` | Hard puzzles solved by a checkpoint, and games against one ladder opponent (PGN). |
-| `net_parity.py` | The fused CUDA network against PyTorch, per checkpoint. |
-| `search_quality.py`, `search_quality_report.py` | Training-target quality per network evaluation on the CPU: self-play's PUCT search against Gumbel root search, judged by Stockfish (results in `docs/PERF.md`). |
-| `check_buffer.py` | Checks buffer records against python-chess. |
-| `bench_selfplay.py`, `perfreport.py` | Self-play speed benchmark with the training config, and a side-by-side report of two benchmarks. |
-| `dashboard.py` (page in `dashboard_ui/`), `analysis_server.py` | The dashboard and the analysis board. |
-| `opening_diversity.py` | Opening diversity of a run's newest self-play records, per ply (`--every-min N` appends to `metrics/diversity.jsonl`). |
-| `perf/` | Self-play speed A/B on a rented GPU box (`selfplay_ab.sh`; results in `docs/PERF.md`). |
-| `vast/` | Running on rented Vast.ai GPUs: launch with a budget guard, box setup, metric sync. |
+| `src/run.py` | The launcher |
+| `src/self_play/` | The self-play process (drives the C++ worker) |
+| `src/train/` | The trainer, the buffer reader, the config (`config.yaml` is the recipe) |
+| `src/models/` | The transformer, its fused training kernels, growth |
+| `src/export/` | Checkpoint to `.cnet` |
+| `src/rating/`, `src/analysis/` | The ladder; the CPU search behind the analysis board |
+| `cpp/` | MCTS, self-play, position encoding, the fused CUDA network (`cpp/net/`) |
+| `scripts/` | Tools (below) |
+| `tests/` | Python tests (C++ tests in `cpp/mcts/tests.cpp`) |
+| `data/` | The ladder's openings and puzzles |
 
-## Tests
+Scripts you will use: `check_install.sh`, `build_net.sh` (export a checkpoint by hand),
+`ladder_daemon.py`, `dashboard.py`, `analysis_server.py`, `net_parity.py` (fused network against
+PyTorch), `check_buffer.py` (buffer records against python-chess), `bench_selfplay.py` (self-play
+speed), `opening_diversity.py` (how varied the self-play openings are), and `vast/` (runs on rented
+GPUs).
+
+## Contributing
 
 ```bash
-uv run pytest                 # everything (GPU tests skip without CUDA)
-uv run pytest -m "not gpu"    # CPU only
-
-bash scripts/build_cpp_tests.sh && cpp/build/tests/cpp_tests   # C++ tests
+CUDA_VISIBLE_DEVICES="" uv run pytest        # CPU tests; GPU tests skip
+uv run pytest                                # everything, on a machine with CUDA
+bash scripts/build_cpp_tests.sh && cpp/build/tests/cpp_tests
+uv run ruff check . && uv run ruff format --check .
 ```
 
-## Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `nvcc not at /usr/local/cuda/bin/nvcc` | The `/usr/local/cuda` link is missing or points at a CUDA without `nvcc`. `export CUDA_ROOT=/usr/local/cuda-12.8` (wherever your `nvcc` is). |
-| `error: [Errno 2] No such file ... nvcc` during `uv sync` | Same as above; `scripts/check_install.sh` catches it. |
-| `libcudart.so.12: cannot open shared object file` | Add the CUDA 12 library directory to `LD_LIBRARY_PATH`, e.g. `/usr/local/cuda-12.8/targets/x86_64-linux/lib`. |
-| `CHESSRL_CUDA_ARCH=... is malformed` | Use `sm_` followed by the compute capability: `sm_89` (RTX 4090), `sm_90` (H100/H200), `sm_86` (RTX 3090), `sm_80` (A100). |
-| The extension imports but self-play is slow | It was compiled for another architecture. Set `CHESSRL_CUDA_ARCH` and run `uv sync` again. |
-
-## Layout
-
-- `src/run.py`: the launcher. `src/self_play/`: the self-play process. `src/train/`: the trainer, the
-  buffer reader and the config (`config.yaml` is the recipe).
-- `src/models/`: the transformer (`encoder.py`), the ResNet (`small/`), growth and model loading.
-- `src/export/`: checkpoint to the fused network format. `src/rating/`: the ladder. `src/analysis/`: the CPU search
-  behind the analysis board.
-- `cpp/`: the C++ extension (MCTS, self-play, position encoding, the fused CUDA network in
-  `cpp/net/`) and the chess
-  library (a git submodule).
-- `scripts/`: the tools above. `tests/`: the Python tests.
-- `data/`: the ladder's balanced openings and the 1,000 puzzles.
-- `docs/`: `ARCHITECTURE.md`, `CONFIG.md`, the lab log `NEXT_ROUND.md`, the README charts, and the
-  blog posts with their charts (`docs/blog/`).
-- `artifacts/`: runs and other generated files (not tracked).
+Changes that touch self-play or the network should come with a speed or strength measurement: a
+benchmark (`scripts/bench_selfplay.py`) or ladder ratings from a run against the current recipe.
 
 ## License
 
