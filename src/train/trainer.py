@@ -15,7 +15,7 @@ from rich.console import Console
 from torch import amp, optim
 
 from src.models import encoder
-from src.models.factory import build_model, normalize_spec
+from src.models.factory import build_model, normalize_spec, stm_colour
 from src.models.growth import grow_encoder
 from src.models.small.vocab import policy_to_idx
 
@@ -97,7 +97,11 @@ class Trainer:
         if config.resume_path:
             ckpt = torch.load(config.resume_path, map_location=self.device, weights_only=False)
             spec = normalize_spec(ckpt.get("model_spec"))
+            if spec["stm_plane"] != normalize_spec(config.model)["stm_plane"]:
+                self.console.log(f"[model] stm_plane {spec['stm_plane']!r}: the checkpoint's, not the config's")
         self.model = build_model(spec).to(self.device)
+        # Plane 104 of the decoded inputs: the real side to move (model.stm_plane: colour) or always 1.
+        self.stm_colour = stm_colour(spec)
         self.model.train()
         self.optimizer = self._make_optimizer()
         if config.fp16_accumulation:
@@ -383,6 +387,7 @@ class Trainer:
         cfg = self.config
         inputs = decode_fields(
             f["cur_bb"], f["past_bb"], f["cur_rep"], f["past_rep"], f["castling"], f["ep"], f["halfmove"],
+            flags=f["flags"], stm_colour=self.stm_colour,
         )  # fmt: skip
         full = (f["flags"] & FLAG_FULL_SEARCH) > 0
         target_mlh = (f["plies_remaining"].clamp_min(0.0) / 25.0).clamp_max(4.0)

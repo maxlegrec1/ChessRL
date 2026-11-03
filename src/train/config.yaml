@@ -43,6 +43,9 @@ model:
   layers: 4
   heads: 8
   d_ff: 256
+  # Input plane 104 carries the real side to move (1 White, 0 Black) instead of a constant 1: the network's only
+  # sign that it plays the black pieces, since positions are mirrored so that the side to move plays white.
+  stm_plane: colour
 
 # The policy learns the search's visit counts. The search reads the value and moves-left
 # heads trained on game results, not the ones trained on its own backed-up estimates.

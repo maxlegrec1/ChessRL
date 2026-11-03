@@ -149,18 +149,21 @@ def records_to_batch(rows: np.ndarray) -> Batch:
 _SHIFTS = torch.arange(64, dtype=torch.int64)
 
 
-def decode_planes(batch: Batch, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+def decode_planes(batch: Batch, dtype: torch.dtype = torch.float32, stm_colour: bool = False) -> torch.Tensor:
     """Build the [B, 8, 8, 111] input (same layout as fen_encoder.py) on batch's device."""
     return decode_fields(
         batch.cur_bb, batch.past_bb, batch.cur_rep, batch.past_rep, batch.castling, batch.ep, batch.halfmove,
-        dtype,
+        dtype, flags=batch.flags, stm_colour=stm_colour,
     )  # fmt: skip
 
 
 def decode_fields(cur_bb, past_bb, cur_rep, past_rep, castling, ep, halfmove,
-                  dtype: torch.dtype = torch.float32) -> torch.Tensor:  # fmt: skip
+                  dtype: torch.dtype = torch.float32, flags=None, stm_colour: bool = False) -> torch.Tensor:  # fmt: skip
     """decode_planes on the fields themselves. No host sync and no data-dependent shape, so the
-    trainer compiles it with the network. Records are canonical: white to move, no flipping."""
+    trainer compiles it with the network. Records are canonical: white to move, no flipping.
+
+    stm_colour (model.stm_plane: colour): plane 104 is the real side to move, 1 for White and 0 for Black
+    (FLAG_BLACK_TO_MOVE in `flags`); otherwise it is 1 for every record."""
     device = cur_bb.device
     bsz = cur_bb.shape[0]
     shifts = _SHIFTS.to(device)
@@ -179,7 +182,13 @@ def decode_fields(cur_bb, past_bb, cur_rep, past_rep, castling, ep, halfmove,
     planes = torch.zeros(bsz, INPUT_PLANES, 8, 8, dtype=dtype, device=device)
     planes[:, :104] = hist.reshape(bsz, 104, 8, 8).to(dtype)
 
-    planes[:, 104] = 1.0  # side to move: white, always
+    if stm_colour:
+        if flags is None:
+            raise ValueError("decode_fields: stm_colour needs the records' flags")
+        white = (flags.to(torch.int64) & FLAG_BLACK_TO_MOVE) == 0
+        planes[:, 104] = white.to(dtype)[:, None, None]  # the real side to move
+    else:
+        planes[:, 104] = 1.0  # side to move: white, always (the canonical view)
 
     has_ep = ep < 64
     ep_sq = torch.where(has_ep, ep, torch.zeros_like(ep))

@@ -116,7 +116,7 @@ PYBIND11_MODULE(_inference_cpp, m)
     // encode_position_with_history (tests/test_packed_parity.py gates this).
     m.def(
         "encode_position_packed_roundtrip",
-        [](const std::string& fen, const std::vector<std::string>& moves) {
+        [](const std::string& fen, const std::vector<std::string>& moves, bool stm_colour) {
             const std::string starting_fen = fen.empty()
                 ? std::string(chess::constants::STARTPOS)
                 : fen;
@@ -134,11 +134,13 @@ PYBIND11_MODULE(_inference_cpp, m)
             chessrl::mcts::HistoryStack stack =
                 chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
             auto packed = chessrl::mcts::single::pack_small_position(board, stack);
-            return chessrl::mcts::single::expand_packed_to_dense(packed);
+            return chessrl::mcts::single::expand_packed_to_dense(packed, stm_colour);
         },
         py::arg("fen"),
         py::arg("moves"),
-        "Pack a FEN+history then CPU-expand it; must match encode_position_with_history.");
+        py::arg("stm_colour") = false,
+        "Pack a FEN+history then CPU-expand it; must match encode_position_with_history. stm_colour: plane 104 "
+        "is the real side to move (model.stm_plane colour), as fen_to_tensor(..., stm_colour=True) makes it.");
 
     m.def(
         "fused_forward_dense",

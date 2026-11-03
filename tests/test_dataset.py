@@ -134,6 +134,22 @@ def test_records_are_what_the_encoder_makes_of_the_game():
         np.testing.assert_array_equal(planes[i], ref, err_msg=f"row {i} fen={fen}")
 
 
+def test_colour_plane_matches_the_encoder():
+    # model.stm_plane colour: plane 104 is the real side to move, from the records' FLAG_BLACK_TO_MOVE on one side
+    # and the game's own position on the other; every other plane is the canonical one.
+    games: list = []
+    rows = synth_records(n_games=6, seed=4, games=games)
+    batch = records_to_batch(rows)
+    planes = decode_planes(batch, stm_colour=True).numpy()
+    constant = decode_planes(batch).numpy()
+    for i, (fen, past, past_reps, cur_rep) in enumerate(games):
+        ref = fen_to_tensor(fen, [bulletchess.Board.from_fen(f) for f in past], past_reps, cur_rep, stm_colour=True)
+        np.testing.assert_array_equal(planes[i], ref, err_msg=f"row {i} fen={fen}")
+        white = " w " in fen
+        assert (planes[i][..., 104] == (1.0 if white else 0.0)).all()
+        np.testing.assert_array_equal(np.delete(planes[i], 104, -1), np.delete(constant[i], 104, -1))
+
+
 def test_targets_are_legal_in_the_record_position():
     for rec in synth_records(n_games=4, seed=3):
         board = chess.Board(rec["fen"].decode())

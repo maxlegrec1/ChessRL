@@ -17,7 +17,7 @@ Channel layout:
     [78..89]   t-6 piece planes;     [90]    t-6 repetition flag
     [91..102]  t-7 piece planes;     [103]   t-7 repetition flag
   Global planes (broadcast over the 8x8 board):
-    [104]: side-to-move, always 1.0 (white, after mirroring)
+    [104]: side-to-move: 1.0, or with model.stm_plane colour the real side to move (1.0 White, 0.0 Black)
     [105]: en passant target square (one-hot at the EP square)
     [106]: castling W kingside
     [107]: castling W queenside
@@ -125,8 +125,12 @@ def fen_to_tensor(
     past_boards: list[bulletchess.Board] | None = None,
     past_repetitions: list[bool] | None = None,
     current_repetition: bool = False,
+    stm_colour: bool = False,
 ) -> np.ndarray:
     """Encode a position with optional history into [8, 8, 111] float32.
+
+    stm_colour (model.stm_plane: colour): plane 104 is the real side to move, 0 when black is to move
+    (after mirroring); otherwise it is always 1.
 
     Args:
         fen: current position as FEN string.
@@ -168,7 +172,7 @@ def fen_to_tensor(
     _encode_globals(board, tensor)
     if board.turn == bulletchess.BLACK:
         tensor = mirror_planes(tensor)
-        tensor[:, :, PLANE_STM] = 1.0
+        tensor[:, :, PLANE_STM] = 0.0 if stm_colour else 1.0
     return tensor
 
 

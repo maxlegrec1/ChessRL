@@ -15,7 +15,8 @@ namespace chessrl::mcts::single
 //   bitboards[s][k]: slot s, piece plane k (W:PNBRQK then B:PNBRQK)
 //   slot_valid : bit s ⇒ slot s piece planes present (bit 0 always set)
 //   slot_rep   : bit s ⇒ slot s repetition plane lit (bit 0 = current-rep)
-//   stm        : 1 if white to move
+//   stm        : 1 if white is to move in the real position (kept by mirror_to_white: a canonical position
+//                with stm 0 had black to move; plane 104 is stm or 1, per the network's stm_colour)
 //   ep_square  : 0..63 board square index, or -1 if none
 //   castling   : bit0 WK, bit1 WQ, bit2 BK, bit3 BQ
 //   halfmove   : raw clock; expansion emits min(1, halfmove/100)
@@ -68,13 +69,19 @@ inline std::uint8_t mirror_castling(std::uint8_t c)
     return static_cast<std::uint8_t>(((c >> 2) & 0x3u) | ((c & 0x3u) << 2));
 }
 
-// A packed position with black to move as white sees it: every history slot mirrored, side to move white.
+// A packed position with black to move as white sees it: every history slot mirrored. stm keeps the real side
+// to move (0), which networks with stm_colour read from plane 104; the others see 1 there.
 inline void mirror_to_white(SmallPackedPosition& p)
 {
     for (auto& slot : p.bitboards) mirror_bitboards(slot);
     if (p.ep_square >= 0) p.ep_square = static_cast<std::int16_t>(mirror_square(p.ep_square));
     p.castling = mirror_castling(p.castling);
-    p.stm = 1;
+}
+
+// Input plane 104: the real side to move for networks trained with it (model.stm_plane colour), else 1.
+inline float stm_plane_value(const SmallPackedPosition& p, bool stm_colour)
+{
+    return (!stm_colour || p.stm) ? 1.0F : 0.0F;
 }
 
 } // namespace chessrl::mcts::single

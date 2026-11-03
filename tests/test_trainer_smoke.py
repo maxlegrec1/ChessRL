@@ -46,7 +46,8 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
         losses.append(float(metrics["loss/total"]))
         trainer.step += 1
     assert all(torch.isfinite(torch.tensor(losses)))
-    assert trainer.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256}
+    assert trainer.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
+                                    "stm_plane": "constant"}
     assert 0.0 <= metrics["legal_move_prob"] <= 1.0
     trainer._save_checkpoint()
     ckpt_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
@@ -54,12 +55,30 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     cfg.resume_path = ckpt_path
     resumed = Trainer(cfg)
     assert resumed.step == 4
-    assert resumed.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256}
+    assert resumed.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
+                                    "stm_plane": "constant"}
     for a, b in zip(
         trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True
     ):
         torch.testing.assert_close(a, b)
     assert (cfg.checkpoint.dir.parent / "metrics" / "train.jsonl").exists()
+
+
+def test_colour_plane_trains_and_resumes(tmp_path):
+    # model.stm_plane colour: the trainer feeds plane 104 from the records' flags, and the setting is saved with
+    # the checkpoint; a resume keeps the checkpoint's setting whatever the config says.
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    cfg.model.stm_plane = "colour"
+    trainer = Trainer(cfg)
+    assert trainer.stm_colour
+    batch = trainer.buffer.sample_batch(cfg.batch_size)
+    assert float(trainer._train_step(batch, expensive=True)["loss/total"]) > 0
+    trainer._save_checkpoint()
+    cfg.resume_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
+    cfg.model.stm_plane = "constant"
+    resumed = Trainer(cfg)
+    assert resumed.stm_colour and resumed.model.spec()["stm_plane"] == "colour"
 
 
 def test_lr_schedule_counts_from_resume_step(tmp_path):

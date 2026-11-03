@@ -95,3 +95,36 @@ def test_packed_input_matches_dense(net):
     b = _inference_cpp.fused_forward_positions(path, fens, moves)
     for key in a:
         assert np.array_equal(a[key], b[key]), key
+
+
+def test_colour_plane(net, tmp_path):
+    """model.stm_plane colour (the .cnet's stm_colour entry): the kernel expands plane 104 to the real side to
+    move as the CPU encoder does, and with the same weights only black-to-move positions change."""
+    model, constant_path = net
+    model.cfg["stm_plane"] = "colour"
+    try:
+        path = tmp_path / "colour.cnet"
+        write_cnet(path, entries_for(model, "search"))
+    finally:
+        model.cfg["stm_plane"] = "constant"
+    cases = CASES + [(STARTPOS, moves) for moves in random_games(30, 20261103)]
+    fens = [fen for fen, _ in cases]
+    moves = [mv for _, mv in cases]
+    dense = np.stack(
+        [np.asarray(_inference_cpp.encode_position_packed_roundtrip(f, m, True), np.float32) for f, m in cases]
+    )
+    a = _inference_cpp.fused_forward_dense(str(path), dense.reshape(-1, 8, 8, 111))
+    b = _inference_cpp.fused_forward_positions(str(path), fens, moves)
+    for key in a:
+        assert np.array_equal(a[key], b[key]), key
+    c = _inference_cpp.fused_forward_positions(constant_path, fens, moves)
+    black = []
+    for f, m in cases:
+        board = pchess.Board(f)
+        for mv in m:
+            board.push_uci(mv)
+        black.append(board.turn == pchess.BLACK)
+    black = np.array(black)
+    assert black.any() and (~black).any()
+    assert np.array_equal(b["value"][~black], c["value"][~black])
+    assert not np.array_equal(b["value"][black], c["value"][black])

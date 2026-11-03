@@ -6,7 +6,8 @@ from dataclasses import asdict, is_dataclass
 
 import torch
 
-DEFAULT_SPEC = {"arch": "encoder", "d_model": 128, "layers": 4, "heads": 8, "d_ff": 256}
+DEFAULT_SPEC = {"arch": "encoder", "d_model": 128, "layers": 4, "heads": 8, "d_ff": 256, "stm_plane": "constant"}
+STM_PLANES = ("constant", "colour")
 
 
 def normalize_spec(spec) -> dict:
@@ -21,7 +22,16 @@ def normalize_spec(spec) -> dict:
         # self-play network and the canonical 1,858-move policy are encoder-only.
         raise ValueError(f"unsupported arch {arch!r}: only the encoder is supported")
     keys = ("d_model", "layers", "heads", "d_ff")
-    return {"arch": "encoder", **{k: int(spec.get(k, DEFAULT_SPEC[k])) for k in keys}}
+    # Networks saved before stm_plane existed were trained with the constant plane.
+    stm_plane = str(spec.get("stm_plane", "constant"))
+    if stm_plane not in STM_PLANES:
+        raise ValueError(f"model.stm_plane must be one of {STM_PLANES}, not {stm_plane!r}")
+    return {"arch": "encoder", **{k: int(spec.get(k, DEFAULT_SPEC[k])) for k in keys}, "stm_plane": stm_plane}
+
+
+def stm_colour(spec) -> bool:
+    """True when the network reads the real side to move from plane 104 (model.stm_plane: colour)."""
+    return normalize_spec(spec)["stm_plane"] == "colour"
 
 
 def build_model(spec=None) -> torch.nn.Module:

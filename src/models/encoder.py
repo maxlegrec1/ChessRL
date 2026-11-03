@@ -160,9 +160,11 @@ class Block(nn.Module):
 
 
 class EncoderModel(nn.Module):
-    def __init__(self, d_model: int = 128, layers: int = 4, heads: int = 8, d_ff: int = 256):
+    def __init__(self, d_model: int = 128, layers: int = 4, heads: int = 8, d_ff: int = 256,
+                 stm_plane: str = "constant"):  # fmt: skip
         super().__init__()
-        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff}
+        # stm_plane changes no weight: it records how the inputs' plane 104 is filled (src/train/config.py).
+        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff, "stm_plane": stm_plane}
         d = d_model
         self.embed = nn.Linear(INPUT_PLANES, d)
         self.pos = nn.Parameter(torch.randn(64, d) * 0.02)

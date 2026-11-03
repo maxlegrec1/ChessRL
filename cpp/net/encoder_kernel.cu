@@ -395,8 +395,9 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 // The input plane `plane` of token `cell` (row-major 8x8, row 0 = rank 8), as
 // expand_packed_to_dense (small_encoding.cpp) builds it; planes 111..127 are the zero
 // padding of the embedding's k loop. Positions arrive canonical (pack_small_position mirrors those with black
-// to move), so nothing here depends on the colour.
-__device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane)
+// to move); only plane 104 can depend on the colour: p.stm (the real side to move) for networks with
+// stm_colour, 1 for the others (stm_plane_value in packed_position.hpp).
+__device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane, int stm_colour)
 {
     const int sq = (kPackBoard - 1 - (cell >> 3)) * kPackBoard + (cell & 7);
     if (plane < kPackPlaneSTM)
@@ -408,7 +409,7 @@ __device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int c
     }
     switch (plane)
     {
-    case kPackPlaneSTM: return p.stm ? 1.f : 0.f;
+    case kPackPlaneSTM: return (!stm_colour || p.stm) ? 1.f : 0.f;
     case kPackPlaneEP: return p.ep_square == sq ? 1.f : 0.f;
     case kPackPlaneCWK: return (p.castling & 0x1u) ? 1.f : 0.f;
     case kPackPlaneCWQ: return (p.castling & 0x2u) ? 1.f : 0.f;
@@ -437,7 +438,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         __syncthreads();
         const auto& pos = *reinterpret_cast<const SmallPackedPosition*>(s.packed);
         for (int i = tid; i < kTok * 128; i += kThreads)
-            s.h[(i >> 7) * kLdH + (i & 127)] = __float2half(plane_value(pos, i >> 7, i & 127));
+            s.h[(i >> 7) * kLdH + (i & 127)] = __float2half(plane_value(pos, i >> 7, i & 127, P.stm_colour));
     }
     else
     {

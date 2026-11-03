@@ -80,16 +80,17 @@ void pack_small_position_impl(
     const chess::Board& board,
     const chessrl::mcts::HistoryStack& history,
     SmallPackedPosition& out);
-std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p);
+std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p, bool stm_colour);
 
-// The dense planes: the packed (canonical) position expanded on the CPU, so the two paths cannot differ.
+// The dense planes: the packed (canonical) position expanded on the CPU, so the two paths cannot differ. Plane
+// 104 is 1, as for networks without stm_colour.
 std::vector<float> encodeSmallFeatures(
     const chess::Board& board,
     const chessrl::mcts::HistoryStack& history)
 {
     SmallPackedPosition packed;
     pack_small_position_impl(board, history, packed);
-    return expand_packed_to_dense_impl(packed);
+    return expand_packed_to_dense_impl(packed, false);
 }
 
 // Convenience wrapper: encode a board with no history (slots 1..7 zero,
@@ -163,8 +164,8 @@ void pack_small_position_impl(
 }
 
 // CPU reference expansion of a (canonical) packed position: the dense planes, row = 7 - rank. The GPU
-// kernel must reproduce this exactly.
-std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p)
+// kernel must reproduce this exactly. stm_colour: plane 104 is the real side to move (p.stm), else 1.
+std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p, bool stm_colour)
 {
     std::vector<float> features(
         static_cast<size_t>(kSmallBoardSize) * kSmallBoardSize * kSmallFeaturePlanes,
@@ -202,7 +203,7 @@ std::vector<float> expand_packed_to_dense_impl(const SmallPackedPosition& p)
         if ((p.slot_rep >> slot) & 1u) fillPlane(base + kSmallPiecePlanes, 1.0F);
     }
 
-    fillPlane(kSmallPlaneSTM, p.stm ? 1.0F : 0.0F);
+    fillPlane(kSmallPlaneSTM, stm_plane_value(p, stm_colour));
 
     if (p.ep_square >= 0)
     {
@@ -275,9 +276,9 @@ SmallPackedPosition pack_small_position(
     return p;
 }
 
-std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed)
+std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed, bool stm_colour)
 {
-    return expand_packed_to_dense_impl(packed);
+    return expand_packed_to_dense_impl(packed, stm_colour);
 }
 
 } // namespace chessrl::mcts::single

@@ -37,7 +37,7 @@ import numpy as np
 import torch
 
 from src.export.heads import search_q_weight
-from src.models.factory import model_from_checkpoint
+from src.models.factory import model_from_checkpoint, stm_colour
 from src.models.small.fen_encoder import fen_to_tensor
 from src.models.small.vocab import canonical_key, policy_to_idx
 
@@ -50,8 +50,9 @@ def policy_key(move: chess.Move, white_to_move: bool = True) -> str:
     return canonical_key(move.uci(), white_to_move)
 
 
-def encode(board: chess.Board) -> np.ndarray:
-    """[8, 8, 111] input for the position, history taken from the board's move stack."""
+def encode(board: chess.Board, stm_colour: bool = False) -> np.ndarray:
+    """[8, 8, 111] input for the position, history taken from the board's move stack. stm_colour: plane 104 is
+    the real side to move (networks with model.stm_plane colour)."""
     b = board.copy()
     current_rep = b.is_repetition(2)
     past_fens, past_reps = [], []
@@ -62,7 +63,7 @@ def encode(board: chess.Board) -> np.ndarray:
         past_fens.append(b.fen())
         past_reps.append(b.is_repetition(2))
     past = [bulletchess.Board.from_fen(f) for f in past_fens]
-    return fen_to_tensor(board.fen(), past, past_reps, current_rep)
+    return fen_to_tensor(board.fen(), past, past_reps, current_rep, stm_colour=stm_colour)
 
 
 class Net:
@@ -73,6 +74,7 @@ class Net:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         self.model = model_from_checkpoint(ckpt, "cpu").eval()
         self.spec = dict(ckpt.get("model_spec") or {})
+        self.stm_colour = stm_colour(self.spec)
         self.params = sum(p.numel() for p in self.model.parameters())
         heads = (ckpt.get("config") or {}).get("search_heads", "search")
         # As the search reads them: value_q's weight in the WDL, and moves-left from mlh_q or mlh.
@@ -85,6 +87,7 @@ class Net:
         """A Net around an in-memory model (tests)."""
         net = cls.__new__(cls)
         net.model, net.spec, net.step = model.eval(), {}, 0
+        net.stm_colour = getattr(model, "cfg", {}).get("stm_plane") == "colour"
         net.params = sum(p.numel() for p in model.parameters())
         net.q_weight, net.mlh_q = (0.0, False) if outcome_heads else (1.0, True)
         return net
@@ -94,7 +97,7 @@ class Net:
         self, boards: list[chess.Board]
     ) -> list[tuple[dict[chess.Move, float], tuple[float, float, float], float]]:
         """Per board: legal-move priors, WDL for the side to move, estimated plies left."""
-        x = torch.from_numpy(np.stack([encode(b) for b in boards]))
+        x = torch.from_numpy(np.stack([encode(b, self.stm_colour) for b in boards]))
         p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
         w = self.q_weight
         wdl = ((1.0 - w) * torch.softmax(v, dim=-1) + w * torch.softmax(vq, dim=-1)).numpy()

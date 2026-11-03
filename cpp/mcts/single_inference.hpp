@@ -153,8 +153,9 @@ SmallPackedPosition pack_small_position(
     const chess::Board& board, const chessrl::mcts::HistoryStack& history);
 
 // CPU reference expansion — bit-identical to encode_small_position().features
-// for the same logical position. The GPU kernel must reproduce this exactly.
-std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed);
+// for the same logical position. The GPU kernel must reproduce this exactly. stm_colour: plane 104 is the
+// real side to move (networks with model.stm_plane colour), else 1.
+std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed, bool stm_colour = false);
 
 struct BatchStatistics
 {

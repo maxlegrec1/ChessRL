@@ -133,6 +133,10 @@ class ModelConfig:
     layers: int = 4
     heads: int = 8
     d_ff: int = 256
+    # Input plane 104 (side to move). Positions are canonical (the side to move plays white), so "constant"
+    # sets it to 1 everywhere; "colour" sets it to the real side to move before mirroring (1 White, 0 Black),
+    # the network's only sign that it plays the black pieces. Saved with the network (model_spec, .cnet).
+    stm_plane: str = "constant"
 
 
 @dataclass

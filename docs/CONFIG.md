@@ -81,6 +81,7 @@ trainer rebuilds the architecture stored in its checkpoint (`model_spec`) instea
 | `layers` | 4 | 4 | Encoder blocks. |
 | `heads` | 8 | 8 | Attention heads (`d_model` must divide by it). |
 | `d_ff` | 256 | 256 | Hidden width of the SwiGLU feed-forward. |
+| `stm_plane` | `colour` | `constant` | Input plane 104. Positions are mirrored so that the side to move plays white; `colour` sets the plane to the real side to move before mirroring (1 White, 0 Black), the network's only sign that it plays the black pieces. `constant`: 1 for every position, as every network before this key was trained. Saved with the network (`model_spec`, and an `stm_colour` entry in the `.cnet`), so a resumed run keeps its checkpoint's setting. |
 
 The recipe's encoder has 812,557 parameters.
 

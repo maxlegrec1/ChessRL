@@ -40,6 +40,7 @@ struct EncoderParams
     int n_wdl;        // value MLPs mixed into the WDL (2 for search_heads=blend)
     float wdl_weight[2];  // their weights in the WDL (the .cnet's wdl_w; equal without one)
     int mlhq_from_q;  // mlh_q output from the mlh_q head (search) or repeating mlh
+    int stm_colour;   // input plane 104 = the real side to move (the .cnet's optional stm_colour entry), else 1
     const void* embed_w;
     const float* embed_b;
     const float* pos;

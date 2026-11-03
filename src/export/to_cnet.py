@@ -146,6 +146,10 @@ def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[s
         ("mlp2.w", np.concatenate([sd[f"{m}.2.weight"] for m in mlps])),
         ("mlp2.b", np.concatenate([sd[f"{m}.2.bias"] for m in mlps])),
     ]
+    # Optional: input plane 104 is the real side to move (model.stm_plane colour). Without the entry the kernel
+    # sets it to 1, as every network before this setting was trained.
+    if cfg.get("stm_plane", "constant") == "colour":
+        out.append(("stm_colour", np.array([1], np.int32)))
     return out
 
 

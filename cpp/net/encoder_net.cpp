@@ -97,6 +97,15 @@ EncoderNet::EncoderNet(std::string path)
         std::memcpy(params_.wdl_weight, data.data() + get("wdl_w", kF32, params_.n_wdl).offset,
                     sizeof(float) * params_.n_wdl);
     params_.mlhq_from_q = cfg[6];
+    // Networks trained with model.stm_plane colour read the real side to move from plane 104; older files have
+    // no entry and see 1 there for every position.
+    params_.stm_colour = 0;
+    if (entries.count("stm_colour"))
+    {
+        std::int32_t v = 0;
+        std::memcpy(&v, data.data() + get("stm_colour", kI32, 1).offset, sizeof(v));
+        params_.stm_colour = v != 0 ? 1 : 0;
+    }
     const std::uint64_t n_mlp = params_.n_wdl + 1 + params_.mlhq_from_q;
     const std::uint64_t n_out = 3 * params_.n_wdl + 1 + params_.mlhq_from_q;
 
