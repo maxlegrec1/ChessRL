@@ -99,6 +99,12 @@ class Trainer:
             spec = normalize_spec(ckpt.get("model_spec"))
             if spec["stm_plane"] != normalize_spec(config.model)["stm_plane"]:
                 self.console.log(f"[model] stm_plane {spec['stm_plane']!r}: the checkpoint's, not the config's")
+            # int8 is how the network is trained, not what it is: the config's, so that an FP16 network can be
+            # fine-tuned into INT8 (and back).
+            int8 = normalize_spec(config.model)["int8"]
+            if spec["int8"] != int8:
+                self.console.log(f"[model] int8 {int8}: the config's (the checkpoint was trained with {spec['int8']})")
+            spec["int8"] = int8
         self.model = build_model(spec).to(self.device)
         # Plane 104 of the decoded inputs: the real side to move (model.stm_plane: colour) or always 1.
         self.stm_colour = stm_colour(spec)

@@ -30,6 +30,7 @@ def test_fused_ffn_matches_reference(rows, stream):
     for fn in (fused_ffn, reference_ffn):
         x, wn, wu, wd = _inputs(rows, 0, stream)
         out = fn(x, wn, wu, wd, 1e-6)
+        out = out[0] if isinstance(out, tuple) else out
         weight = torch.linspace(-1, 1, out.numel(), device="cuda").view_as(out)
         (out.float() * weight).sum().backward()
         outs.append(out.detach())
@@ -60,3 +61,33 @@ def test_encoder_uses_it_in_training(fp16_residual):
         enc._FUSED_FFN = True
         enc.FP16_RESIDUAL = False
     assert (fused - plain).abs().max().item() < 2e-2
+
+
+@pytest.mark.parametrize("rows", [64, 100, 4096])
+def test_fused_ffn_int8_matches_reference(rows):
+    """INT8 training: the normed input and the SwiGLU output (per hidden half) rounded per token, the weights
+    rounded per row (fq_weight, outside), gradients straight through; against the same in plain PyTorch."""
+    from src.models.fused_ffn import fused_ffn, reference_ffn
+    from src.models.quant import fq_weight
+
+    outs, grads = [], []
+    for fused in (True, False, None):  # None: the FP16 kernel, to see that the rounding matters
+        x, wn, wu, wd = _inputs(rows, 0)
+        if fused is None:
+            out = fused_ffn(x, wn, wu, wd, 1e-6)[0]
+        elif fused:
+            out = fused_ffn(x, wn, fq_weight(wu), fq_weight(wd), 1e-6, True)[0]
+        else:
+            out = reference_ffn(x, wn, fq_weight(wu), fq_weight(wd), 1e-6, quant=True)
+        weight = torch.linspace(-1, 1, out.numel(), device="cuda").view_as(out)
+        (out.float() * weight).sum().backward()
+        outs.append(out.detach())
+        grads.append([t.grad for t in (x, wn, wu, wd)])
+    # Against FP16 the rounding moves the residual update by far more than the INT8 kernels differ from their
+    # reference (a value on a rounding boundary, rarely, rounds the other way).
+    delta = outs[0] - outs[2]
+    assert _rel(outs[0], outs[1]) < 1e-3
+    assert _rel(delta, outs[1] - outs[2]) < 0.12  # the FP16 kernels already differ by ~3e-4 of the output
+    assert _rel(outs[1], outs[2]) > 1e-3
+    for name, a, b in zip(("x", "norm weight", "up", "down"), grads[0], grads[1], strict=True):
+        assert _rel(a, b) < 3e-2, name

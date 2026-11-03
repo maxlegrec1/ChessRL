@@ -223,8 +223,8 @@ def export(
     int8: bool | None = None,
     fp16: tuple[str, ...] = (),
 ) -> str:
-    """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight). int8 None: the checkpoint's
-    model.int8."""
+    """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight). int8 None: INT8 when the
+    network was trained so (its model_spec) or the run asks for it (the config's model.int8)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "model" in ckpt):
         ckpt = {"model": ckpt}
@@ -233,8 +233,8 @@ def export(
         raise SystemExit("the fused network supports the encoder architecture only")
     config = ckpt.get("config") or {}
     heads = search_heads or config.get("search_heads", "search")
-    if int8 is None:
-        int8 = bool((config.get("model") or {}).get("int8", False))
+    if int8 is None:  # the network's own setting (INT8 training), else the run's (INT8 export of an FP16 network)
+        int8 = bool(model.cfg.get("int8") or (config.get("model") or {}).get("int8", False))
     q_weight = search_q_weight(ckpt)
     write_cnet(out_path, entries_for(model, heads, q_weight, int8, tuple(fp16)))
     kind = " int8" if int8 else ""

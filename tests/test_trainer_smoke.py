@@ -47,7 +47,7 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
         trainer.step += 1
     assert all(torch.isfinite(torch.tensor(losses)))
     assert trainer.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
-                                    "stm_plane": "constant"}
+                                    "stm_plane": "constant", "int8": False}
     assert 0.0 <= metrics["legal_move_prob"] <= 1.0
     trainer._save_checkpoint()
     ckpt_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
@@ -56,7 +56,7 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     resumed = Trainer(cfg)
     assert resumed.step == 4
     assert resumed.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
-                                    "stm_plane": "constant"}
+                                    "stm_plane": "constant", "int8": False}
     for a, b in zip(
         trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True
     ):
@@ -79,6 +79,29 @@ def test_colour_plane_trains_and_resumes(tmp_path):
     cfg.model.stm_plane = "constant"
     resumed = Trainer(cfg)
     assert resumed.stm_colour and resumed.model.spec()["stm_plane"] == "colour"
+
+
+def test_int8_training_fine_tunes_an_fp16_network(tmp_path):
+    # model.int8: the forward rounds as the INT8 kernel; on resume the config's setting wins, so an FP16 checkpoint
+    # is fine-tuned into INT8 and its checkpoints say so.
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    trainer = Trainer(cfg)
+    batch = trainer.buffer.sample_batch(cfg.batch_size)
+    trainer._train_step(batch, expensive=True)
+    trainer.step += 1
+    trainer._save_checkpoint()
+    cfg.resume_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
+    cfg.model.int8 = True
+    resumed = Trainer(cfg)
+    assert resumed.model.int8 and resumed.model.spec()["int8"] is True
+    losses = [float(resumed._train_step(resumed.buffer.sample_batch(cfg.batch_size), expensive=True)["loss/total"])
+              for _ in range(3)]  # fmt: skip
+    assert all(torch.isfinite(torch.tensor(losses)))
+    resumed.step += 1
+    resumed._save_checkpoint()
+    ckpt = torch.load(sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1], weights_only=False)
+    assert ckpt["model_spec"]["int8"] is True
 
 
 def test_lr_schedule_counts_from_resume_step(tmp_path):

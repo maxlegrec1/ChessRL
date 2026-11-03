@@ -6,7 +6,8 @@ from dataclasses import asdict, is_dataclass
 
 import torch
 
-DEFAULT_SPEC = {"arch": "encoder", "d_model": 128, "layers": 4, "heads": 8, "d_ff": 256, "stm_plane": "constant"}
+DEFAULT_SPEC = {"arch": "encoder", "d_model": 128, "layers": 4, "heads": 8, "d_ff": 256, "stm_plane": "constant",
+                "int8": False}
 STM_PLANES = ("constant", "colour")
 
 
@@ -26,7 +27,9 @@ def normalize_spec(spec) -> dict:
     stm_plane = str(spec.get("stm_plane", "constant"))
     if stm_plane not in STM_PLANES:
         raise ValueError(f"model.stm_plane must be one of {STM_PLANES}, not {stm_plane!r}")
-    return {"arch": "encoder", **{k: int(spec.get(k, DEFAULT_SPEC[k])) for k in keys}, "stm_plane": stm_plane}
+    # int8: the forward rounds as the INT8 kernel (INT8 training); networks saved before it did not.
+    return {"arch": "encoder", **{k: int(spec.get(k, DEFAULT_SPEC[k])) for k in keys}, "stm_plane": stm_plane,
+            "int8": bool(spec.get("int8", False))}  # fmt: skip
 
 
 def stm_colour(spec) -> bool:

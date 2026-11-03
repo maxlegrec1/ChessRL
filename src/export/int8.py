@@ -151,6 +151,10 @@ def int8_reference(model: nn.Module, which=PROJECTIONS, weights: bool = True, ac
                    clip: str = "max") -> nn.Module:
     """A copy of an encoder (src/models/encoder.py) with the fused kernel's INT8 projections (those in `which`)."""
     m = copy.deepcopy(model)
+    # An INT8-trained network (model.int8) rounds in its own forward; the reference swaps the modules instead.
+    m.int8 = False
+    for b in m.blocks:
+        b.int8 = False
     kw = {"weights": weights, "acts": acts, "clip": clip}
     if "embed" in which:
         m.embed = Int8Linear(m.embed, planes=True, weights=weights, clip=clip)

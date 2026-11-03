@@ -11,6 +11,9 @@ runs the same network for self-play.
 
 Inputs are canonical (src/models/small/fen_encoder.py: the side to move plays white) and the policy
 covers white's 1,858 moves (src/models/small/vocab.py).
+
+int8 (model.int8): the projections round as the self-play kernel's INT8 path does (src/models/quant.py), on every
+path, so the network trains on the arithmetic it is played with.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.models.quant import fq_tokens, fq_weight
 from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index
 
@@ -76,8 +80,9 @@ class RMSNorm(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d: int, heads: int, d_ff: int):
+    def __init__(self, d: int, heads: int, d_ff: int, int8: bool = False):
         super().__init__()
+        self.int8 = int8
         self.heads = heads
         self.hd = d // heads
         self.norm1 = RMSNorm(d)
@@ -90,6 +95,15 @@ class Block(nn.Module):
         self.down = nn.Linear(d_ff, d, bias=False)
         self.d_ff = d_ff
         self.x0_gain = nn.Parameter(torch.zeros(()))
+
+    def _w(self, lin: nn.Linear) -> torch.Tensor:
+        """A projection's weight as the fused kernels take it: rounded to INT8 per row for an int8 network."""
+        return fq_weight(lin.weight) if self.int8 else lin.weight
+
+    def _proj(self, lin: nn.Linear, a: torch.Tensor) -> torch.Tensor:
+        """A projection on the unfused path: with INT8-rounded weights for an int8 network, the module itself
+        otherwise (src/export/int8.py's reference swaps the modules)."""
+        return F.linear(a, fq_weight(lin.weight)) if self.int8 else lin(a)
 
     def forward(self, x, x0, bias):
         b, n, d = x.shape
@@ -105,16 +119,18 @@ class Block(nn.Module):
         ):
             # Training: the re-injection, norm1, qkv, attention, out projection and residual per
             # position (fused_block.py).
-            x, _ = fused_attention_block(
-                x, x0, self.x0_gain, self.norm1.weight, self.qkv.weight, self.q_norm.weight,
-                self.k_norm.weight, bias, self.out.weight, self.norm1.eps,
+            x, _, _ = fused_attention_block(
+                x, x0, self.x0_gain, self.norm1.weight, self._w(self.qkv), self.q_norm.weight,
+                self.k_norm.weight, bias, self._w(self.out), self.norm1.eps, self.int8,
             )  # fmt: skip
             return self._feed_forward(x)
         # The re-injection and the attention's residual add in FP32, rounded once to the stream's type
         # (as the fused block computes them).
         xp = x + self.x0_gain * x0.float()
         h = self.norm1(xp)
-        qkv = self.qkv(h)
+        if self.int8:  # the norm's FP32 output, per token (the kernel quantizes inside the norm)
+            h = fq_tokens(h)
+        qkv = self._proj(self.qkv, h)
         if (
             fused_attention is not None
             and _FUSED_ATTENTION
@@ -140,7 +156,9 @@ class Block(nn.Module):
                     q.to(v.dtype), k.to(v.dtype), v, attn_mask=bias.to(v.dtype).expand(b, -1, -1, -1)
                 )
             h = h.transpose(1, 2).reshape(b, n, d)
-        return self._feed_forward((xp + self.out(h)).to(x.dtype))
+        if self.int8:  # the attention output's FP16 rows, per token over all heads
+            h = fq_tokens(h, fp16=True)
+        return self._feed_forward((xp + self._proj(self.out, h)).to(x.dtype))
 
     def _feed_forward(self, x):
         d = x.shape[-1]
@@ -154,22 +172,32 @@ class Block(nn.Module):
             and (d, self.d_ff) == (128, 256)
         ):
             # Training: norm, SwiGLU feed-forward and residual per tile of tokens (fused_ffn.py).
-            return fused_ffn(x, self.norm2.weight, self.up.weight, self.down.weight, self.norm2.eps)
-        gate, up = self.up(self.norm2(x)).chunk(2, dim=-1)
-        return x + self.down(F.silu(gate) * up)
+            out, _ = fused_ffn(x, self.norm2.weight, self._w(self.up), self._w(self.down), self.norm2.eps, self.int8)
+            return out
+        h = self.norm2(x)
+        if self.int8:
+            h = fq_tokens(h)
+        gate, up = self._proj(self.up, h).chunk(2, dim=-1)
+        g = F.silu(gate) * up
+        if self.int8:  # the SwiGLU output's FP16 rows, per token and hidden half
+            g = fq_tokens(g, fp16=True, groups=2)
+        return x + self._proj(self.down, g)
 
 
 class EncoderModel(nn.Module):
     def __init__(self, d_model: int = 128, layers: int = 4, heads: int = 8, d_ff: int = 256,
-                 stm_plane: str = "constant"):  # fmt: skip
+                 stm_plane: str = "constant", int8: bool = False):  # fmt: skip
         super().__init__()
         # stm_plane changes no weight: it records how the inputs' plane 104 is filled (src/train/config.py).
-        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff, "stm_plane": stm_plane}
+        # int8 changes no weight either: the forward rounds as the INT8 kernel (src/models/quant.py).
+        self.cfg = {"d_model": d_model, "layers": layers, "heads": heads, "d_ff": d_ff, "stm_plane": stm_plane,
+                    "int8": bool(int8)}  # fmt: skip
+        self.int8 = bool(int8)
         d = d_model
         self.embed = nn.Linear(INPUT_PLANES, d)
         self.pos = nn.Parameter(torch.randn(64, d) * 0.02)
         self.pair_bias = nn.Parameter(torch.zeros(heads, 64, 64))
-        self.blocks = nn.ModuleList([Block(d, heads, d_ff) for _ in range(layers)])
+        self.blocks = nn.ModuleList([Block(d, heads, d_ff, self.int8) for _ in range(layers)])
         self.norm = RMSNorm(d)
         # Attention policy head.
         self.pol_q = nn.Linear(d, d)
@@ -201,7 +229,11 @@ class EncoderModel(nn.Module):
 
     def forward(self, x, *, return_all: bool = False):
         b = x.shape[0]
-        x0 = self.embed(x.reshape(b, 64, INPUT_PLANES)) + self.pos
+        planes = x.reshape(b, 64, INPUT_PLANES)
+        if self.int8:  # the planes enter exactly (100 · plane), the weights rounded
+            x0 = F.linear(planes, fq_weight(self.embed.weight), self.embed.bias) + self.pos
+        else:
+            x0 = self.embed(planes) + self.pos
         # The copy re-injected into every layer is FP16 under autocast, as the self-play kernel keeps
         # it: half the bytes of each layer's FP32 read and of its gradient. The residual stream
         # starts from it with FP16_RESIDUAL, from the FP32 embedding otherwise.
@@ -214,8 +246,13 @@ class EncoderModel(nn.Module):
         # logit(from, to, promo) = (q_from + promo_vec) . k_to / sqrt(d): two small
         # matmuls, then pick the vocab entries by flat index. (Gathering a d-wide
         # vector per vocab entry first cost ~0.75 GB per TensorRT context.)
-        q = self.pol_q(h)  # [B, 64, d]
-        k = self.pol_k(h)
+        if self.int8:  # the final norm's FP32 output, per token; the value heads read it unrounded
+            hq = fq_tokens(h)
+            q = F.linear(hq, fq_weight(self.pol_q.weight), self.pol_q.bias)  # [B, 64, d]
+            k = F.linear(hq, fq_weight(self.pol_k.weight), self.pol_k.bias)
+        else:
+            q = self.pol_q(h)  # [B, 64, d]
+            k = self.pol_k(h)
         scale = 1.0 / math.sqrt(self.cfg["d_model"])
         kt = k.transpose(1, 2)  # [B, d, 64]
         ft = (q @ kt).reshape(b, 64 * 64)
