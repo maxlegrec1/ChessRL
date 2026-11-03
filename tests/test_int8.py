@@ -10,7 +10,7 @@ import torch
 
 from src.export.heads import ExportWrapper
 from src.export.int8 import int8_reference, quantize_rows
-from src.export.to_cnet import entries_for, pack_b8, write_cnet
+from src.export.to_cnet import entries_for, export, pack_b8, write_cnet
 from src.models.encoder import EncoderModel
 from tests.test_cnet_export import read_cnet
 
@@ -85,6 +85,19 @@ def test_file_weights_are_the_reference_weights(tmp_path):
     # The policy's q and k projections share one matrix (q pre-scaled by 1/sqrt(d): the same integers per row).
     q = unpack_b8(f["pol.w"], 2 * d, d).astype(np.float32)
     assert np.array_equal(q[:d], ref.pol_q.qw.numpy()) and np.array_equal(q[d:], ref.pol_k.qw.numpy())
+
+
+def test_export_follows_model_int8(tmp_path):
+    """export() writes INT8 projections when the checkpoint's run config says model.int8 (build_net.sh, rerate)."""
+    model = _model()
+    for flag in (False, True):
+        ckpt = {"model": model.state_dict(), "model_spec": model.spec(),
+                "config": {"search_heads": "outcome", "model": {"int8": flag}}}
+        torch.save(ckpt, tmp_path / "c.pt")
+        assert export(tmp_path / "c.pt", tmp_path / "c.cnet").endswith(" int8") == flag
+        f = read_cnet(tmp_path / "c.cnet")
+        assert ("int8" in f) == flag and ("l0.qkv.s" in f) == flag
+    assert not export(tmp_path / "c.pt", tmp_path / "d.cnet", int8=False).endswith(" int8")
 
 
 def test_reference_close_to_fp32():

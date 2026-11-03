@@ -137,6 +137,9 @@ class ModelConfig:
     # sets it to 1 everywhere; "colour" sets it to the real side to move before mirroring (1 White, 0 Black),
     # the network's only sign that it plays the black pieces. Saved with the network (model_spec, .cnet).
     stm_plane: str = "constant"
+    # The run's networks are exported with INT8 projections (to_cnet --int8, src/export/int8.py): self-play and
+    # the ladder run the fused kernel's INT8 path. The trainer does not simulate the rounding (yet).
+    int8: bool = False
 
 
 @dataclass

@@ -217,19 +217,28 @@ def write_cnet(path: Path, entries: list[tuple[str, np.ndarray]]) -> None:
 
 
 def export(
-    ckpt_path: Path, out_path: Path, search_heads: str | None = None, int8: bool = False, fp16: tuple[str, ...] = ()
+    ckpt_path: Path,
+    out_path: Path,
+    search_heads: str | None = None,
+    int8: bool | None = None,
+    fp16: tuple[str, ...] = (),
 ) -> str:
-    """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight)."""
+    """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight). int8 None: the checkpoint's
+    model.int8."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "model" in ckpt):
         ckpt = {"model": ckpt}
     model = model_from_checkpoint(ckpt, "cpu").eval()
     if not hasattr(model, "cfg"):
         raise SystemExit("the fused network supports the encoder architecture only")
-    heads = search_heads or (ckpt.get("config") or {}).get("search_heads", "search")
+    config = ckpt.get("config") or {}
+    heads = search_heads or config.get("search_heads", "search")
+    if int8 is None:
+        int8 = bool((config.get("model") or {}).get("int8", False))
     q_weight = search_q_weight(ckpt)
     write_cnet(out_path, entries_for(model, heads, q_weight, int8, tuple(fp16)))
-    return f"{heads} {q_weight:.3f}" if heads == "blend" else heads
+    kind = " int8" if int8 else ""
+    return (f"{heads} {q_weight:.3f}" if heads == "blend" else heads) + kind
 
 
 def main() -> None:
@@ -237,7 +246,8 @@ def main() -> None:
     p.add_argument("--ckpt_path", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--search_heads", default=None, choices=sorted(HEADS))
-    p.add_argument("--int8", action="store_true", help="INT8 projections (src/export/int8.py)")
+    p.add_argument("--int8", action="store_true", default=None,
+                   help="INT8 projections (src/export/int8.py); default: the checkpoint's model.int8")
     p.add_argument("--fp16", default="", help=f"with --int8: projections kept FP16, comma-separated, of {FP16_IN_INT8}")
     a = p.parse_args()
     heads = export(a.ckpt_path, a.out, a.search_heads, a.int8, tuple(x for x in a.fp16.split(",") if x))
