@@ -106,6 +106,14 @@ EncoderNet::EncoderNet(std::string path)
         std::memcpy(&v, data.data() + get("stm_colour", kI32, 1).offset, sizeof(v));
         params_.stm_colour = v != 0 ? 1 : 0;
     }
+    // INT8 projections (to_cnet --int8): int32 words of packed int8 fragments, and per-row scales in <name>.s.
+    params_.int8 = 0;
+    if (entries.count("int8"))
+    {
+        std::int32_t v = 0;
+        std::memcpy(&v, data.data() + get("int8", kI32, 1).offset, sizeof(v));
+        params_.int8 = v != 0 ? 1 : 0;
+    }
     const std::uint64_t n_mlp = params_.n_wdl + 1 + params_.mlhq_from_q;
     const std::uint64_t n_out = 3 * params_.n_wdl + 1 + params_.mlhq_from_q;
 
@@ -119,7 +127,19 @@ EncoderNet::EncoderNet(std::string path)
         const auto f32 = [&](const std::string& name, std::uint64_t n) {
             return static_cast<const float*>(dev(name, kF32, n));
         };
-        params_.embed_w = dev("embed.w", kF16, 128 * 128);
+        // A projection [n_out][k]: its fragments, and its scales for an int8 network. In an int8 network the
+        // embedding, out and down may stay FP16 (no <name>.s; to_cnet --fp16).
+        const auto mat = [&](const std::string& name, std::uint64_t n_out, std::uint64_t k, const float** scale,
+                             bool may_be_fp16 = false) {
+            if (!params_.int8 || (may_be_fp16 && !entries.count(name + ".s")))
+            {
+                *scale = nullptr;
+                return dev(name, kF16, n_out * k);
+            }
+            *scale = f32(name + ".s", n_out);
+            return dev(name, kI32, n_out * k / 4);
+        };
+        params_.embed_w = mat("embed.w", 128, 128, &params_.embed_s, true);
         params_.embed_b = f32("embed.b", 128);
         params_.pos = f32("pos", 64 * 128);
         params_.pair_bias = dev("pair_bias", kF16, 8 * 64 * 64);
@@ -128,17 +148,17 @@ EncoderNet::EncoderNet(std::string path)
             const std::string p = "l" + std::to_string(l) + ".";
             LayerParams& L = params_.layer[l];
             L.norm1 = f32(p + "norm1", 128);
-            L.qkv = dev(p + "qkv", kF16, 384 * 128);
+            L.qkv = mat(p + "qkv", 384, 128, &L.qkv_s);
             L.qnorm = f32(p + "qnorm", 16);
             L.knorm = f32(p + "knorm", 16);
-            L.out = dev(p + "out", kF16, 128 * 128);
+            L.out = mat(p + "out", 128, 128, &L.out_s, true);
             L.norm2 = f32(p + "norm2", 128);
-            L.up = dev(p + "up", kF16, 512 * 128);
-            L.down = dev(p + "down", kF16, 128 * 256);
+            L.up = mat(p + "up", 512, 128, &L.up_s);
+            L.down = mat(p + "down", 128, 256, &L.down_s, true);
             L.gain = host_f32(p + "gain");
         }
         params_.norm = f32("norm", 128);
-        params_.pol_w = dev("pol.w", kF16, 256 * 128);
+        params_.pol_w = mat("pol.w", 256, 128, &params_.pol_s);
         params_.pol_b = f32("pol.b", 256);
         params_.promo = dev("promo", kF16, 4 * 128);
         params_.vocab = static_cast<const std::uint16_t*>(dev("vocab", kU16, kPolicySize));

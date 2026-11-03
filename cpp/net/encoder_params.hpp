@@ -23,16 +23,22 @@ constexpr int kRecordBytes = 3760;
 static_assert(kAuxOffset >= 2 * kPolicySize && kAuxOffset % 16 == 0 && kRecordBytes - kAuxOffset == 32,
               "output record layout");
 
+// The projections (embedding, qkv, out, up, down, policy) are packed B fragments: FP16 (to_cnet.pack_b), or INT8
+// (to_cnet.pack_b8) for an int8 network, with one FP32 scale per output row in *_s (null otherwise).
 struct LayerParams
 {
     const float* norm1;
-    const void* qkv;  // packed B fragments, see to_cnet.pack_b
+    const void* qkv;
     const float* qnorm;
     const float* knorm;
     const void* out;
     const float* norm2;
     const void* up;
     const void* down;
+    const float* qkv_s;
+    const float* out_s;
+    const float* up_s;
+    const float* down_s;
     float gain;  // x0_gain
 };
 
@@ -43,13 +49,16 @@ struct EncoderParams
     float wdl_weight[2];  // their weights in the WDL (the .cnet's wdl_w; equal without one)
     int mlhq_from_q;  // mlh_q output from the mlh_q head (search) or repeating mlh
     int stm_colour;   // input plane 104 = the real side to move (the .cnet's optional stm_colour entry), else 1
+    int int8;         // INT8 projections (the .cnet's optional int8 entry, src/export/int8.py)
     const void* embed_w;
+    const float* embed_s;
     const float* embed_b;
     const float* pos;
     const void* pair_bias;
     LayerParams layer[kMaxLayers];
     const float* norm;
     const void* pol_w;
+    const float* pol_s;
     const float* pol_b;
     const void* promo;
     const std::uint16_t* vocab;  // per policy entry: from token | to token << 6 | promotion << 12

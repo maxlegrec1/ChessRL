@@ -13,6 +13,10 @@
 // Attention for head w stays in warp w's registers: Q and K come out of the qkv matmul
 // already in the operand layouts of the score matmul.
 //
+// INT8 networks (to_cnet --int8, src/export/int8.py) run the projections as m16n8k32 INT8 multiplies with INT32
+// sums: weights with per-row scales, activations quantized per token where they are produced (in the norms, or a
+// pass over the attention and SwiGLU outputs in shared memory). The rest is the FP16 kernel's arithmetic.
+//
 // Fragment layout (m16n8k16): lane = 4g + t. An accumulator tile acc[m][n][r] holds row
 // 16m + g + 8(r / 2), column 8·tile(n) + 2t + r % 2.
 
@@ -45,6 +49,13 @@ constexpr int kLdH = kD + 8;   // FP16 row strides, padded so the 8 rows of an l
 constexpr int kLdV = kTok + 8; // land on distinct banks
 constexpr int kLdS = kTok + 4;  // FP32 policy score rows
 constexpr float kEps = 1e-6f;
+// The norms' per-warp partials, [row][warp] so a row's come in 16-byte loads, rows padded so the 8 rows a warp
+// reads at once land on distinct banks: FP16 networks keep sums of squares (kRedLd floats per row), int8 ones
+// (sum of squares, max |x · w|) pairs (kRed2Ld float2 per row).
+constexpr int kRedLd = 12;
+constexpr int kRed2Ld = 10;
+// INT8 projections: n-tiles per pass of warp_gemm_i8.
+constexpr int kI8Group = 2;
 
 // The instrumented build's phases (CHESSRL_KERNEL_TIMING=1): cycles thread 0 spends from one mark to the next,
 // so a phase ending in a barrier includes the wait for the other warps. Per-layer phases sum over the layers.
@@ -59,14 +70,18 @@ __device__ unsigned long long g_phase[kPhases];
 // each norm's output, the attention output (written once every warp has its q, k and v) and the
 // policy's q. v: V transposed (per head, [dim][token]), then one half of the feed-forward hidden
 // layer at a time, then the policy's k, both [token][kLdH]. The FP32 policy scores span both.
+// An int8 network quantizes each matmul's A rows of h or v in place (quantize_rows), as int8 rows at the same
+// 272-byte stride (the ldmatrix rows stay on distinct banks).
 struct alignas(16) Smem
 {
     __half h[kTok * kLdH];
     __half v[kWarps * kHd * kLdV];
-    float red[kWarps * kTok];       // per-warp partial sums of squares, per token
+    alignas(16) float red[2 * kRed2Ld * kTok];  // the norms' per-warp partials (kRedLd, kRed2Ld)
     float pooled[kD];
     float hidden[4 * kD];
     float heads[16];
+    float scale_h[kTok];  // int8 networks: the token scales of h's and v's int8 rows (quantize_rows)
+    float scale_v[kTok];
     unsigned long long packed[(sizeof(SmallPackedPosition) + 7) / 8];
 };
 static_assert(sizeof(Smem) <= 48 * 1024, "two blocks per SM");
@@ -116,6 +131,36 @@ __device__ __forceinline__ void mma_h(uint32_t (&c)[2], const uint32_t (&a)[4], 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+// c += a (16x32, row major) * b (32x8, column major); INT8 inputs, INT32 accumulators (int8 networks). The A
+// fragment has the byte layout of m16n8k16's FP16 one (rows g, g + 8; bytes 4t.., 16 + 4t..), so ldsm4 loads it
+// from 16 rows of 32 bytes; c has the FP32 accumulator layout.
+__device__ __forceinline__ void mma_s8(int (&c)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1)
+{
+    asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, "
+        "{%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ void ldsm4(uint32_t (&r)[4], const int8_t* p)
+{
+    ldsm4(r, reinterpret_cast<const __half*>(p));
+}
+
+// int8 <-> float without the conversion unit (F2I / I2F: 16 per clock per SM on sm_86 / sm_89, a quarter of the
+// FP32 rate, and the INT8 path converts every accumulator and every quantized activation). Adding 1.5 · 2^23 rounds
+// to the nearest integer (ties to even, as __float2int_rn) and leaves it in the low mantissa bits; the same offset
+// turns an int32 into a float. Exact for |v|, |c| < 2^22 (sums of 256 int8 products stay below 2^22).
+__device__ __forceinline__ uint32_t round_to_byte(float v)
+{
+    return __float_as_uint(v + 12582912.f) & 0xFFu;
+}
+
+__device__ __forceinline__ float int_to_float(int c)
+{
+    return __int_as_float(c + 0x4B400000) - 12582912.f;
+}
+
 __device__ __forceinline__ float exp2_approx(float x)
 {
     float y;
@@ -123,9 +168,11 @@ __device__ __forceinline__ float exp2_approx(float x)
     return y;
 }
 
+// The fast division (reciprocal and multiply, 2 ulp; 0 once e^-x overflows, silu's limit): the IEEE one's Newton
+// steps and slow-path check were a large share of the feed-forward's instructions, 64 calls per thread per layer.
 __device__ __forceinline__ float silu(float x)
 {
-    return x / (1.f + __expf(-x));
+    return __fdividef(x, 1.f + __expf(-x));
 }
 
 template <int NT>
@@ -236,6 +283,78 @@ __device__ __forceinline__ void warp_gemm(float (&acc)[4][NT][4], const __half* 
     }
 }
 
+// The INT8 projections (int8 networks): acc[m][n] = (kAdd: +=) Σ over K = 64·KP of A[row][k] · W[n][k], summed in
+// INT32 and then times sa[row] · sw[n] (the token's scale, from quantize_rows, and the weight row's). A: int8 rows
+// of stride lda bytes in shared memory. W: fragments packed by to_cnet.pack_b8, one 16-byte load per lane per
+// (n-tile, 64 k), the next one fetched while the current one is multiplied. KS, p0: as in warp_gemm, counted in
+// 64-k chunks.
+template <int KP, int NT, bool kAdd, int KS = KP>
+__device__ __forceinline__ void warp_gemm_i8(float (&acc)[4][NT][4], const int8_t* a, int lda, const void* weights,
+                                             const float* __restrict__ sw, const float* sa, const int (&tile)[NT],
+                                             int lane, int p0 = 0)
+{
+    // Registers, under the 128 of two blocks per SM next to the residual stream: n-tiles kI8Group at a time, all
+    // their KP fragments loaded at once (one wait on L2 per group), then the INT32 sums of two m-tiles at a time
+    // (A is read from shared memory once per n-group either way).
+    constexpr int NG = NT < kI8Group ? NT : kI8Group;
+    const uint4* w = static_cast<const uint4*>(weights);
+    const int8_t* arow = a + (lane & 15) * lda + (lane >> 4) * 16;
+    const int g = lane >> 2, t = lane & 3;
+#pragma unroll
+    for (int n0 = 0; n0 < NT; n0 += NG)
+    {
+        uint4 b[KP][NG];
+#pragma unroll
+        for (int p = 0; p < KP; ++p)
+#pragma unroll
+            for (int n = 0; n < NG; ++n) b[p][n] = __ldg(w + (tile[n0 + n] * KS + p0 + p) * 32 + lane);
+        float2 ws[NG];
+#pragma unroll
+        for (int n = 0; n < NG; ++n) ws[n] = __ldg(reinterpret_cast<const float2*>(sw + 8 * tile[n0 + n] + 2 * t));
+#pragma unroll
+        for (int mh = 0; mh < 2; ++mh)
+        {
+            int c[2][NG][4];
+#pragma unroll
+            for (int mm = 0; mm < 2; ++mm)
+#pragma unroll
+                for (int n = 0; n < NG; ++n)
+#pragma unroll
+                    for (int r = 0; r < 4; ++r) c[mm][n][r] = 0;
+#pragma unroll
+            for (int p = 0; p < KP; ++p)
+#pragma unroll
+                for (int s = 0; s < 2; ++s)
+#pragma unroll
+                    for (int mm = 0; mm < 2; ++mm)
+                    {
+                        uint32_t af[4];
+                        ldsm4(af, arow + (2 * mh + mm) * 16 * lda + p * 64 + s * 32);
+#pragma unroll
+                        for (int n = 0; n < NG; ++n)
+                            mma_s8(c[mm][n], af, s ? b[p][n].z : b[p][n].x, s ? b[p][n].w : b[p][n].y);
+                    }
+#pragma unroll
+            for (int mm = 0; mm < 2; ++mm)
+            {
+                const int m = 2 * mh + mm;
+                const float ra0 = sa[16 * m + g], ra1 = sa[16 * m + g + 8];
+#pragma unroll
+                for (int n = 0; n < NG; ++n)
+#pragma unroll
+                    for (int r = 0; r < 4; ++r)
+                    {
+                        const float v = int_to_float(c[mm][n][r]) * ((r >> 1 ? ra1 : ra0) * ((r & 1) ? ws[n].y : ws[n].x));
+                        if constexpr (kAdd)
+                            acc[m][n0 + n][r] += v;
+                        else
+                            acc[m][n0 + n][r] = v;
+                    }
+            }
+        }
+    }
+}
+
 // 1 / RMS of each of this thread's 8 rows (rstd[m][i]: row 16m + g + 8i), over all 128
 // columns: per-warp partial sums through shared memory, one barrier.
 __device__ __forceinline__ void row_rstd(const float (&x)[4][2][4], float* red, int warp, int lane,
@@ -253,7 +372,7 @@ __device__ __forceinline__ void row_rstd(const float (&x)[4][2][4], float* red, 
                 s += x[m][n][2 * i] * x[m][n][2 * i] + x[m][n][2 * i + 1] * x[m][n][2 * i + 1];
             s += __shfl_xor_sync(0xffffffffu, s, 1);
             s += __shfl_xor_sync(0xffffffffu, s, 2);
-            if (t == 0) red[warp * kTok + 16 * m + g + 8 * i] = s;
+            if (t == 0) red[(16 * m + g + 8 * i) * kRedLd + warp] = s;
         }
     __syncthreads();
 #pragma unroll
@@ -262,9 +381,9 @@ __device__ __forceinline__ void row_rstd(const float (&x)[4][2][4], float* red, 
         for (int i = 0; i < 2; ++i)
         {
             const int row = 16 * m + g + 8 * i;
-            float s = 0.f;
-#pragma unroll
-            for (int w = 0; w < kWarps; ++w) s += red[w * kTok + row];
+            const float4 a = *reinterpret_cast<const float4*>(red + row * kRedLd);
+            const float4 c = *reinterpret_cast<const float4*>(red + row * kRedLd + 4);
+            const float s = (a.x + a.y) + (a.z + a.w) + ((c.x + c.y) + (c.z + c.w));
             rstd[m][i] = rsqrtf(s * (1.f / kD) + kEps);
         }
 }
@@ -292,6 +411,129 @@ __device__ __forceinline__ void norm_to_smem(const float (&x)[4][2][4], const fl
             }
     }
     __syncthreads();
+}
+
+// int8 networks: norm_to_smem with int8 output: y = RMSNorm(x) · weight as int8 rows of dst (byte stride 2·kLdH),
+// q = rn(y · 127 / max |y|) with scale[row] = max |y| / 127, from the FP32 values. max |y| = rstd · max |x · weight|,
+// so the row maxima ride along with the sums of squares (one barrier, as norm_to_smem) and rstd cancels out of q.
+// pooled (the final norm): also the token mean of y, per column. A barrier at the end, as norm_to_smem.
+__device__ __forceinline__ void norm_to_smem_i8(const float (&x)[4][2][4], const float* __restrict__ weight,
+                                                int8_t* dst, float* scale, float* red, int warp, int lane,
+                                                float* pooled = nullptr)
+{
+    const int g = lane >> 2, t = lane & 3;
+    float2 wt[2];
+#pragma unroll
+    for (int n = 0; n < 2; ++n) wt[n] = __ldg(reinterpret_cast<const float2*>(weight + 16 * warp + 8 * n + 2 * t));
+#pragma unroll
+    for (int m = 0; m < 4; ++m)
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+        {
+            float s = 0.f, mx = 0.f;
+#pragma unroll
+            for (int n = 0; n < 2; ++n)
+            {
+                const float a = x[m][n][2 * i], c = x[m][n][2 * i + 1];
+                s += a * a + c * c;
+                mx = fmaxf(mx, fmaxf(fabsf(a * wt[n].x), fabsf(c * wt[n].y)));
+            }
+            s += __shfl_xor_sync(0xffffffffu, s, 1);
+            s += __shfl_xor_sync(0xffffffffu, s, 2);
+            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+            if (t == 0)
+            {
+                reinterpret_cast<float2*>(red)[(16 * m + g + 8 * i) * kRed2Ld + warp] = make_float2(s, mx);
+            }
+        }
+    __syncthreads();
+    float pc[2][2] = {};  // pooled: this thread's column sums of y
+#pragma unroll
+    for (int m = 0; m < 4; ++m)
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+        {
+            const int row = 16 * m + g + 8 * i;
+            float sq = 0.f, mx = 0.f;
+#pragma unroll
+            for (int k = 0; k < kWarps / 2; ++k)  // warps 2k and 2k + 1: (sum, max) pairs
+            {
+                const float4 v = *reinterpret_cast<const float4*>(red + 2 * (row * kRed2Ld + 2 * k));
+                sq += v.x + v.z;
+                mx = fmaxf(mx, fmaxf(v.y, v.w));
+            }
+            const float rstd = rsqrtf(sq * (1.f / kD) + kEps);
+            const float inv = mx > 0.f ? __fdividef(127.f, mx) : 0.f;
+            if (warp == 0 && t == 0) scale[row] = rstd * mx * (1.f / 127.f);
+#pragma unroll
+            for (int n = 0; n < 2; ++n)
+            {
+                const float a = x[m][n][2 * i] * wt[n].x, c = x[m][n][2 * i + 1] * wt[n].y;
+                const uint32_t q0 = round_to_byte(a * inv), q1 = round_to_byte(c * inv);
+                *reinterpret_cast<uint16_t*>(dst + row * 2 * kLdH + 16 * warp + 8 * n + 2 * t) =
+                    static_cast<uint16_t>(q0 | q1 << 8);
+                if (pooled)
+                {
+                    pc[n][0] += a * rstd;
+                    pc[n][1] += c * rstd;
+                }
+            }
+        }
+    if (pooled)
+    {
+#pragma unroll
+        for (int n = 0; n < 2; ++n)
+        {
+#pragma unroll
+            for (int off = 4; off < 32; off <<= 1)
+            {
+                pc[n][0] += __shfl_xor_sync(0xffffffffu, pc[n][0], off);
+                pc[n][1] += __shfl_xor_sync(0xffffffffu, pc[n][1], off);
+            }
+            if (g == 0)
+            {
+                const int col = 16 * warp + 8 * n + 2 * t;
+                pooled[col] = pc[n][0] * (1.f / kTok);
+                pooled[col + 1] = pc[n][1] * (1.f / kTok);
+            }
+        }
+    }
+    __syncthreads();
+}
+
+// int8 networks: the 64 FP16 rows of `buf` (128 columns, stride kLdH) become int8 in place, in the first 128 bytes
+// of each row's storage (byte stride 2·kLdH), with scale[row] = max |a| / 127 and q = rn(a · 127 / max |a|)
+// (src/export/int8.py's _quantize_tokens). Four threads per row: each reads 32 halves and writes 32 bytes; the
+// shuffles that combine the maxima order every read of the row before its writes. Between two barriers: the FP16
+// rows complete before, the int8 rows and scales before the next matmul after.
+__device__ __forceinline__ void quantize_rows(__half* buf, float* scale, int tid)
+{
+    const int row = tid >> 2, q = tid & 3;
+    const uint4* src = reinterpret_cast<const uint4*>(buf + row * kLdH + 32 * q);
+    uint4 v[4];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) v[k] = src[k];
+    const auto* h = reinterpret_cast<const __half2*>(v);
+    __half2 m2 = __habs2(h[0]);
+#pragma unroll
+    for (int j = 1; j < 16; ++j) m2 = __hmax2(m2, __habs2(h[j]));
+    float amax = fmaxf(__low2float(m2), __high2float(m2));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+    const float inv = amax > 0.f ? __fdividef(127.f, amax) : 0.f;
+    uint32_t o[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+    {
+        const float2 f0 = __half22float2(h[2 * j]), f1 = __half22float2(h[2 * j + 1]);
+        o[j] = round_to_byte(f0.x * inv) | round_to_byte(f0.y * inv) << 8 | round_to_byte(f1.x * inv) << 16
+             | round_to_byte(f1.y * inv) << 24;
+    }
+    uint4* dst = reinterpret_cast<uint4*>(reinterpret_cast<int8_t*>(buf + row * kLdH) + 32 * q);
+    dst[0] = make_uint4(o[0], o[1], o[2], o[3]);
+    dst[1] = make_uint4(o[4], o[5], o[6], o[7]);
+    if (q == 0) scale[row] = amax * (1.f / 127.f);
 }
 
 // RMSNorm over one head's 16 dims (accumulator tiles n0, n0 + 1), times the norm weight.
@@ -433,7 +675,7 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 // the others (stm_plane_value in packed_position.hpp). Called by all 32 lanes of the warp (the OR uses shuffles).
 static_assert(kThreads == 4 * kTok, "four threads per token");
 static_assert(kPackHistory == 8 && kPackPlaneHMC - 96 == 14, "two slots per thread, the halfmove plane in word 3");
-__device__ __forceinline__ void planes_to_row(const SmallPackedPosition& p, int cell, int q, int stm_colour, __half* row)
+__device__ __forceinline__ unsigned plane_word(const SmallPackedPosition& p, int cell, int q, int stm_colour)
 {
     const int sq = (kPackBoard - 1 - (cell >> 3)) * kPackBoard + (cell & 7);
     unsigned long long lo = 0, hi = 0;  // planes 0..63, 64..127
@@ -463,7 +705,13 @@ __device__ __forceinline__ void planes_to_row(const SmallPackedPosition& p, int 
     hi |= static_cast<unsigned long long>(!stm_colour || p.stm) << (kPackPlaneSTM - 64);
     hi |= static_cast<unsigned long long>(p.ep_square == sq) << (kPackPlaneEP - 64);
     hi |= static_cast<unsigned long long>(p.castling & 0xFu) << (kPackPlaneCWK - 64);  // WK, WQ, BK, BQ
-    const unsigned word = static_cast<unsigned>((q < 2 ? lo : hi) >> (32 * (q & 1)));
+    return static_cast<unsigned>((q < 2 ? lo : hi) >> (32 * (q & 1)));
+}
+
+// Bit j of plane_word = plane 32q + j: as FP16, 1.0 for set planes and the halfmove plane's clock / 100.
+__device__ __forceinline__ void planes_to_row(const SmallPackedPosition& p, int cell, int q, int stm_colour, __half* row)
+{
+    const unsigned word = plane_word(p, cell, q, stm_colour);
     uint32_t hv[16];
 #pragma unroll
     for (int j = 0; j < 16; ++j)  // planes 32q + 2j and + 1 as a half2 of 0.0 / 1.0 (0x3C00)
@@ -475,7 +723,26 @@ __device__ __forceinline__ void planes_to_row(const SmallPackedPosition& p, int 
     for (int k = 0; k < 4; ++k) dst[k] = make_uint4(hv[4 * k], hv[4 * k + 1], hv[4 * k + 2], hv[4 * k + 3]);
 }
 
-template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0>
+// The same as int8 for an int8 network's embedding (src/export/int8.py, PLANE_SCALE): 100 for set planes and the
+// halfmove clock (at most 100) for plane 110, exact at the row scale 1/100.
+__device__ __forceinline__ void planes_to_row_i8(const SmallPackedPosition& p, int cell, int q, int stm_colour,
+                                                 int8_t* row)
+{
+    const unsigned word = plane_word(p, cell, q, stm_colour);
+    uint32_t o[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)  // planes 32q + 4j..+3: each bit of the nibble to its byte's low bit, times 100
+        o[j] = ((((word >> (4 * j)) & 0xFu) * 0x00204081u) & 0x01010101u) * 100u;
+    if (q == 3)  // plane 110 = byte 14 of the thread's 32 (its bit is clear)
+        o[3] |= static_cast<uint32_t>(min(static_cast<int>(p.halfmove), 100)) << 16;
+    uint4* dst = reinterpret_cast<uint4*>(row + 32 * q);
+    dst[0] = make_uint4(o[0], o[1], o[2], o[3]);
+    dst[1] = make_uint4(o[4], o[5], o[6], o[7]);
+}
+
+// kI8: an int8 network (EncoderParams::int8): the projections run warp_gemm_i8 on rows quantize_rows makes int8 in
+// place (the embedding on int8 planes), everything else as in the FP16 kernel.
+template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0, bool kI8 = false>
 __global__ void __launch_bounds__(kThreads, kMinBlocks)
     encoder_forward(__grid_constant__ const EncoderParams P, const SmallPackedPosition* __restrict__ packed,
                     const float* __restrict__ dense, unsigned char* __restrict__ out)
@@ -499,14 +766,20 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
     };
 
-    // ---- Input planes into s.h as [token][plane], FP16.
+    // ---- Input planes into s.h as [token][plane], FP16 (int8 networks: int8, 100 · plane, at the row scale 1/100).
+    constexpr int kLdB = 2 * kLdH;  // the byte stride of int8 rows
+    auto* const h8 = reinterpret_cast<int8_t*>(s.h);
+    auto* const v8 = reinterpret_cast<int8_t*>(s.v);
     if (packed)
     {
         const auto* src = reinterpret_cast<const unsigned long long*>(packed + b);
         for (int i = tid; i < static_cast<int>(sizeof(s.packed) / 8); i += kThreads) s.packed[i] = src[i];
         __syncthreads();
         const auto& pos = *reinterpret_cast<const SmallPackedPosition*>(s.packed);
-        planes_to_row(pos, tid >> 2, tid & 3, P.stm_colour, s.h + (tid >> 2) * kLdH);
+        if (kI8 && P.embed_s)
+            planes_to_row_i8(pos, tid >> 2, tid & 3, P.stm_colour, h8 + (tid >> 2) * kLdB);
+        else
+            planes_to_row(pos, tid >> 2, tid & 3, P.stm_colour, s.h + (tid >> 2) * kLdH);
     }
     else
     {
@@ -514,8 +787,16 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         for (int i = tid; i < kTok * 128; i += kThreads)
         {
             const int tok = i >> 7, pl = i & 127;
-            s.h[tok * kLdH + pl] = __float2half(pl < kPackPlanes ? src[tok * kPackPlanes + pl] : 0.f);
+            const float v = pl < kPackPlanes ? src[tok * kPackPlanes + pl] : 0.f;
+            if (kI8 && P.embed_s)
+                h8[tok * kLdB + pl] = static_cast<int8_t>(__float2int_rn(v * 100.f));
+            else
+                s.h[tok * kLdH + pl] = __float2half(v);
         }
+    }
+    if constexpr (kI8)
+    {
+        if (tid < kTok) s.scale_h[tid] = 0.01f;
     }
     __syncthreads();
     mark(0);
@@ -524,7 +805,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     const int cols[2] = {2 * warp, 2 * warp + 1};
     float x[4][2][4];
     zero(x);
-    warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, P.embed_w, cols, lane);
+    if (kI8 && P.embed_s)  // an int8 network's embedding may be FP16 (no scales)
+        warp_gemm_i8<2, 2, false>(x, h8, kLdB, P.embed_w, P.embed_s, s.scale_h, cols, lane);
+    else
+        warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, P.embed_w, cols, lane);
     uint32_t x0[4][2][2];
 #pragma unroll
     for (int n = 0; n < 2; ++n)
@@ -559,7 +843,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                     x[m][n][2 * i] += L.gain * v.x;
                     x[m][n][2 * i + 1] += L.gain * v.y;
                 }
-        norm_to_smem(x, L.norm1, s.h, s.red, warp, lane);
+        if constexpr (kI8)
+            norm_to_smem_i8(x, L.norm1, h8, s.scale_h, s.red, warp, lane);
+        else
+            norm_to_smem(x, L.norm1, s.h, s.red, warp, lane);
         mark(2);
 
         // ---- Attention, head = warp. V first, transposed into the warp's own slice.
@@ -568,7 +855,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             float v[4][2][4];
             zero(v);
             const int vtile[2] = {32 + 2 * warp, 33 + 2 * warp};
-            warp_gemm<4, 2, kChunk, 4, kMock>(v, s.h, kLdH, L.qkv, vtile, lane);
+            if constexpr (kI8)
+                warp_gemm_i8<2, 2, false>(v, h8, kLdB, L.qkv, L.qkv_s, s.scale_h, vtile, lane);
+            else
+                warp_gemm<4, 2, kChunk, 4, kMock>(v, s.h, kLdH, L.qkv, vtile, lane);
 #pragma unroll
             for (int m = 0; m < 4; ++m)
 #pragma unroll
@@ -583,7 +873,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             float qk[4][4][4];
             zero(qk);
             const int qktile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-            warp_gemm<4, 4, kChunk, 4, kMock>(qk, s.h, kLdH, L.qkv, qktile, lane);
+            if constexpr (kI8)
+                warp_gemm_i8<2, 4, false>(qk, h8, kLdB, L.qkv, L.qkv_s, s.scale_h, qktile, lane);
+            else
+                warp_gemm<4, 4, kChunk, 4, kMock>(qk, s.h, kLdH, L.qkv, qktile, lane);
             head_norm(qk, 0, L.qnorm, t);
             head_norm(qk, 2, L.knorm, t);
             __syncthreads();  // every warp has read h for its q, k and v: the attention output goes there
@@ -591,13 +884,24 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             attention(qk, vt, P.pair_bias, s.h, warp, lane);
         }
         __syncthreads();
+        if (kI8 && L.out_s)  // an int8 network's out may be FP16 (no scales)
+        {
+            quantize_rows(s.h, s.scale_h, tid);
+            __syncthreads();
+        }
         mark(5);
-        warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, L.out, cols, lane);
+        if (kI8 && L.out_s)
+            warp_gemm_i8<2, 2, true>(x, h8, kLdB, L.out, L.out_s, s.scale_h, cols, lane);
+        else
+            warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, L.out, cols, lane);
         mark(6);
 
         // ---- SwiGLU feed-forward in two halves of 128 hidden columns (16 gate + 16 up per warp),
         // each through v (free until the next layer's V) and then its half of the down projection.
-        norm_to_smem(x, L.norm2, s.h, s.red, warp, lane);
+        if constexpr (kI8)
+            norm_to_smem_i8(x, L.norm2, h8, s.scale_h, s.red, warp, lane);
+        else
+            norm_to_smem(x, L.norm2, s.h, s.red, warp, lane);
         mark(7);
 #pragma unroll
         for (int half = 0; half < 2; ++half)
@@ -606,7 +910,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
             zero(u);
             const int c0 = 16 * half + 2 * warp;
             const int utile[4] = {c0, c0 + 1, 32 + c0, 33 + c0};
-            warp_gemm<4, 4, kChunk, 4, kMock>(u, s.h, kLdH, L.up, utile, lane);
+            if constexpr (kI8)
+                warp_gemm_i8<2, 4, false>(u, h8, kLdB, L.up, L.up_s, s.scale_h, utile, lane);
+            else
+                warp_gemm<4, 4, kChunk, 4, kMock>(u, s.h, kLdH, L.up, utile, lane);
 #pragma unroll
             for (int n = 0; n < 2; ++n)
             {
@@ -623,8 +930,16 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                     }
             }
             __syncthreads();
+            if (kI8 && L.down_s)  // an int8 network's down may be FP16 (no scales)
+            {
+                quantize_rows(s.v, s.scale_v, tid);  // per token and hidden half (int8.py: down's two groups)
+                __syncthreads();
+            }
             mark(8);
-            warp_gemm<4, 2, kChunk, 8, kMock>(x, s.v, kLdH, L.down, cols, lane, 4 * half);
+            if (kI8 && L.down_s)
+                warp_gemm_i8<2, 2, true, 4>(x, v8, kLdB, L.down, L.down_s, s.scale_v, cols, lane, 2 * half);
+            else
+                warp_gemm<4, 2, kChunk, 8, kMock>(x, s.v, kLdH, L.down, cols, lane, 4 * half);
             // Before the second half overwrites v; after it, the next norm's barrier comes first.
             if (half == 0) __syncthreads();
             mark(9);
@@ -632,6 +947,11 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     }
 
     // ---- Final norm into s.h, and the token mean of the normed stream (value input).
+    if constexpr (kI8)
+    {
+        norm_to_smem_i8(x, P.norm, h8, s.scale_h, s.red, warp, lane, s.pooled);
+    }
+    else
     {
         float rstd[4][2];
         row_rstd(x, s.red, warp, lane, rstd);
@@ -665,8 +985,8 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                 s.pooled[col + 1] = c1 * (1.f / kTok);
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
     mark(10);
 
     // ---- Policy: the q and k projections (q pre-scaled by 1/sqrt(d) in the file), q into h and k
@@ -675,7 +995,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         float a[4][4][4];
         zero(a);
         const int ptile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-        warp_gemm<4, 4, kChunk, 4, kMock>(a, s.h, kLdH, P.pol_w, ptile, lane);
+        if constexpr (kI8)
+            warp_gemm_i8<2, 4, false>(a, h8, kLdB, P.pol_w, P.pol_s, s.scale_h, ptile, lane);
+        else
+            warp_gemm<4, 4, kChunk, 4, kMock>(a, s.h, kLdH, P.pol_w, ptile, lane);
         __syncthreads();
 #pragma unroll
         for (int n = 0; n < 4; ++n)
@@ -789,20 +1112,20 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     mark(14);
 }
 
-template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0>
+template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0, bool kI8 = false>
 cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packed, const float* dense,
                    int batch, void* out, cudaStream_t stream)
 {
     static const cudaError_t setup = [] {
-        const cudaError_t e = cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock>,
+        const cudaError_t e = cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock, kI8>,
                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                    static_cast<int>(sizeof(Smem)));
         if (e != cudaSuccess) return e;
-        return cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock>,
+        return cudaFuncSetAttribute(encoder_forward<kChunk, kMinBlocks, kTime, kMock, kI8>,
                                     cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
     }();
     if (setup != cudaSuccess) return setup;
-    encoder_forward<kChunk, kMinBlocks, kTime, kMock><<<batch, kThreads, sizeof(Smem), stream>>>(
+    encoder_forward<kChunk, kMinBlocks, kTime, kMock, kI8><<<batch, kThreads, sizeof(Smem), stream>>>(
         params, packed, dense, static_cast<unsigned char*>(out));
     return cudaGetLastError();
 }
@@ -868,6 +1191,10 @@ cudaError_t launch_encoder_forward(const EncoderParams& params,
                                    cudaStream_t stream)
 {
     if (batch <= 0) return cudaSuccess;
+    // An int8 network: INT8 projections, two blocks per SM (the accumulation switches do not apply).
+    if (params.int8)
+        return kernel_timing() ? launch<8, 2, true, 0, true>(params, packed, dense, batch, out, stream)
+                               : launch<8, 2, false, 0, true>(params, packed, dense, batch, out, stream);
     if (kernel_timing()) return launch<8, 2, true>(params, packed, dense, batch, out, stream);
     switch (kernel_mock())
     {

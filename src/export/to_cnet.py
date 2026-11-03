@@ -8,11 +8,15 @@ reads (wdl_w; search_heads blend). Two scales are folded in: the attention one
 (1/sqrt(head_dim), and log2(e) because the kernel's softmax uses exp2) and the policy
 one (1/sqrt(d_model), into pol_q and the promotion vectors).
 
+With --int8 the projections (embedding, qkv, out, up, down, policy q/k) are INT8 with one FP32 scale per output
+row (src/export/int8.py): <name> holds pack_b8 fragments as int32 words, <name>.s the scales, and an "int8" entry
+tells the kernel to run its INT8 path.
+
 Layout: b"CHESSNET", u32 version, u32 entry count, then per entry a 32-byte name, u32
 dtype (0 f16, 1 f32, 2 u16, 3 i32), u32 zero, u64 offset, u64 bytes; each entry's data
 starts on a 256-byte boundary.
 
-    uv run python -m src.export.to_cnet --ckpt_path ckpt.pt --out net.cnet
+    uv run python -m src.export.to_cnet --ckpt_path ckpt.pt --out net.cnet [--int8]
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import numpy as np
 import torch
 
 from src.export.heads import search_q_weight
+from src.export.int8 import quantize_rows
 from src.models.encoder import _vocab_tables
 from src.models.factory import model_from_checkpoint
 
@@ -60,6 +65,22 @@ def pack_b(w: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(w[8 * j + g, 32 * p + kk], dtype=np.float16)
 
 
+def pack_b8(q: np.ndarray) -> np.ndarray:
+    """An INT8 weight [N, K] as m16n8k32 B fragments: [N/8 tiles][K/64][32 lanes][16 bytes], as int32 words.
+
+    Lane l (g = l // 4, t = l % 4) of n-tile j holds column n = 8j + g at k offsets 4t..4t+3 and 16+4t..16+4t+3
+    (one k32 step's b0, b1) and the same plus 32 (the next step), so one 16-byte load per lane fetches 64 k."""
+    n, k = q.shape
+    assert n % 8 == 0 and k % 64 == 0 and q.dtype == np.int8, (q.shape, q.dtype)
+    j = np.arange(n // 8)[:, None, None, None]
+    p = np.arange(k // 64)[None, :, None, None]
+    lane = np.arange(32)[None, None, :, None]
+    e = np.arange(16)[None, None, None, :]
+    g, t = lane // 4, lane % 4
+    kk = 4 * t + (e & 3) + 16 * ((e >> 2) & 1) + 32 * (e >> 3)
+    return np.ascontiguousarray(q[8 * j + g, 64 * p + kk]).view(np.int32)
+
+
 def pack_pair_bias(bias: np.ndarray) -> np.ndarray:
     """[heads, 64 queries, 64 keys] as score fragments: [head][query tile 4][chunk 4][lane][8].
 
@@ -88,8 +109,16 @@ KERNEL_DIMS = {"d_model": 128, "heads": 8, "d_ff": 256}
 MAX_LAYERS = 16
 
 
-def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[str, np.ndarray]]:
-    """The .cnet entries; q_weight is value_q's weight in the WDL under search_heads blend."""
+FP16_IN_INT8 = ("embed", "out", "down")  # the projections an int8 network may keep in FP16
+
+
+def entries_for(
+    model, search_heads: str, q_weight: float = 0.5, int8: bool = False, fp16: tuple[str, ...] = ()
+) -> list[tuple[str, np.ndarray]]:
+    """The .cnet entries; q_weight is value_q's weight in the WDL under search_heads blend; int8: INT8
+    projections, but those named in fp16 (some of FP16_IN_INT8)."""
+    if not set(fp16) <= set(FP16_IN_INT8):
+        raise ValueError(f"an int8 network keeps only {FP16_IN_INT8} in FP16, not {fp16}")
     cfg = model.cfg
     d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
     if any(cfg[k] != v for k, v in KERNEL_DIMS.items()) or not 1 <= layers <= MAX_LAYERS:
@@ -107,12 +136,19 @@ def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[s
     embed[:, :planes] = sd["embed.weight"]
     pol_scale = 1.0 / math.sqrt(d)
 
+    def mat(name: str, w: np.ndarray, fp16: bool = False) -> list[tuple[str, np.ndarray]]:
+        """A projection: FP16 B fragments, or INT8 ones and their per-row scales."""
+        if not int8 or fp16:
+            return [(name, pack_b(w))]
+        q, scale = quantize_rows(w)
+        return [(name, pack_b8(q)), (name + ".s", scale)]
+
     out: list[tuple[str, np.ndarray]] = [
         (
             "config",
             np.array([d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32),
         ),
-        ("embed.w", pack_b(embed)),
+        *mat("embed.w", embed, fp16="embed" in fp16),
         ("embed.b", sd["embed.bias"]),
         ("pos", sd["pos"]),
         ("pair_bias", pack_pair_bias(sd["pair_bias"] * LOG2E)),
@@ -121,20 +157,20 @@ def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[s
         b = f"blocks.{i}."
         out += [
             (f"l{i}.norm1", sd[b + "norm1.weight"]),
-            (f"l{i}.qkv", pack_b(sd[b + "qkv.weight"])),
+            *mat(f"l{i}.qkv", sd[b + "qkv.weight"]),
             (f"l{i}.qnorm", sd[b + "q_norm.weight"] * (LOG2E / math.sqrt(hd))),
             (f"l{i}.knorm", sd[b + "k_norm.weight"]),
-            (f"l{i}.out", pack_b(sd[b + "out.weight"])),
+            *mat(f"l{i}.out", sd[b + "out.weight"], fp16="out" in fp16),
             (f"l{i}.norm2", sd[b + "norm2.weight"]),
-            (f"l{i}.up", pack_b(sd[b + "up.weight"])),
-            (f"l{i}.down", pack_b(sd[b + "down.weight"])),
+            *mat(f"l{i}.up", sd[b + "up.weight"]),
+            *mat(f"l{i}.down", sd[b + "down.weight"], fp16="down" in fp16),
             (f"l{i}.gain", sd[b + "x0_gain"].reshape(1)),
         ]
     pol_w = np.concatenate([sd["pol_q.weight"] * pol_scale, sd["pol_k.weight"]])
     pol_b = np.concatenate([sd["pol_q.bias"] * pol_scale, sd["pol_k.bias"]])
     out += [
         ("norm", sd["norm.weight"]),
-        ("pol.w", pack_b(pol_w)),
+        *mat("pol.w", pol_w),
         ("pol.b", pol_b),
         ("promo", (sd["promo"] * pol_scale).astype(np.float16)),
         ("vocab", vocab_codes()),
@@ -150,6 +186,8 @@ def entries_for(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[s
     # sets it to 1, as every network before this setting was trained.
     if cfg.get("stm_plane", "constant") == "colour":
         out.append(("stm_colour", np.array([1], np.int32)))
+    if int8:
+        out.append(("int8", np.array([1], np.int32)))
     return out
 
 
@@ -178,7 +216,9 @@ def write_cnet(path: Path, entries: list[tuple[str, np.ndarray]]) -> None:
     tmp.replace(path)  # self-play may be watching for the file
 
 
-def export(ckpt_path: Path, out_path: Path, search_heads: str | None = None) -> str:
+def export(
+    ckpt_path: Path, out_path: Path, search_heads: str | None = None, int8: bool = False, fp16: tuple[str, ...] = ()
+) -> str:
     """Write the .cnet; returns the heads it reads ("blend 0.25": value_q's weight)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "model" in ckpt):
@@ -188,7 +228,7 @@ def export(ckpt_path: Path, out_path: Path, search_heads: str | None = None) -> 
         raise SystemExit("the fused network supports the encoder architecture only")
     heads = search_heads or (ckpt.get("config") or {}).get("search_heads", "search")
     q_weight = search_q_weight(ckpt)
-    write_cnet(out_path, entries_for(model, heads, q_weight))
+    write_cnet(out_path, entries_for(model, heads, q_weight, int8, tuple(fp16)))
     return f"{heads} {q_weight:.3f}" if heads == "blend" else heads
 
 
@@ -197,8 +237,10 @@ def main() -> None:
     p.add_argument("--ckpt_path", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--search_heads", default=None, choices=sorted(HEADS))
+    p.add_argument("--int8", action="store_true", help="INT8 projections (src/export/int8.py)")
+    p.add_argument("--fp16", default="", help=f"with --int8: projections kept FP16, comma-separated, of {FP16_IN_INT8}")
     a = p.parse_args()
-    heads = export(a.ckpt_path, a.out, a.search_heads)
+    heads = export(a.ckpt_path, a.out, a.search_heads, a.int8, tuple(x for x in a.fp16.split(",") if x))
     print(f"[to_cnet] {a.ckpt_path} -> {a.out} ({a.out.stat().st_size} bytes, heads={heads})")
 
 
