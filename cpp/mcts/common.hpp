@@ -141,12 +141,18 @@ struct TreeNode
     // Computed from the NN's mlh_q head as `mlh_q * 25` (the head outputs
     // plies/25). Terminal nodes use 0.
     float leaf_plies{0.0F};
+    // mlh_tanh: tanh(plies_sum / visit_count * kMlhPliesScale), the selection's moves-left term, kept by
+    // backpropagate_full whenever the two change (selection evaluated it for every visited child at every step).
+    float mlh_tanh{0.0F};
     // Children: `num_children` consecutive nodes from `first_child` (all added when this node is
     // expanded); each holds its own move (move_from_parent) and prior. No per-node allocation, so
     // copying a subtree for reuse and freeing a tree move only the node array.
     int first_child{-1};
     int num_children{0};
 };
+
+// The moves-left term's scale: plies are squashed by tanh(plies / 25).
+constexpr float kMlhPliesScale = 1.0F / 25.0F;
 
 struct SearchTree
 {

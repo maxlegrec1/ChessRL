@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -586,6 +587,9 @@ void backpropagate_full(
         node.wdl[0] = node.wdl_sum[0] * inv;
         node.wdl[1] = node.wdl_sum[1] * inv;
         node.wdl[2] = node.wdl_sum[2] * inv;
+        // The selection's moves-left term, as select_child computed it per child and step.
+        const float plies_avg = node.plies_sum * inv;
+        node.mlh_tanh = std::tanh(plies_avg * kMlhPliesScale);
         // Flip for parent's perspective: value sign-flips, WDL swaps W↔L,
         // plies stays as-is (moves-left is symmetric).
         current_v = -current_v;

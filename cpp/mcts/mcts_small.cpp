@@ -325,7 +325,6 @@ public:
         width_ = std::max(1, options_.virtual_loss_width);
         total_sims_ = std::max(0, options_.simulations - reused_visits_);
         sims_done_ = 0;
-        pending_.reserve(static_cast<size_t>(width_));
         positions_.reserve(static_cast<size_t>(width_));
         tickets_.reserve(static_cast<size_t>(width_));
         cached_evals_.reserve(static_cast<size_t>(width_));
@@ -402,10 +401,17 @@ private:
     // does NOT mutate) virtual_loss along the path, so siblings already
     // chosen by an in-flight descent are deprioritized. The caller is
     // responsible for apply_virtual_loss / revert_virtual_loss.
-    DescentState descend()
+    // Into `d`, a slot of pending_ reused round after round: its board keeps the history capacity it has (a
+    // default-constructed chess::Board reserves 256 states and parses the start position's FEN) and its path
+    // vector its capacity.
+    void descend(DescentState& d)
     {
-        DescentState d;
+        d.path.clear();
         d.path.push_back(0);
+        d.leaf_node_index = -1;
+        d.is_terminal = false;
+        d.terminal_value = 0.0F;
+        d.terminal_wdl = {0.0F, 0.0F, 0.0F};
         d.leaf_board = root_board_;
         d.leaf_history = root_history_stack_;
         int node_index = 0;
@@ -421,7 +427,7 @@ private:
                 d.terminal_value = value;
                 d.terminal_wdl = wdl_from_terminal(value);
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
             if (!node.expanded || node.num_children == 0)
@@ -440,12 +446,12 @@ private:
                         d.terminal_value = *terminal;
                         d.terminal_wdl = node.wdl;
                         d.leaf_node_index = node_index;
-                        return d;
+                        return;
                     }
                 }
                 d.is_terminal = false;
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
             const int child_index = select_child(node_index);
@@ -453,7 +459,7 @@ private:
             {
                 d.is_terminal = false;
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
             d.leaf_board.makeMove(tree_.nodes[child_index].move_from_parent);
@@ -507,7 +513,6 @@ private:
         //   MLH (prefer faster). When losing/drawing, modifier rewards high
         //   MLH (prefer slower / drag it out).
         constexpr float kMlhEpsilon = 0.05F;
-        constexpr float kPliesScale = 1.0F / 25.0F;
 
         for (int child_index = node.first_child; child_index < node.first_child + node.num_children; ++child_index)
         {
@@ -532,11 +537,10 @@ private:
             float mlh_modifier = 0.0F;
             if (child.visit_count > 0)
             {
-                // child.wdl is in child's perspective; flip to parent's POV.
+                // child.wdl is in child's perspective; flip to parent's POV. tanh(plies_avg / 25) is kept by the
+                // backup (TreeNode::mlh_tanh).
                 const float w_parent_pov = child.wdl[2];
-                const float inv_n = 1.0F / static_cast<float>(child.visit_count);
-                const float plies_avg = child.plies_sum * inv_n;
-                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * std::tanh(plies_avg * kPliesScale);
+                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * child.mlh_tanh;
             }
 
             const float score = q + u + kMlhEpsilon * mlh_modifier;
@@ -556,7 +560,7 @@ private:
     {
         const int round_width = std::min(width_, total_sims_ - sims_done_);
 
-        pending_.clear();
+        n_pending_ = 0;  // pending_ keeps its slots (and their boards) from round to round
         tickets_.clear();
         cached_evals_.assign(static_cast<size_t>(round_width), SmallPolicyValue{});
         have_cached_.assign(static_cast<size_t>(round_width), false);
@@ -566,7 +570,9 @@ private:
         const std::uint64_t t_p1 = ph ? now_ns() : 0;
         for (int i = 0; i < round_width; ++i)
         {
-            DescentState d = descend();
+            if (pending_.size() <= n_pending_) pending_.emplace_back();
+            DescentState& d = pending_[n_pending_];
+            descend(d);
             apply_virtual_loss(d.path);
 
             if (d.is_terminal)
@@ -579,13 +585,13 @@ private:
                 continue;
             }
 
-            pending_.push_back(std::move(d));
+            ++n_pending_;  // a terminal descent's slot is reused by the next one
         }
         if (ph) g_ph_descent_ns.fetch_add(now_ns() - t_p1, std::memory_order_relaxed);
 
         // Cache lookups happen synchronously; misses go onto the GPU queue.
         const std::uint64_t t_p2 = ph ? now_ns() : 0;
-        for (size_t i = 0; i < pending_.size(); ++i)
+        for (size_t i = 0; i < n_pending_; ++i)
         {
             const auto& d = pending_[i];
             if (cache_)
@@ -616,7 +622,7 @@ private:
             if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
         }
         size_t ticket_idx = 0;
-        for (size_t i = 0; i < pending_.size(); ++i)
+        for (size_t i = 0; i < n_pending_; ++i)
         {
             DescentState& d = pending_[i];
             SmallPolicyValue eval;
@@ -1235,7 +1241,8 @@ private:
     bool root_in_flight_{false};
     bool round_in_flight_{false};
     single::SmallBatchRunner::Ticket root_ticket_;
-    std::vector<DescentState> pending_;
+    std::vector<DescentState> pending_;  // reused slots; the round's descents are the first n_pending_
+    size_t n_pending_{0};
     std::vector<single::SmallBatchRunner::Ticket> tickets_;
     std::vector<std::shared_ptr<const single::SmallPackedPosition>> positions_;
     std::vector<SmallPolicyValue> cached_evals_;
