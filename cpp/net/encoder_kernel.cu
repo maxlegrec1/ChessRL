@@ -53,7 +53,9 @@ constexpr float kEps = 1e-6f;
 // reads at once land on distinct banks: FP16 networks keep sums of squares (kRedLd floats per row), int8 ones
 // (sum of squares, max |x · w|) pairs (kRed2Ld float2 per row).
 constexpr int kRedLd = 12;
+static_assert(kRedLd > 8, "a padding slot per row for the norms' 1/RMS");
 constexpr int kRed2Ld = 10;
+static_assert(kRed2Ld > 8, "a padding slot per row for the int8 norms' row totals");
 // INT8 projections: n-tiles per pass of warp_gemm_i8.
 constexpr int kI8Group = 2;
 // Attention multiplies with FP16 accumulators (the full-rate ones on GeForce cards): bit 1 P · V (probabilities
@@ -378,17 +380,22 @@ __device__ __forceinline__ void row_rstd(const float (&x)[4][2][4], float* red, 
             if (t == 0) red[(16 * m + g + 8 * i) * kRedLd + warp] = s;
         }
     __syncthreads();
+    // Warp w finishes rows 8w..8w+7, four lanes per row (two warps' partials each, summed as
+    // ((w0 + w1) + (w2 + w3)) + ((w4 + w5) + (w6 + w7))): 1/RMS into the row's padding slot kWarps, read by every
+    // thread after a second barrier.
+    {
+        const int row = 8 * warp + (lane >> 2), k = lane & 3;
+        const float2 v = *reinterpret_cast<const float2*>(red + row * kRedLd + 2 * k);
+        float s = v.x + v.y;
+        s += __shfl_xor_sync(0xffffffffu, s, 1);
+        s += __shfl_xor_sync(0xffffffffu, s, 2);
+        if (k == 0) red[row * kRedLd + kWarps] = rsqrtf(s * (1.f / kD) + kEps);
+    }
+    __syncthreads();
 #pragma unroll
     for (int m = 0; m < 4; ++m)
 #pragma unroll
-        for (int i = 0; i < 2; ++i)
-        {
-            const int row = 16 * m + g + 8 * i;
-            const float4 a = *reinterpret_cast<const float4*>(red + row * kRedLd);
-            const float4 c = *reinterpret_cast<const float4*>(red + row * kRedLd + 4);
-            const float s = (a.x + a.y) + (a.z + a.w) + ((c.x + c.y) + (c.z + c.w));
-            rstd[m][i] = rsqrtf(s * (1.f / kD) + kEps);
-        }
+        for (int i = 0; i < 2; ++i) rstd[m][i] = red[(16 * m + g + 8 * i) * kRedLd + kWarps];
 }
 
 // dst = RMSNorm(x) · weight, FP16, then a barrier so dst is ready as an A operand.
@@ -451,6 +458,25 @@ __device__ __forceinline__ void norm_to_smem_i8(const float (&x)[4][2][4], const
             }
         }
     __syncthreads();
+    // Warp w finishes rows 8w..8w+7, four lanes per row (two warps' partials each): (rstd, 127 / max |x · w|) into
+    // the row's padding slot kWarps, read by every thread after a second barrier.
+    {
+        const int row = 8 * warp + (lane >> 2), k = lane & 3;
+        const float4 v = *reinterpret_cast<const float4*>(red + 2 * (row * kRed2Ld + 2 * k));
+        float sq = v.x + v.z, mx = fmaxf(v.y, v.w);
+        sq += __shfl_xor_sync(0xffffffffu, sq, 1);
+        sq += __shfl_xor_sync(0xffffffffu, sq, 2);
+        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+        if (k == 0)
+        {
+            const float rstd = rsqrtf(sq * (1.f / kD) + kEps);
+            reinterpret_cast<float2*>(red)[row * kRed2Ld + kWarps] =
+                make_float2(rstd, mx > 0.f ? __fdividef(127.f, mx) : 0.f);
+            scale[row] = rstd * mx * (1.f / 127.f);
+        }
+    }
+    __syncthreads();
     float pc[2][2] = {};  // pooled: this thread's column sums of y
 #pragma unroll
     for (int m = 0; m < 4; ++m)
@@ -458,17 +484,8 @@ __device__ __forceinline__ void norm_to_smem_i8(const float (&x)[4][2][4], const
         for (int i = 0; i < 2; ++i)
         {
             const int row = 16 * m + g + 8 * i;
-            float sq = 0.f, mx = 0.f;
-#pragma unroll
-            for (int k = 0; k < kWarps / 2; ++k)  // warps 2k and 2k + 1: (sum, max) pairs
-            {
-                const float4 v = *reinterpret_cast<const float4*>(red + 2 * (row * kRed2Ld + 2 * k));
-                sq += v.x + v.z;
-                mx = fmaxf(mx, fmaxf(v.y, v.w));
-            }
-            const float rstd = rsqrtf(sq * (1.f / kD) + kEps);
-            const float inv = mx > 0.f ? __fdividef(127.f, mx) : 0.f;
-            if (warp == 0 && t == 0) scale[row] = rstd * mx * (1.f / 127.f);
+            const float2 ri = reinterpret_cast<const float2*>(red)[row * kRed2Ld + kWarps];
+            const float rstd = ri.x, inv = ri.y;
 #pragma unroll
             for (int n = 0; n < 2; ++n)
             {
@@ -564,22 +581,13 @@ __device__ __forceinline__ void head_norm(float (&a)[4][NT][4], int n0, const fl
         }
 }
 
-// Attention for head `warp`. qk tiles 0-1 hold Q (already scaled by log2(e) / 4 through
-// the q norm weight), tiles 2-3 hold K; vt holds V transposed. Writes the head's 16
-// output columns of `o`.
-__device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __half* vt,
+// Attention for head `warp`. qa: Q as the A operand of each row tile (already scaled by log2(e) / 4 through the
+// q norm weight), kb: K as the B operand of each key tile (qk_operands); vt holds V transposed. Writes the head's
+// 16 output columns of `o`.
+__device__ __forceinline__ void attention(const uint32_t (&qa)[4][4], const uint32_t (&kb)[8][2], const __half* vt,
                                           const void* pair_bias, __half* o, int warp, int lane)
 {
     const int g = lane >> 2, t = lane & 3;
-    // K as B operand: key tile j (keys 8j..8j+7) is row half j % 2 of K's row tile j / 2.
-    uint32_t kb[8][2];
-#pragma unroll
-    for (int j = 0; j < 8; ++j)
-    {
-        const int m = j >> 1, i = j & 1;
-        kb[j][0] = h2(qk[m][2][2 * i], qk[m][2][2 * i + 1]);
-        kb[j][1] = h2(qk[m][3][2 * i], qk[m][3][2 * i + 1]);
-    }
     // V as B operand: k-step s covers keys 16s..16s+15, n-tile d covers dims 8d..8d+7.
     uint32_t vb[4][2][2];
 #pragma unroll
@@ -596,8 +604,6 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 #pragma unroll
     for (int m = 0; m < 4; ++m)
     {
-        const uint32_t qa[4] = {h2(qk[m][0][0], qk[m][0][1]), h2(qk[m][0][2], qk[m][0][3]),
-                                h2(qk[m][1][0], qk[m][1][1]), h2(qk[m][1][2], qk[m][1][3])};
         // Scores start from the pair bias (packed by to_cnet.pack_pair_bias, × log2(e)).
         float sc[8][4];
         if constexpr ((kAttnHalf & 2) != 0)
@@ -615,7 +621,7 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 #pragma unroll
             for (int j = 0; j < 8; ++j)
             {
-                mma_h(sh[j], qa, kb[j][0], kb[j][1]);
+                mma_h(sh[j], qa[m], kb[j][0], kb[j][1]);
                 const float2 lo = unh2(sh[j][0]), hi = unh2(sh[j][1]);
                 sc[j][0] = lo.x;
                 sc[j][1] = lo.y;
@@ -640,7 +646,7 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
                 sc[2 * c + 1][3] = a3.y;
             }
 #pragma unroll
-            for (int j = 0; j < 8; ++j) mma(sc[j], qa, kb[j][0], kb[j][1]);
+            for (int j = 0; j < 8; ++j) mma(sc[j], qa[m], kb[j][0], kb[j][1]);
         }
 
         // Softmax over the 64 keys (base 2) of rows g (r = 0, 1) and g + 8 (r = 2, 3).
@@ -814,6 +820,19 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
     };
 
+    // A projection of two n-tiles (16 output columns) of the rows in s.h, INT8 or FP16. The q/k, feed-forward up
+    // and policy projections run as pairs of these, their outputs consumed before the next pair: half the live
+    // outputs of one four-tile call, under the 128-register cap of two blocks per SM (A is read twice).
+    const auto proj2 = [&](float (&o)[4][2][4], const void* w, const float* ws, const int (&tl)[2]) {
+        if constexpr (kI8)
+            warp_gemm_i8<2, 2, false>(o, reinterpret_cast<const int8_t*>(s.h), 2 * kLdH, w, ws, s.scale_h, tl, lane);
+        else
+        {
+            zero(o);
+            warp_gemm<4, 2, kChunk, 4, kMock>(o, s.h, kLdH, w, tl, lane);
+        }
+    };
+
     // ---- Input planes into s.h as [token][plane], FP16 (int8 networks: int8, 100 · plane, at the row scale 1/100).
     constexpr int kLdB = 2 * kLdH;  // the byte stride of int8 rows
     auto* const h8 = reinterpret_cast<int8_t*>(s.h);
@@ -849,7 +868,10 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     __syncthreads();
     mark(0);
 
-    // ---- Embedding: x0 = planes · We + be + pos. x (FP32) and x0 (FP16) stay in registers.
+    // ---- Embedding: x0 = planes · We + be + pos. x (FP32) stays in registers; x0 (FP16), read once per layer,
+    // goes to global memory (L2): the 16 registers it took were spilled around every attention anyway. One uint4
+    // per lane and row tile, [block][warp][m][lane].
+    uint4* const x0s = static_cast<uint4*>(P.x0_scratch) + (static_cast<size_t>(b) * kWarps + warp) * 4 * 32 + lane;
     const int cols[2] = {2 * warp, 2 * warp + 1};
     float x[4][2][4];
     zero(x);
@@ -857,23 +879,27 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         warp_gemm_i8<2, 2, false>(x, h8, kLdB, P.embed_w, P.embed_s, s.scale_h, cols, lane);
     else
         warp_gemm<4, 2, kChunk, 4, kMock>(x, s.h, kLdH, P.embed_w, cols, lane);
-    uint32_t x0[4][2][2];
-#pragma unroll
-    for (int n = 0; n < 2; ++n)
     {
-        const int col = 16 * warp + 8 * n + 2 * t;
-        const float2 eb = __ldg(reinterpret_cast<const float2*>(P.embed_b + col));
+        uint32_t x0[4][2][2];
 #pragma unroll
-        for (int m = 0; m < 4; ++m)
+        for (int n = 0; n < 2; ++n)
+        {
+            const int col = 16 * warp + 8 * n + 2 * t;
+            const float2 eb = __ldg(reinterpret_cast<const float2*>(P.embed_b + col));
 #pragma unroll
-            for (int i = 0; i < 2; ++i)
-            {
-                const int row = 16 * m + g + 8 * i;
-                const float2 pe = __ldg(reinterpret_cast<const float2*>(P.pos + row * kD + col));
-                x[m][n][2 * i] += eb.x + pe.x;
-                x[m][n][2 * i + 1] += eb.y + pe.y;
-                x0[m][n][i] = h2(x[m][n][2 * i], x[m][n][2 * i + 1]);
-            }
+            for (int m = 0; m < 4; ++m)
+#pragma unroll
+                for (int i = 0; i < 2; ++i)
+                {
+                    const int row = 16 * m + g + 8 * i;
+                    const float2 pe = __ldg(reinterpret_cast<const float2*>(P.pos + row * kD + col));
+                    x[m][n][2 * i] += eb.x + pe.x;
+                    x[m][n][2 * i + 1] += eb.y + pe.y;
+                    x0[m][n][i] = h2(x[m][n][2 * i], x[m][n][2 * i + 1]);
+                }
+        }
+#pragma unroll
+        for (int m = 0; m < 4; ++m) __stcg(x0s + m * 32, make_uint4(x0[m][0][0], x0[m][0][1], x0[m][1][0], x0[m][1][1]));
     }
     mark(1);
 
@@ -882,15 +908,19 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         const LayerParams& L = P.layer[l];
 #pragma unroll
         for (int m = 0; m < 4; ++m)
+        {
+            const uint4 w = __ldcg(x0s + m * 32);
+            const uint32_t x0m[2][2] = {{w.x, w.y}, {w.z, w.w}};
 #pragma unroll
             for (int n = 0; n < 2; ++n)
 #pragma unroll
                 for (int i = 0; i < 2; ++i)
                 {
-                    const float2 v = unh2(x0[m][n][i]);
+                    const float2 v = unh2(x0m[n][i]);
                     x[m][n][2 * i] += L.gain * v.x;
                     x[m][n][2 * i + 1] += L.gain * v.y;
                 }
+        }
         if constexpr (kI8)
             norm_to_smem_i8(x, L.norm1, h8, s.scale_h, s.red, warp, lane);
         else
@@ -918,18 +948,38 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         }
         mark(3);
         {
-            float qk[4][4][4];
-            zero(qk);
-            const int qktile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-            if constexpr (kI8)
-                warp_gemm_i8<2, 4, false>(qk, h8, kLdB, L.qkv, L.qkv_s, s.scale_h, qktile, lane);
-            else
-                warp_gemm<4, 4, kChunk, 4, kMock>(qk, s.h, kLdH, L.qkv, qktile, lane);
-            head_norm(qk, 0, L.qnorm, t);
-            head_norm(qk, 2, L.knorm, t);
+            // K, then Q, each head-normed and packed into the score multiply's FP16 operands at once.
+            uint32_t qa[4][4], kb[8][2];
+            {
+                float k[4][2][4];
+                const int ktile[2] = {16 + 2 * warp, 17 + 2 * warp};
+                proj2(k, L.qkv, L.qkv_s, ktile);
+                head_norm(k, 0, L.knorm, t);
+#pragma unroll
+                for (int j = 0; j < 8; ++j)  // key tile j (keys 8j..8j+7): row half j % 2 of row tile j / 2
+                {
+                    const int m = j >> 1, i = j & 1;
+                    kb[j][0] = h2(k[m][0][2 * i], k[m][0][2 * i + 1]);
+                    kb[j][1] = h2(k[m][1][2 * i], k[m][1][2 * i + 1]);
+                }
+            }
+            {
+                float q[4][2][4];
+                const int qtile[2] = {2 * warp, 2 * warp + 1};
+                proj2(q, L.qkv, L.qkv_s, qtile);
+                head_norm(q, 0, L.qnorm, t);
+#pragma unroll
+                for (int m = 0; m < 4; ++m)
+                {
+                    qa[m][0] = h2(q[m][0][0], q[m][0][1]);
+                    qa[m][1] = h2(q[m][0][2], q[m][0][3]);
+                    qa[m][2] = h2(q[m][1][0], q[m][1][1]);
+                    qa[m][3] = h2(q[m][1][2], q[m][1][3]);
+                }
+            }
             __syncthreads();  // every warp has read h for its q, k and v: the attention output goes there
             mark(4);
-            attention(qk, vt, P.pair_bias, s.h, warp, lane);
+            attention(qa, kb, vt, P.pair_bias, s.h, warp, lane);
         }
         __syncthreads();
         if (kI8 && L.out_s)  // an int8 network's out may be FP16 (no scales)
@@ -954,17 +1004,13 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
 #pragma unroll
         for (int half = 0; half < 2; ++half)
         {
-            float u[4][4][4];
-            zero(u);
             const int c0 = 16 * half + 2 * warp;
-            const int utile[4] = {c0, c0 + 1, 32 + c0, 33 + c0};
-            if constexpr (kI8)
-                warp_gemm_i8<2, 4, false>(u, h8, kLdB, L.up, L.up_s, s.scale_h, utile, lane);
-            else
-                warp_gemm<4, 4, kChunk, 4, kMock>(u, s.h, kLdH, L.up, utile, lane);
 #pragma unroll
             for (int n = 0; n < 2; ++n)
             {
+                float u[4][2][4];  // the gate and up columns of the same 8 hidden units
+                const int utile[2] = {c0 + n, 32 + c0 + n};
+                proj2(u, L.up, L.up_s, utile);
                 const int col = 16 * warp + 8 * n + 2 * t;  // within the half
 #pragma unroll
                 for (int m = 0; m < 4; ++m)
@@ -973,8 +1019,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
                     {
                         const int row = 16 * m + g + 8 * i;
                         *reinterpret_cast<uint32_t*>(s.v + row * kLdH + col) =
-                            h2(silu(u[m][n][2 * i]) * u[m][n + 2][2 * i],
-                               silu(u[m][n][2 * i + 1]) * u[m][n + 2][2 * i + 1]);
+                            h2(silu(u[m][0][2 * i]) * u[m][1][2 * i], silu(u[m][0][2 * i + 1]) * u[m][1][2 * i + 1]);
                     }
             }
             __syncthreads();
@@ -1037,23 +1082,22 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     }
     mark(10);
 
-    // ---- Policy: the q and k projections (q pre-scaled by 1/sqrt(d) in the file), q into h and k
-    // into v once every warp has read h.
-    {
-        float a[4][4][4];
-        zero(a);
-        const int ptile[4] = {2 * warp, 2 * warp + 1, 16 + 2 * warp, 17 + 2 * warp};
-        if constexpr (kI8)
-            warp_gemm_i8<2, 4, false>(a, h8, kLdB, P.pol_w, P.pol_s, s.scale_h, ptile, lane);
-        else
-            warp_gemm<4, 4, kChunk, 4, kMock>(a, s.h, kLdH, P.pol_w, ptile, lane);
-        __syncthreads();
+    // ---- Policy: the q and k projections (q pre-scaled by 1/sqrt(d) in the file). k into v at once (nothing
+    // reads v after the last down projection, which the final norm's barrier follows), q into h once every warp
+    // has read h.
 #pragma unroll
-        for (int n = 0; n < 4; ++n)
+    for (int part = 1; part >= 0; --part)
+    {
+        float a[4][2][4];
+        const int ptile[2] = {16 * part + 2 * warp, 16 * part + 2 * warp + 1};
+        proj2(a, P.pol_w, P.pol_s, ptile);
+        if (part == 0) __syncthreads();
+#pragma unroll
+        for (int n = 0; n < 2; ++n)
         {
             const int col = 8 * ptile[n] + 2 * t;
             const float2 bb = __ldg(reinterpret_cast<const float2*>(P.pol_b + col));
-            __half* dst = n < 2 ? s.h + col : s.v + (col - kD);
+            __half* dst = part == 0 ? s.h + col : s.v + (col - kD);
 #pragma unroll
             for (int m = 0; m < 4; ++m)
 #pragma unroll

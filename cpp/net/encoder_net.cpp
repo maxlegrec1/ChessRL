@@ -177,12 +177,33 @@ EncoderNet::EncoderNet(std::string path)
 EncoderNet::~EncoderNet()
 {
     if (blob_) cudaFree(blob_);
+    for (auto& entry : scratch_)
+        if (entry.second.first) cudaFree(entry.second.first);
 }
 
 cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packed, const float* d_dense, int batch,
                                 void* d_out, cudaStream_t stream) const
 {
-    return launch_encoder_forward(params_, d_packed, d_dense, batch, d_out, stream);
+    if (batch <= 0) return cudaSuccess;
+    EncoderParams p = params_;
+    {
+        std::lock_guard<std::mutex> lock(scratch_mu_);
+        auto& [ptr, bytes] = scratch_[stream];
+        const std::size_t need = static_cast<std::size_t>(batch) * kX0ScratchBytes;
+        if (bytes < need)
+        {
+            // cudaFree waits for the device, so the stream's earlier launches are done with the old buffer.
+            if (ptr) cudaFree(ptr);
+            ptr = nullptr;
+            const std::size_t grown = need > 2 * bytes ? need : 2 * bytes;
+            bytes = 0;
+            const cudaError_t err = cudaMalloc(&ptr, grown);
+            if (err != cudaSuccess) return err;
+            bytes = grown;
+        }
+        p.x0_scratch = ptr;
+    }
+    return launch_encoder_forward(p, d_packed, d_dense, batch, d_out, stream);
 }
 
 std::vector<unsigned char> EncoderNet::run_dense(const float* planes, int batch) const

@@ -5,6 +5,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -22,6 +23,9 @@ constexpr int kAuxOffset = 3728;
 constexpr int kRecordBytes = 3760;
 static_assert(kAuxOffset >= 2 * kPolicySize && kAuxOffset % 16 == 0 && kRecordBytes - kAuxOffset == 32,
               "output record layout");
+// Per position, the kernel's global scratch: x0, the FP16 embedding re-injected into every layer (EncoderNet keeps
+// one buffer per stream).
+constexpr std::size_t kX0ScratchBytes = 64 * 128 * 2;
 
 // The projections (embedding, qkv, out, up, down, policy) are packed B fragments: FP16 (to_cnet.pack_b), or INT8
 // (to_cnet.pack_b8) for an int8 network, with one FP32 scale per output row in *_s (null otherwise).
@@ -66,6 +70,7 @@ struct EncoderParams
     const float* mlp1_b;
     const float* mlp2_w;
     const float* mlp2_b;
+    void* x0_scratch;  // batch × kX0ScratchBytes, set per launch (EncoderNet::forward)
 };
 
 // Runs `batch` positions on `stream`, one kRecordBytes record each into `out`. Exactly

@@ -5,7 +5,10 @@
 
 #include <cuda_runtime_api.h>
 
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "mcts/packed_position.hpp"
@@ -40,6 +43,10 @@ private:
     std::string path_;
     void* blob_{nullptr};
     EncoderParams params_{};
+    // The kernel's x0 scratch, one buffer per stream (concurrent launches on different streams), grown as batches
+    // grow.
+    mutable std::mutex scratch_mu_;
+    mutable std::unordered_map<cudaStream_t, std::pair<void*, std::size_t>> scratch_;
 };
 
 // True for paths the fused network loads (the .cnet extension).
