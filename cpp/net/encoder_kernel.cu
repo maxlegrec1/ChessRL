@@ -56,6 +56,9 @@ constexpr int kRedLd = 12;
 constexpr int kRed2Ld = 10;
 // INT8 projections: n-tiles per pass of warp_gemm_i8.
 constexpr int kI8Group = 2;
+// Attention multiplies with FP16 accumulators (the full-rate ones on GeForce cards): bit 1 P · V (probabilities
+// at most 1), bit 2 the scores (a single k16 step from the FP16 pair bias). Softmax and normalizer stay FP32.
+constexpr int kAttnHalf = 3;
 
 // The instrumented build's phases (CHESSRL_KERNEL_TIMING=1): cycles thread 0 spends from one mark to the next,
 // so a phase ending in a barrier includes the wait for the other warps. Per-layer phases sum over the layers.
@@ -597,22 +600,48 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
                                 h2(qk[m][1][0], qk[m][1][1]), h2(qk[m][1][2], qk[m][1][3])};
         // Scores start from the pair bias (packed by to_cnet.pack_pair_bias, × log2(e)).
         float sc[8][4];
-#pragma unroll
-        for (int c = 0; c < 4; ++c)
+        if constexpr ((kAttnHalf & 2) != 0)
         {
-            const uint4 bv = __ldg(bias + (m * 4 + c) * 32);
-            const float2 a0 = unh2(bv.x), a1 = unh2(bv.y), a2 = unh2(bv.z), a3 = unh2(bv.w);
-            sc[2 * c][0] = a0.x;
-            sc[2 * c][1] = a0.y;
-            sc[2 * c][2] = a1.x;
-            sc[2 * c][3] = a1.y;
-            sc[2 * c + 1][0] = a2.x;
-            sc[2 * c + 1][1] = a2.y;
-            sc[2 * c + 1][2] = a3.x;
-            sc[2 * c + 1][3] = a3.y;
-        }
+            uint32_t sh[8][2];  // FP16 pairs: rows g, g + 8
 #pragma unroll
-        for (int j = 0; j < 8; ++j) mma(sc[j], qa, kb[j][0], kb[j][1]);
+            for (int c = 0; c < 4; ++c)
+            {
+                const uint4 bv = __ldg(bias + (m * 4 + c) * 32);
+                sh[2 * c][0] = bv.x;
+                sh[2 * c][1] = bv.y;
+                sh[2 * c + 1][0] = bv.z;
+                sh[2 * c + 1][1] = bv.w;
+            }
+#pragma unroll
+            for (int j = 0; j < 8; ++j)
+            {
+                mma_h(sh[j], qa, kb[j][0], kb[j][1]);
+                const float2 lo = unh2(sh[j][0]), hi = unh2(sh[j][1]);
+                sc[j][0] = lo.x;
+                sc[j][1] = lo.y;
+                sc[j][2] = hi.x;
+                sc[j][3] = hi.y;
+            }
+        }
+        else
+        {
+#pragma unroll
+            for (int c = 0; c < 4; ++c)
+            {
+                const uint4 bv = __ldg(bias + (m * 4 + c) * 32);
+                const float2 a0 = unh2(bv.x), a1 = unh2(bv.y), a2 = unh2(bv.z), a3 = unh2(bv.w);
+                sc[2 * c][0] = a0.x;
+                sc[2 * c][1] = a0.y;
+                sc[2 * c][2] = a1.x;
+                sc[2 * c][3] = a1.y;
+                sc[2 * c + 1][0] = a2.x;
+                sc[2 * c + 1][1] = a2.y;
+                sc[2 * c + 1][2] = a3.x;
+                sc[2 * c + 1][3] = a3.y;
+            }
+#pragma unroll
+            for (int j = 0; j < 8; ++j) mma(sc[j], qa, kb[j][0], kb[j][1]);
+        }
 
         // Softmax over the 64 keys (base 2) of rows g (r = 0, 1) and g + 8 (r = 2, 3).
         float mx0 = sc[0][0], mx1 = sc[0][2];
@@ -644,6 +673,7 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
 
         // P · V: the probabilities' accumulator tiles are already the A operand.
         float acc[2][4] = {};
+        uint32_t acch[2][2] = {};
 #pragma unroll
         for (int s = 0; s < 4; ++s)
         {
@@ -651,7 +681,25 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
                                     h2(sc[2 * s + 1][0], sc[2 * s + 1][1]),
                                     h2(sc[2 * s + 1][2], sc[2 * s + 1][3])};
 #pragma unroll
-            for (int d = 0; d < 2; ++d) mma(acc[d], pa, vb[s][d][0], vb[s][d][1]);
+            for (int d = 0; d < 2; ++d)
+            {
+                if constexpr ((kAttnHalf & 1) != 0)
+                    mma_h(acch[d], pa, vb[s][d][0], vb[s][d][1]);
+                else
+                    mma(acc[d], pa, vb[s][d][0], vb[s][d][1]);
+            }
+        }
+        if constexpr ((kAttnHalf & 1) != 0)
+        {
+#pragma unroll
+            for (int d = 0; d < 2; ++d)
+            {
+                const float2 lo = unh2(acch[d][0]), hi = unh2(acch[d][1]);
+                acc[d][0] = lo.x;
+                acc[d][1] = lo.y;
+                acc[d][2] = hi.x;
+                acc[d][3] = hi.y;
+            }
         }
         const float i0 = 1.f / l0, i1 = 1.f / l1;
 #pragma unroll
