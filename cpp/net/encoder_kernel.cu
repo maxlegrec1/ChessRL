@@ -725,7 +725,7 @@ cudaError_t launch(const EncoderParams& params, const SmallPackedPosition* packe
 
 // With the default FP16 accumulation the kernel keeps two blocks on each SM (at most 128 registers
 // per thread, the rest spilled to the stack): a block's barriers and memory waits are covered by the
-// other block, +33% on its own on an RTX 4090 (1.41M to 1.88M positions/s, docs/PERF.md).
+// other block, +33% on its own on an RTX 4090 (1.41M to 1.88M positions/s).
 // CHESSRL_KERNEL_BLOCKS=1 selects the one-block build.
 int kernel_blocks()
 {
@@ -739,7 +739,7 @@ int kernel_blocks()
 // The projection matrix multiplies sum in FP16 (whole sums by default): CHESSRL_FP16_ACC=0 keeps
 // FP32 accumulators, N > 0 sums N terms (32, 64, or 256 for whole sums) in FP16 between FP32
 // additions. The score multiplies (attention, policy logits) and the residual stream stay FP32.
-// Measured (docs/PERF.md): parity with PyTorch unchanged to within KL 3e-5, kernel +29%, and in a
+// Measured: parity with PyTorch unchanged to within KL 3e-5, kernel +29%, and in a
 // real run the trainer gets the GPU time it frees (3.48 -> 4.86 steps/s next to self-play).
 int fp16_chunk()
 {

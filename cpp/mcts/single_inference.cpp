@@ -268,7 +268,7 @@ struct SmallBatchRunner::Impl
         }
 
         // Number of concurrent inference workers (CHESSRL_INFER_WORKERS, default 6: with the
-        // two-blocks kernel and asynchronous play, 6 kept the GPU busier than 4, +9%, docs/PERF.md).
+        // two-blocks kernel and asynchronous play, 6 kept the GPU busier than 4, +9%).
         int n = 6;
         if (const char* env = std::getenv("CHESSRL_INFER_WORKERS"))
         {

@@ -16,7 +16,7 @@ beta2: 0.999
 grad_clip: 1.0
 # Flat for the first 70k steps (~2 h on an RTX 4090 + Ryzen 7950X, ~35k steps/h), then a cosine
 # down to a tenth by step 280k (~8 h), and a tenth after that. The decay is what carries a run past
-# the ~2,300-2,400 plateau of a constant rate (docs/NEXT_ROUND.md, round 3). It counts steps, so a
+# the ~2,300-2,400 plateau of a constant rate (docs/RESULTS.md). It counts steps, so a
 # longer run should stretch total_steps.
 lr_schedule:
   kind: cosine
@@ -26,14 +26,14 @@ lr_schedule:
   final_ratio: 0.1
 amp_dtype: float16
 # torch.compile the network for training: the step is memory-bound element-wise work (norms,
-# attention scores) that compiling fuses, 3 times faster (docs/TRAINER_SPEED.md). The first
+# attention scores) that compiling fuses, 3 times faster. The first
 # step compiles, about a minute.
 compile: true
 # FP16 accumulators in the trainer's matrix multiplies, as in the self-play kernel: the same speed
-# and losses at this size (docs/TRAINER_SPEED.md), twice the tensor-core rate for a bigger model.
+# and losses at this size, twice the tensor-core rate for a bigger model.
 fp16_accumulation: true
 # The encoder's residual stream in FP16 during training: half its traffic, rounding noise of the
-# same size as the FP16 matrix multiplies already add (docs/TRAINER_SPEED.md).
+# same size as the FP16 matrix multiplies already add.
 fp16_residual: true
 log_every: 5
 
@@ -66,13 +66,9 @@ checkpoint:
   iteration_file: artifacts/engines/.iteration
 async_engine_build: true
 # Self-play and the trainer share the GPU through NVIDIA MPS: their kernels run side by side
-# (docs/PERF.md: 1,964 records/s against 1,327 taking turns). The launcher falls back to no MPS
+# (1,964 records/s against 1,327 taking turns). The launcher falls back to no MPS
 # where it fails.
 mps: true
-# The trainer at the same priority as self-play, paced by data.target_k. At below-normal
-# priority ("low") it got 5 steps in 20 s from a new network: self-play's searches then saturate
-# the GPU and leave it nothing.
-mps_trainer_priority: normal
 
 data:
   dataset_path: artifacts/buffers/buffer.bin
@@ -91,7 +87,7 @@ selfplay:
   # Fewer threads batch better with virtual-loss width 8 (128 measured faster than 256).
   threads: 128
   # Each search thread plays its own boards in turn with no step barrier, so the GPU never waits
-  # for a step's last searches (+20% recorded positions/s, docs/PERF.md).
+  # for a step's last searches (+20% recorded positions/s).
   async_play: true
   hash_size: 0 # transposition table off: ~1.5% hit rate, not worth the locking
   # Playout-cap randomisation: 25% of moves get a full 400-simulation search and are saved
@@ -100,7 +96,7 @@ selfplay:
   pcr_full_prob: 0.25
   pcr_fast_simulations: 50
   # Tree reuse: keep the played move's subtree for the next search, which then runs only
-  # the simulations its root is missing (+33% recorded positions/s, docs/PERF.md).
+  # the simulations its root is missing (+33% recorded positions/s).
   tree_reuse: true
   cpuct: 0.65
   temperature: 1.3 # prior temperature inside the tree
@@ -110,7 +106,7 @@ selfplay:
   # ~6) and sampling them at 1 plays many weak moves. After that the most visited move is played.
   # Openings sampled this way stayed varied over 8 hours (6-7 effective first moves, ~4,400
   # distinct positions at ply 8 in 400k records); round 2's run C, which drew its fast moves from
-  # the raw policy at 0.7, collapsed onto 1.e4 (docs/NEXT_ROUND.md).
+  # the raw policy at 0.7, collapsed onto 1.e4 (docs/RESULTS.md).
   temperature_at_root: 1.0
   temperature_plies: 40
   temperature_late: 0.0
@@ -137,8 +133,3 @@ selfplay:
   poll_seconds: 300
   save_pgn: false
   pgn_dir: artifacts/pgns
-
-wandb:
-  enabled: false # metrics go to <run>/metrics/*.jsonl, which the dashboard reads
-  project: self_play
-  entity: null

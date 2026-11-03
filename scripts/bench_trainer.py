@@ -1,4 +1,4 @@
-"""Where the trainer's step time goes (docs/TRAINER_SPEED.md, "First: measure").
+"""Where the trainer's step time goes.
 
 Builds the real Trainer from a config (resumed from a checkpoint, sampling a real self-play
 buffer, no network exports), then times:
@@ -56,7 +56,6 @@ def main() -> None:
     cfg.checkpoint.dir = work / "checkpoints"
     cfg.checkpoint.build_script = None
     cfg.metrics_path = work / "train.jsonl"
-    cfg.wandb.enabled = False
     if a.compile:
         cfg.compile = True
     trainer = Trainer(cfg)

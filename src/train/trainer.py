@@ -16,7 +16,7 @@ from torch import amp, optim
 
 from src.models import encoder
 from src.models.factory import build_model, normalize_spec
-from src.models.growth import grow_encoder, grow_resnet
+from src.models.growth import grow_encoder
 from src.models.small.vocab import policy_to_idx
 
 from .config import TrainingConfig
@@ -110,7 +110,6 @@ class Trainer:
         self._build_proc: subprocess.Popen | None = None
         self._build_log = None
 
-        self._wandb_run = self._init_wandb()
         if ckpt is not None:
             self._load_checkpoint(ckpt, config.resume_path)
         # start_step -1 = "the step this schedule was first resumed at". Only a value
@@ -160,9 +159,9 @@ class Trainer:
                 matrices, params, muon_lr=cfg.muon_lr, momentum=cfg.muon_momentum,
                 muon_weight_decay=cfg.muon_weight_decay, **kwargs,
             )  # fmt: skip
-        if cfg.optimizer == "adamw":
-            return optim.AdamW(params, **kwargs)
-        return optim.Adam(params, **kwargs)
+        if cfg.optimizer != "adamw":
+            raise ValueError(f"optimizer: {cfg.optimizer!r}, expected 'adamw' or 'muon'")
+        return optim.AdamW(params, **kwargs)
 
     def _compiled_step(self):
         """The step's forward and losses, compiled with the model when config.compile."""
@@ -190,39 +189,9 @@ class Trainer:
         return cfg.learning_rate * factor * warm
 
     # ------------------------------------------------------------------ #
-    def _init_wandb(self):
-        if not self.config.wandb.enabled:
-            return None
-        import wandb
-
-        wandb_dir = self.config.wandb.dir
-        if wandb_dir is not None:
-            Path(wandb_dir).mkdir(parents=True, exist_ok=True)
-        init_kwargs = dict(
-            project=self.config.wandb.project,
-            entity=self.config.wandb.entity,
-            name=self.config.wandb.run_name or self.config.run_name,
-            config=self.config.to_dict(),
-            dir=str(wandb_dir) if wandb_dir is not None else None,
-        )
-        if self.config.wandb.resume_id:
-            init_kwargs["id"] = self.config.wandb.resume_id
-            init_kwargs["resume"] = "allow"
-        run = wandb.init(**init_kwargs)
-        # Surface the run id so external metric producers can attach.
-        try:
-            (self.run_dir / "wandb_run_id.txt").write_text(f"{run.id}\n")
-        except Exception as exc:  # never fail training over this
-            self.console.log(f"[WARN] failed to write wandb_run_id.txt: {exc}")
-        return run
-
     def _write_metrics(self, row: dict) -> None:
         with self.metrics_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
-        if self._wandb_run:
-            import wandb
-
-            wandb.log({k: v for k, v in row.items() if isinstance(v, (int, float))})
 
     def _log_event(self, event: str, **fields) -> None:
         self._write_metrics({"event": event, "step": self.step, "t": time.time(), **fields})
@@ -268,33 +237,19 @@ class Trainer:
         return late - early < g.plateau_min_gain
 
     def _maybe_grow(self) -> None:
-        # Stages: [step, blocks, channels] for the ResNet, [step, layers] for the encoder.
+        # Stages: [step, layers].
         plateau_mode = self.config.growth.trigger == "plateau"
         if plateau_mode and self.step % 100:
             return  # the ladder file only changes every ~30 min
         for stage in sorted(self.config.growth.schedule):
-            cur = self.model.spec()
-            at_step = int(stage[0])
-            if self.step < at_step:
+            at_step, layers = int(stage[0]), int(stage[1])
+            if self.step < at_step or layers <= self.model.spec()["layers"]:
                 continue
-            if cur["arch"] == "encoder":
-                layers = int(stage[1])
-                if layers <= cur["layers"]:
-                    continue
-            else:
-                blocks, channels = int(stage[1]), int(stage[2])
-                if blocks <= cur["blocks"] and channels <= cur["channels"]:
-                    continue
             # This stage would grow the model; in plateau mode only once Elo has flattened.
             if plateau_mode and not self.plateaued():
                 return
             before = self.param_count()
-            if cur["arch"] == "encoder":
-                self.model = grow_encoder(self.model, layers)
-            else:
-                self.model = grow_resnet(
-                    self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"])
-                )
+            self.model = grow_encoder(self.model, layers)
             self.model.train()
             self.optimizer = self._make_optimizer()
             self._step_fn = self._compiled_step()
@@ -387,10 +342,6 @@ class Trainer:
             self.console.log("Training interrupted by user.")
         finally:
             prefetch.close()
-            if self._wandb_run:
-                import wandb
-
-                wandb.finish()
 
     # ------------------------------------------------------------------ #
     def _train_step(

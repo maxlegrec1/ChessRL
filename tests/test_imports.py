@@ -15,7 +15,6 @@ import pytest
         "src.models.encoder",
         "src.models.factory",
         "src.models.growth",
-        "src.models.small.small_model",
         "src.models.small.fen_encoder",
         "src.models.small.vocab",
         "src.export.to_cnet",

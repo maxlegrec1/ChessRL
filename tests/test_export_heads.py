@@ -1,13 +1,13 @@
 import torch
 
 from src.export.heads import ExportWrapper, search_q_weight
-from src.models.small.small_model import SmallModel
+from src.models.encoder import EncoderModel
 from src.train.config import RampConfig, load_config
 
 
 def test_export_wrapper_head_selection():
     torch.manual_seed(0)
-    model = SmallModel().eval()
+    model = EncoderModel().eval()
     x = torch.rand(4, 8, 8, 111)
     p, v, vq, mlh, mlh_q = model(x, return_all=True)
 

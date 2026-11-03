@@ -2,8 +2,8 @@
 
 By default each launch creates a fresh run directory at
     artifacts/runs/<run_id>/
-containing isolated subfolders for the buffer, engines, checkpoints, pgns and
-wandb logs, plus a snapshot of the resolved config used for the run. A
+containing isolated subfolders for the buffer, engines, checkpoints and pgns,
+plus a snapshot of the resolved config used for the run. A
 random-initialized network (.cnet) is built up-front so self-play has something
 to play with from the very first second.
 
@@ -35,7 +35,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = ROOT / "artifacts" / "runs"
 DEFAULT_BASE_CONFIG = ROOT / "src" / "train" / "config.yaml"
-SUBDIRS = ("buffer", "engines", "checkpoints", "pgns", "wandb")
+SUBDIRS = ("buffer", "engines", "checkpoints", "pgns")
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,18 +180,10 @@ def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None
     ckpt["iteration_file"] = str((run_dir / "engines" / ".iteration").resolve())
     sp = cfg.setdefault("selfplay", {})
     sp["pgn_dir"] = str((run_dir / "pgns").resolve())
-    wb = cfg.setdefault("wandb", {})
-    wb["dir"] = str((run_dir / "wandb").resolve())
+    for removed in ("wandb", "mps_trainer_priority"):  # settings older runs' snapshots still carry
+        cfg.pop(removed, None)
     if resume_from:
         cfg["resume_path"] = str(resume_from.resolve())
-        # Carry over wandb.resume_id from a previously written in-run config so
-        # repeated resumes keep appending to the same W&B run.
-        existing = run_dir / "config.yaml"
-        if existing.is_file():
-            prev = yaml.safe_load(existing.read_text()) or {}
-            prev_id = (prev.get("wandb") or {}).get("resume_id")
-            if prev_id and not wb.get("resume_id"):
-                wb["resume_id"] = prev_id
     out = run_dir / "config.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out
@@ -215,19 +207,16 @@ def _spawn(cmd: list[str], log_path: Path, env: dict[str, str] | None = None) ->
     )
 
 
-def mps_child_env(
-    base: dict[str, str], pipe_dir: str, log_dir: str, trainer: bool
-) -> dict[str, str]:
-    """Environment of a process under the run's MPS daemon; the trainer at below-normal priority."""
+def mps_child_env(base: dict[str, str], pipe_dir: str, log_dir: str) -> dict[str, str]:
+    """Environment of a process under the run's MPS daemon, at normal priority: self-play and the
+    trainer share the GPU as equals and data.target_k paces the trainer (below self-play's
+    priority it starved whenever the searches saturated the GPU)."""
     env = dict(base, CUDA_MPS_PIPE_DIRECTORY=pipe_dir, CUDA_MPS_LOG_DIRECTORY=log_dir)
-    if trainer:
-        env["CUDA_MPS_CLIENT_PRIORITY"] = "1"
-    else:
-        env.pop("CUDA_MPS_CLIENT_PRIORITY", None)
+    env.pop("CUDA_MPS_CLIENT_PRIORITY", None)
     return env
 
 
-def _start_mps(trainer_priority: str) -> tuple[str, str] | None:
+def _start_mps() -> tuple[str, str] | None:
     """Start an MPS daemon with its own pipe directory (other GPU processes on the box keep
     their own contexts) and check that a client can connect. Returns (pipe_dir, log_dir), or
     None after a warning when MPS is unavailable."""
@@ -239,7 +228,7 @@ def _start_mps(trainer_priority: str) -> tuple[str, str] | None:
     pipe_dir, log_dir = str(base / "pipe"), str(base / "log")
     Path(pipe_dir).mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
-    env = mps_child_env(dict(os.environ), pipe_dir, log_dir, trainer=False)
+    env = mps_child_env(dict(os.environ), pipe_dir, log_dir)
     if subprocess.run([control, "-d"], env=env).returncode != 0:
         print("[launcher] mps: the daemon did not start; running without MPS", flush=True)
         return None
@@ -257,8 +246,7 @@ def _start_mps(trainer_priority: str) -> tuple[str, str] | None:
         print("[launcher] mps: a test client failed; running without MPS", flush=True)
         _stop_mps((pipe_dir, log_dir))
         return None
-    level = "below-normal" if trainer_priority == "low" else "normal"
-    print(f"[launcher] mps: daemon up ({pipe_dir}), trainer at {level} priority", flush=True)
+    print(f"[launcher] mps: daemon up ({pipe_dir})", flush=True)
     return pipe_dir, log_dir
 
 
@@ -266,7 +254,7 @@ def _stop_mps(mps: tuple[str, str]) -> None:
     control = shutil.which("nvidia-cuda-mps-control")
     if control is None:
         return
-    env = mps_child_env(dict(os.environ), mps[0], mps[1], trainer=False)
+    env = mps_child_env(dict(os.environ), mps[0], mps[1])
     subprocess.run([control], input=b"quit\n", env=env)
 
 
@@ -338,15 +326,12 @@ def main() -> int:
     from src.train.config import load_config
 
     run_cfg = load_config(cfg_path)
-    mps = _start_mps(run_cfg.mps_trainer_priority) if len(plan) == 2 and run_cfg.mps else None
-    low_trainer = run_cfg.mps_trainer_priority == "low"
+    mps = _start_mps() if len(plan) == 2 and run_cfg.mps else None
     children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
         env = None
         if mps is not None:
-            env = mps_child_env(
-                dict(os.environ), mps[0], mps[1], trainer=name == "training" and low_trainer
-            )
+            env = mps_child_env(dict(os.environ), mps[0], mps[1])
         children.append((name, _spawn(cmd, log, env), log))
 
     print(f"\nRun directory: {run_dir}")

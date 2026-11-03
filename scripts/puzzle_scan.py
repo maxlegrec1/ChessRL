@@ -2,7 +2,7 @@
 
 For every model move of each puzzle: the solution move's raw-policy probability, its share of
 the search's visits, and the network's favourite raw move. One JSON row per puzzle (resumable).
-Used to pick the blog's puzzle (docs/blog/make_boards.py).
+Used to pick the puzzles shown in the second blog post.
 
   CUDA_VISIBLE_DEVICES= uv run python scripts/puzzle_scan.py --ckpt step_00100500.pt --out puzzles.jsonl
 """

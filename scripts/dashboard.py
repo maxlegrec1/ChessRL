@@ -58,7 +58,7 @@ TRAIN_SMOOTH = {
     "buffer/window": 1,
     "search_q_weight": 1,
 }
-TRAIN_KPI = ("params", "model_d_model", "model_layers", "model_blocks", "model_channels")
+TRAIN_KPI = ("params", "model_d_model", "model_layers")
 # Self-play rows every 30 s: rates from the counters' differences, a little smoothing.
 SELFPLAY_RAW = (
     "engine_step",
@@ -561,13 +561,7 @@ class Run:
         plies = last(sp, "total_game_plies") or 0
         hours_now = float(axes["hours"](np.array([sp.times[-1]]))[0]) if len(sp.times) else None
         d_model, layers = last(tr, "model_d_model"), last(tr, "model_layers")
-        blocks, channels = last(tr, "model_blocks"), last(tr, "model_channels")
-        if d_model:
-            model = f"enc {int(d_model)}x{int(layers or 0)}"
-        elif blocks:
-            model = f"res {int(blocks)}x{int(channels or 0)}"
-        else:
-            model = None
+        model = f"enc {int(d_model)}x{int(layers or 0)}" if d_model else None
         elos = [
             r for r in lad if r.get("openings", "random") == (lad[-1].get("openings") or "random")
         ]

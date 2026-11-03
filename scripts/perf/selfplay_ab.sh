@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Self-play speed A/B on a rented GPU box (after scripts/vast/setup_box.sh), results in
-# docs/PERF.md. Runs the GPU tests and the parity check, exports the network once, then
+# docs/RESULTS.md (round 3, speed). Runs the GPU tests and the parity check, exports the network once, then
 # alternates the arms ROUNDS times (default 2), each 60 s of warm-up and 240 s measured.
 # An arm is NAME=CONFIG (a YAML that may `extends:` the recipe); ENV_<NAME>="K=V ..." adds
 # environment variables to that arm, REPO_<NAME> runs it from another checkout (CONFIG is

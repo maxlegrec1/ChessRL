@@ -8,18 +8,6 @@ import yaml
 
 
 @dataclass
-class WandbConfig:
-    project: str = "self_play"
-    entity: str | None = None
-    run_name: str | None = None
-    enabled: bool = True
-    dir: Path | None = None
-    # If set, attach to an existing wandb run (use the W&B run id, e.g. "lcctm9xo"),
-    # appending metrics to its history rather than starting a fresh run.
-    resume_id: str | None = None
-
-
-@dataclass
 class CheckpointConfig:
     dir: Path = Path("artifacts/checkpoints")
     every_steps: int = 1000
@@ -140,11 +128,7 @@ class LossWeightsConfig:
 class ModelConfig:
     """Network architecture. Stored in every checkpoint so export can rebuild it."""
 
-    arch: str = "resnet"  # "resnet" | "encoder"
-    # ResNet trunk.
-    blocks: int = 4
-    channels: int = 64
-    # Encoder trunk.
+    arch: str = "encoder"  # the transformer in src/models/encoder.py, one token per square
     d_model: int = 128
     layers: int = 4
     heads: int = 8
@@ -155,9 +139,8 @@ class ModelConfig:
 class GrowthConfig:
     """Function-preserving trunk growth during training (src/models/growth.py).
 
-    `schedule` lists stages, [trainer_step, blocks, channels] for the ResNet or
-    [trainer_step, layers] for the encoder; at each stage the trunk grows to that
-    size so that the network's output is unchanged at the moment of growth."""
+    `schedule` lists stages, [trainer_step, layers]; at each stage the encoder grows to
+    that many layers so that the network's output is unchanged at the moment of growth."""
 
     schedule: list = field(default_factory=list)
     lr_rewarmup_steps: int = 200
@@ -202,17 +185,15 @@ class TrainingConfig:
     beta2: float = 0.999
     log_every: int = 50
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
-    wandb: WandbConfig = field(default_factory=WandbConfig)
     data: DataConfig = field(default_factory=DataConfig)
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
     amp_dtype: str = "float16"
     resume_path: Path | None = None
-    run_name: str | None = None
     model: ModelConfig = field(default_factory=ModelConfig)
     growth: GrowthConfig = field(default_factory=GrowthConfig)
     lr_schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
-    optimizer: str = "adam"  # "adam" | "adamw" | "muon"
+    optimizer: str = "adamw"  # "adamw" | "muon"
     # optimizer: muon (src/train/muon.py): Muon on the encoder layers' weight matrices, AdamW (learning_rate,
     # betas, weight_decay) on the other parameters. The schedule scales both learning rates alike.
     muon_lr: float = 0.006
@@ -243,11 +224,9 @@ class TrainingConfig:
     # half the bytes the step moves through it. The self-play kernel keeps it FP32.
     fp16_residual: bool = False
     async_engine_build: bool = False  # export networks in the background
-    mps: bool = False  # src.run: self-play and trainer under NVIDIA MPS
-    # The trainer's MPS priority. "low": below self-play, its kernels run in the time self-play
-    # leaves, and it starves when self-play saturates the GPU (a new network's searches leave no
-    # gaps). "normal": the same as self-play; target_k paces the trainer either way.
-    mps_trainer_priority: str = "low"
+    # src.run: self-play and trainer under NVIDIA MPS, at the same priority (target_k paces the
+    # trainer; below self-play's priority it starved whenever the searches saturated the GPU).
+    mps: bool = False
     metrics_path: Path | None = None  # JSONL metrics for the dashboard
     expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 
@@ -303,8 +282,6 @@ def load_config(path: Path | str) -> TrainingConfig:
     cfg.checkpoint.engine_dir = Path(cfg.checkpoint.engine_dir)
     cfg.checkpoint.iteration_file = Path(cfg.checkpoint.iteration_file)
     cfg.selfplay.pgn_dir = Path(cfg.selfplay.pgn_dir)
-    if cfg.wandb.dir is not None:
-        cfg.wandb.dir = Path(cfg.wandb.dir)
     cfg.data.dataset_path = Path(cfg.data.dataset_path)
     if cfg.metrics_path is not None:
         cfg.metrics_path = Path(cfg.metrics_path)

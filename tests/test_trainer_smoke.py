@@ -20,14 +20,14 @@ def _config(tmp_path, policy_target: str) -> TrainingConfig:
     cfg.batch_size = 32
     cfg.learning_rate = 1e-3
     cfg.policy_target = policy_target
-    cfg.wandb.enabled = False
     cfg.data.dataset_path = run / "buffer" / "buffer.bin"
     cfg.data.min_samples_to_start = 1
     cfg.checkpoint.dir = run / "checkpoints"
     cfg.checkpoint.build_script = None
     cfg.checkpoint.engine_dir = run / "engines"
     cfg.checkpoint.iteration_file = run / "engines" / ".iteration"
-    cfg.growth.schedule = [[2, 5, 80]]
+    cfg.model.layers = 1
+    cfg.growth.schedule = [[2, 2]]  # grow to 2 layers at step 2
     cfg.lr_schedule.kind = "cosine"
     cfg.lr_schedule.total_steps = 10
     cfg.lr_schedule.warmup_steps = 2
@@ -46,7 +46,7 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
         losses.append(float(metrics["loss/total"]))
         trainer.step += 1
     assert all(torch.isfinite(torch.tensor(losses)))
-    assert trainer.model.spec() == {"arch": "resnet", "blocks": 5, "channels": 80}
+    assert trainer.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256}
     assert 0.0 <= metrics["legal_move_prob"] <= 1.0
     trainer._save_checkpoint()
     ckpt_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
@@ -54,7 +54,7 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     cfg.resume_path = ckpt_path
     resumed = Trainer(cfg)
     assert resumed.step == 4
-    assert resumed.model.spec() == {"arch": "resnet", "blocks": 5, "channels": 80}
+    assert resumed.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256}
     for a, b in zip(
         trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True
     ):

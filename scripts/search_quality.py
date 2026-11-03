@@ -1,5 +1,5 @@
 """Search quality per network evaluation: self-play's PUCT search against Gumbel root search,
-judged by Stockfish on the positions of the policy -> search gap study (docs/NEXT_ROUND.md).
+judged by Stockfish on the positions of round 2's policy -> search gap study.
 
 For each position and search setting, the training target (PUCT: the visit counts; Gumbel:
 the improved policy) and the move played are scored with Stockfish's expected score for every

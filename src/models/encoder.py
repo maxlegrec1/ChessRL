@@ -1,4 +1,4 @@
-"""Small transformer encoder with the same inputs and five heads as SmallModel.
+"""Small transformer encoder: the network ChessRL trains, with five heads.
 
 A scaled-down version of the chess_speedrun recipe that fits the self-play
 budget (0.81M parameters at d_model 128, 4 layers): 64 square tokens built from the 111-plane input,
