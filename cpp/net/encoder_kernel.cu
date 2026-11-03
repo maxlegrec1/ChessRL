@@ -1160,14 +1160,33 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
     mark(13);
 
     // ---- Value heads: MLPs on the pooled vector (first layers stored [mlp][in][out]).
+    // First layers: an item is two adjacent units over a quarter of the inputs (32 half2 loads, all in flight;
+    // one unit and all 128 inputs per thread was 128 dependent rounds of 2-byte loads from L2, 5% of the kernel),
+    // the four quarters in adjacent lanes summed by shuffles. n_mlp · 256 items: whole warps.
     const int n_mlp = P.n_wdl + 1 + P.mlhq_from_q;
-    for (int u = tid; u < n_mlp * kD; u += kThreads)
+    for (int item = tid; item < n_mlp * kD * 2; item += kThreads)
     {
-        const __half* w = static_cast<const __half*>(P.mlp1_w) + (u >> 7) * kD * kD + (u & 127);
-        float acc = __ldg(P.mlp1_b + u);
-#pragma unroll 8
-        for (int k = 0; k < kD; ++k) acc += __half2float(__ldg(w + k * kD)) * s.pooled[k];
-        s.hidden[u] = silu(acc);
+        const int u = 2 * (item >> 2), quarter = item & 3;  // units u, u + 1 (same MLP: kD is even)
+        const auto* w = reinterpret_cast<const __half2*>(static_cast<const __half*>(P.mlp1_w) + (u >> 7) * kD * kD
+                                                         + quarter * (kD / 4) * kD + (u & 127));
+        float a0 = 0.f, a1 = 0.f;
+#pragma unroll
+        for (int k = 0; k < kD / 4; ++k)
+        {
+            const float2 wv = __half22float2(__ldg(w + k * (kD / 2)));
+            const float pk = s.pooled[quarter * (kD / 4) + k];
+            a0 += wv.x * pk;
+            a1 += wv.y * pk;
+        }
+        a0 += __shfl_xor_sync(0xffffffffu, a0, 1);
+        a1 += __shfl_xor_sync(0xffffffffu, a1, 1);
+        a0 += __shfl_xor_sync(0xffffffffu, a0, 2);
+        a1 += __shfl_xor_sync(0xffffffffu, a1, 2);
+        if (quarter == 0)
+        {
+            s.hidden[u] = silu(a0 + __ldg(P.mlp1_b + u));
+            s.hidden[u + 1] = silu(a1 + __ldg(P.mlp1_b + u + 1));
+        }
     }
     __syncthreads();
     const int n_out = 3 * P.n_wdl + 1 + P.mlhq_from_q;
