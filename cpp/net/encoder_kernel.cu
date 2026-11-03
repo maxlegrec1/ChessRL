@@ -1302,10 +1302,14 @@ cudaError_t launch_encoder_forward(const EncoderParams& params,
                                    cudaStream_t stream)
 {
     if (batch <= 0) return cudaSuccess;
-    // An int8 network: INT8 projections, two blocks per SM (the accumulation switches do not apply).
+    // An int8 network: INT8 projections, two blocks per SM (CHESSRL_KERNEL_BLOCKS=1: one, all 255 registers; the
+    // accumulation switches do not apply).
     if (params.int8)
-        return kernel_timing() ? launch<8, 2, true, 0, true>(params, packed, dense, batch, out, stream)
-                               : launch<8, 2, false, 0, true>(params, packed, dense, batch, out, stream);
+    {
+        if (kernel_timing()) return launch<8, 2, true, 0, true>(params, packed, dense, batch, out, stream);
+        return kernel_blocks() == 2 ? launch<8, 2, false, 0, true>(params, packed, dense, batch, out, stream)
+                                    : launch<8, 1, false, 0, true>(params, packed, dense, batch, out, stream);
+    }
     if (kernel_timing()) return launch<8, 2, true>(params, packed, dense, batch, out, stream);
     switch (kernel_mock())
     {
