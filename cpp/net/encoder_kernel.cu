@@ -423,32 +423,56 @@ __device__ __forceinline__ void attention(const float (&qk)[4][4][4], const __ha
     }
 }
 
-// The input plane `plane` of token `cell` (row-major 8x8, row 0 = rank 8), as
-// expand_packed_to_dense (small_encoding.cpp) builds it; planes 111..127 are the zero
-// padding of the embedding's k loop. Positions arrive canonical (pack_small_position mirrors those with black
-// to move); only plane 104 can depend on the colour: p.stm (the real side to move) for networks with
-// stm_colour, 1 for the others (stm_plane_value in packed_position.hpp).
-__device__ __forceinline__ float plane_value(const SmallPackedPosition& p, int cell, int plane, int stm_colour)
+// The input planes of token `cell` (row-major 8x8, row 0 = rank 8) as expand_packed_to_dense
+// (small_encoding.cpp) builds them, FP16 into `row` of s.h; planes 111..127 are the zero padding of the
+// embedding's k loop. Four threads per token (q = 0..3): each builds the 13-bit fields of history slots 2q and 2q + 1
+// (12 piece planes + repetition, zero for a slot past the game's start), the four OR them into the token's 128-bit
+// plane mask, and each writes planes 32q..32q + 31 as four 16-byte stores (a per-plane switch, 32 per thread, was
+// 12.7% of the kernel at 4 layers). Positions arrive canonical (pack_small_position mirrors those with black to
+// move); only plane 104 can depend on the colour: p.stm (the real side to move) for networks with stm_colour, 1 for
+// the others (stm_plane_value in packed_position.hpp). Called by all 32 lanes of the warp (the OR uses shuffles).
+static_assert(kThreads == 4 * kTok, "four threads per token");
+static_assert(kPackHistory == 8 && kPackPlaneHMC - 96 == 14, "two slots per thread, the halfmove plane in word 3");
+__device__ __forceinline__ void planes_to_row(const SmallPackedPosition& p, int cell, int q, int stm_colour, __half* row)
 {
     const int sq = (kPackBoard - 1 - (cell >> 3)) * kPackBoard + (cell & 7);
-    if (plane < kPackPlaneSTM)
+    unsigned long long lo = 0, hi = 0;  // planes 0..63, 64..127
+#pragma unroll
+    for (int j = 0; j < 2; ++j)
     {
-        const int slot = plane / kPackHistBlock, within = plane % kPackHistBlock;
-        if (slot != 0 && !((p.slot_valid >> slot) & 1u)) return 0.f;
-        if (within < kPackPiecePlanes) return ((p.bitboards[slot][within] >> sq) & 1ull) ? 1.f : 0.f;
-        return ((p.slot_rep >> slot) & 1u) ? 1.f : 0.f;
+        const int slot = 2 * q + j;
+        if (slot != 0 && !((p.slot_valid >> slot) & 1u)) continue;
+        unsigned long long f = static_cast<unsigned long long>((p.slot_rep >> slot) & 1u) << kPackPiecePlanes;
+#pragma unroll
+        for (int w = 0; w < kPackPiecePlanes; ++w) f |= ((p.bitboards[slot][w] >> sq) & 1ull) << w;
+        const int o = slot * kPackHistBlock;
+        if (o < 64)
+        {
+            lo |= f << o;
+            if (o + kPackHistBlock > 64) hi |= f >> (64 - o);
+        }
+        else
+        {
+            hi |= f << (o - 64);
+        }
     }
-    switch (plane)
-    {
-    case kPackPlaneSTM: return (!stm_colour || p.stm) ? 1.f : 0.f;
-    case kPackPlaneEP: return p.ep_square == sq ? 1.f : 0.f;
-    case kPackPlaneCWK: return (p.castling & 0x1u) ? 1.f : 0.f;
-    case kPackPlaneCWQ: return (p.castling & 0x2u) ? 1.f : 0.f;
-    case kPackPlaneCBK: return (p.castling & 0x4u) ? 1.f : 0.f;
-    case kPackPlaneCBQ: return (p.castling & 0x8u) ? 1.f : 0.f;
-    case kPackPlaneHMC: return fminf(static_cast<float>(p.halfmove) / 100.f, 1.f);
-    default: return 0.f;
-    }
+    lo |= __shfl_xor_sync(0xffffffffu, lo, 1);
+    hi |= __shfl_xor_sync(0xffffffffu, hi, 1);
+    lo |= __shfl_xor_sync(0xffffffffu, lo, 2);
+    hi |= __shfl_xor_sync(0xffffffffu, hi, 2);
+    hi |= static_cast<unsigned long long>(!stm_colour || p.stm) << (kPackPlaneSTM - 64);
+    hi |= static_cast<unsigned long long>(p.ep_square == sq) << (kPackPlaneEP - 64);
+    hi |= static_cast<unsigned long long>(p.castling & 0xFu) << (kPackPlaneCWK - 64);  // WK, WQ, BK, BQ
+    const unsigned word = static_cast<unsigned>((q < 2 ? lo : hi) >> (32 * (q & 1)));
+    uint32_t hv[16];
+#pragma unroll
+    for (int j = 0; j < 16; ++j)  // planes 32q + 2j and + 1 as a half2 of 0.0 / 1.0 (0x3C00)
+        hv[j] = ((word >> (2 * j)) & 1u) * 0x3C00u | ((word >> (2 * j + 1)) & 1u) * 0x3C000000u;
+    if (q == 3)  // plane 110: the halfmove clock / 100, at most 1 (plane 111 is padding)
+        hv[(kPackPlaneHMC - 96) / 2] = __half_as_ushort(__float2half(fminf(static_cast<float>(p.halfmove) / 100.f, 1.f)));
+    uint4* dst = reinterpret_cast<uint4*>(row + 32 * q);
+#pragma unroll
+    for (int k = 0; k < 4; ++k) dst[k] = make_uint4(hv[4 * k], hv[4 * k + 1], hv[4 * k + 2], hv[4 * k + 3]);
 }
 
 template <int kChunk, int kMinBlocks, bool kTime = false, int kMock = 0>
@@ -482,8 +506,7 @@ __global__ void __launch_bounds__(kThreads, kMinBlocks)
         for (int i = tid; i < static_cast<int>(sizeof(s.packed) / 8); i += kThreads) s.packed[i] = src[i];
         __syncthreads();
         const auto& pos = *reinterpret_cast<const SmallPackedPosition*>(s.packed);
-        for (int i = tid; i < kTok * 128; i += kThreads)
-            s.h[(i >> 7) * kLdH + (i & 127)] = __float2half(plane_value(pos, i >> 7, i & 127, P.stm_colour));
+        planes_to_row(pos, tid >> 2, tid & 3, P.stm_colour, s.h + (tid >> 2) * kLdH);
     }
     else
     {
