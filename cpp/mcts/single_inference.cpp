@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -255,6 +256,18 @@ struct SmallBatchRunner::Impl
         int next_output{0};
         PinnedBuffer spill;                  // a batch's records when no output buffer is free
         cudaEvent_t done{nullptr};           // blocking-sync event (CHESSRL_BLOCKING_SYNC)
+        // CHESSRL_POLLER: the batch in flight, which the poller hands back (flight_state 1: the poller's, 2: handed
+        // back, the worker's again).
+        cudaEvent_t poll_event{nullptr};
+        std::vector<SmallPending>* flight_work{nullptr};
+        OutputBuffer* flight_out{nullptr};
+        PinnedBuffer* flight_dst{nullptr};
+        std::chrono::steady_clock::time_point flight_start{};
+        cudaError_t flight_error{cudaSuccess};
+        std::exception_ptr flight_exception;
+        std::atomic<int> flight_state{0};
+        std::mutex flight_mutex;
+        std::condition_variable flight_cv;
     };
 
     explicit Impl(SmallBatchConfig cfg)
@@ -285,6 +298,10 @@ struct SmallBatchRunner::Impl
             Worker* raw = w.get();
             raw->thread = std::thread([this, raw]() { worker_loop(*raw); });
         }
+        if (use_poller_)
+        {
+            poller_ = std::thread([this]() { poller_loop(); });
+        }
     }
 
     ~Impl()
@@ -300,9 +317,26 @@ struct SmallBatchRunner::Impl
             {
                 w->thread.join();
             }
+        }
+        // The workers are gone (none waits for a hand-back any more): stop the poller.
+        if (poller_.joinable())
+        {
+            {
+                std::lock_guard<std::mutex> lock(poller_mutex_);
+                stop_poller_ = true;
+            }
+            poller_cv_.notify_all();
+            poller_.join();
+        }
+        for (auto& w : workers_)
+        {
             if (w && w->done)
             {
                 cudaEventDestroy(w->done);
+            }
+            if (w && w->poll_event)
+            {
+                cudaEventDestroy(w->poll_event);
             }
         }
         // Results still referring to the output buffers must be taken (or dropped) first; the
@@ -464,6 +498,39 @@ struct SmallBatchRunner::Impl
             err = cudaMemcpyAsync(dst.data(), w.outDevice.data(), n * kRecordBytes,
                                   cudaMemcpyDeviceToHost, s);
         }
+        if (err == cudaSuccess && use_poller_)
+        {
+            // The poller watches the batch's event and hands it back as soon as it is done; this worker sleeps
+            // until then (the next batch reuses its buffers).
+            if (!w.poll_event) err = cudaEventCreateWithFlags(&w.poll_event, cudaEventDisableTiming);
+            if (err == cudaSuccess) err = cudaEventRecord(w.poll_event, s);
+            if (err == cudaSuccess)
+            {
+                w.flight_work = &work;
+                w.flight_out = out;
+                w.flight_dst = &dst;
+                w.flight_start = start_time;
+                w.flight_error = cudaSuccess;
+                w.flight_exception = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(poller_mutex_);
+                    w.flight_state.store(1, std::memory_order_release);
+                }
+                poller_cv_.notify_one();
+                {
+                    std::unique_lock<std::mutex> lock(w.flight_mutex);
+                    w.flight_cv.wait(lock, [&w] { return w.flight_state.load(std::memory_order_acquire) == 2; });
+                }
+                w.flight_state.store(0, std::memory_order_relaxed);
+                if (w.flight_exception) std::rethrow_exception(w.flight_exception);
+                if (w.flight_error != cudaSuccess)
+                {
+                    throw std::runtime_error(std::string("fused network batch failed: ")
+                                             + cudaGetErrorString(w.flight_error));
+                }
+                return;
+            }
+        }
         if (err == cudaSuccess)
         {
             // Spinning in cudaStreamSynchronize keeps a core busy while the GPU works;
@@ -486,6 +553,17 @@ struct SmallBatchRunner::Impl
         {
             throw std::runtime_error(std::string("fused network batch failed: ") + cudaGetErrorString(err));
         }
+        hand_back(work, out, dst, start_time);
+    }
+
+    // A finished batch's records to its searches: in place from the output buffer (FP16 logits), or copied when
+    // the batch went to the spill buffer. Each search is woken once, by its last position.
+    void hand_back(std::vector<SmallPending>& work, OutputBuffer* out, PinnedBuffer& dst,
+                   std::chrono::steady_clock::time_point start_time)
+    {
+        using chessrl::net::kAuxOffset;
+        using chessrl::net::kRecordBytes;
+        const size_t n = work.size();
         const auto synced = std::chrono::steady_clock::now();
         if (telemetry_enabled_)
         {
@@ -528,6 +606,58 @@ struct SmallBatchRunner::Impl
                                            .count();
             std::lock_guard<std::mutex> telemetry_lock(telemetry_mutex_);
             total_handback_ms_ += handback_ms;
+        }
+    }
+
+    // CHESSRL_POLLER: one thread spins over the workers' batch events (instead of six spinning in
+    // cudaStreamSynchronize), hands each finished batch back at once and wakes its worker. It sleeps while no batch
+    // is in flight.
+    void poller_loop()
+    {
+        while (true)
+        {
+            bool in_flight = false;
+            for (auto& wp : workers_)
+            {
+                Worker& w = *wp;
+                if (w.flight_state.load(std::memory_order_acquire) != 1) continue;
+                in_flight = true;
+                const cudaError_t q = cudaEventQuery(w.poll_event);
+                if (q == cudaErrorNotReady) continue;
+                if (q == cudaSuccess)
+                {
+                    try
+                    {
+                        hand_back(*w.flight_work, w.flight_out, *w.flight_dst, w.flight_start);
+                    }
+                    catch (...)
+                    {
+                        w.flight_exception = std::current_exception();
+                    }
+                }
+                else
+                {
+                    w.flight_error = q;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(w.flight_mutex);
+                    w.flight_state.store(2, std::memory_order_release);
+                }
+                w.flight_cv.notify_one();
+            }
+            if (!in_flight)
+            {
+                std::unique_lock<std::mutex> lock(poller_mutex_);
+                if (stop_poller_) return;
+                poller_cv_.wait(lock, [this] {
+                    if (stop_poller_) return true;
+                    for (auto& wp : workers_)
+                    {
+                        if (wp->flight_state.load(std::memory_order_acquire) == 1) return true;
+                    }
+                    return false;
+                });
+            }
         }
     }
 
@@ -621,6 +751,15 @@ struct SmallBatchRunner::Impl
         const char* env = std::getenv("CHESSRL_BLOCKING_SYNC");
         return env != nullptr && std::atoi(env) != 0;
     }()};
+    // One thread polls the batches instead of each worker spinning (CHESSRL_POLLER=1).
+    const bool use_poller_{[](){
+        const char* env = std::getenv("CHESSRL_POLLER");
+        return env != nullptr && std::atoi(env) != 0;
+    }()};
+    std::thread poller_;
+    std::mutex poller_mutex_;
+    std::condition_variable poller_cv_;
+    bool stop_poller_{false};
     const bool telemetry_enabled_{config.enable_telemetry};
     mutable std::mutex telemetry_mutex_;
     size_t batches_{0};
