@@ -32,13 +32,13 @@ def _ladder(trainer, elos, start_step=0, hours=3.0):
 def test_plateau_detection(tmp_path, elos, expect):
     cfg = _config(tmp_path, "visits")
     cfg.growth.trigger = "plateau"
-    cfg.growth.schedule = [[0, 5, 80]]
+    cfg.growth.schedule = [[0, 2]]
     t = Trainer(cfg)
     _ladder(t, elos)
     assert t.plateaued() is expect
     t.step = 100
     t._maybe_grow()
-    assert (t.model.spec()["blocks"] == 5) is expect
+    assert (t.model.spec()["layers"] == 2) is expect
 
 
 def test_plateau_ignores_ratings_before_last_growth(tmp_path):

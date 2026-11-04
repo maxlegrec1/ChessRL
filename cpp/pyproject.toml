@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chessrl-inference-cpp"
 version = "0.1.0"
-description = "Pybind11 bindings for the ChessRL TensorRT inference engine"
+description = "Pybind11 bindings for the ChessRL search, self-play and fused CUDA network"
 requires-python = ">=3.13"
 
 [tool.setuptools]
@@ -21,4 +21,5 @@ cache-keys = [
     { file = "*.hpp" },
     { file = "include/*.hpp" },
     { file = "mcts/*" },
+    { file = "net/*" },
 ]

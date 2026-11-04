@@ -8,23 +8,11 @@ import yaml
 
 
 @dataclass
-class WandbConfig:
-    project: str = "self_play"
-    entity: str | None = None
-    run_name: str | None = None
-    enabled: bool = True
-    dir: Path | None = None
-    # If set, attach to an existing wandb run (use the W&B run id, e.g. "lcctm9xo"),
-    # appending metrics to its history rather than starting a fresh run.
-    resume_id: str | None = None
-
-
-@dataclass
 class CheckpointConfig:
     dir: Path = Path("artifacts/checkpoints")
     every_steps: int = 1000
     keep_last: int = 5
-    build_script: Path | None = Path("scripts/build_trt.sh")
+    build_script: Path | None = Path("scripts/build_net.sh")
     engine_dir: Path = Path("artifacts/engines")
     iteration_file: Path = Path("artifacts/engines/.iteration")
 
@@ -48,10 +36,34 @@ class DataConfig:
 
 
 @dataclass
+class RampConfig:
+    """A setting moved linearly from `start` to `end` between trainer steps `start_step` and `end_step`
+    (`start` before, `end` after). Off while end_step is 0: the setting keeps its own value."""
+
+    start: float = 0.0
+    end: float = 0.0
+    start_step: int = 0
+    end_step: int = 0
+
+    @property
+    def on(self) -> bool:
+        return self.end_step > 0
+
+    def at(self, step: int) -> float:
+        if step <= self.start_step:
+            return self.start
+        if step >= self.end_step:
+            return self.end
+        frac = (step - self.start_step) / (self.end_step - self.start_step)
+        return self.start + (self.end - self.start) * frac
+
+
+@dataclass
 class SelfPlayConfig:
     # parallelism / batching
     boards: int = 1024
     threads: int = 256
+    async_play: bool = False
     hash_size: int = 0
     # MCTS settings, copied by name onto the C++ config (self_play/__main__.py _CPP_FIELDS)
     simulations: int = 800
@@ -70,10 +82,17 @@ class SelfPlayConfig:
     save_pgn: bool = False
     pgn_dir: Path = Path("artifacts/pgns")
     # Uniform-random legal plies at the start of every game before MCTS takes over
-    # (0 = start every game from the initial position).
-    random_opening_plies: int = 0
+    # (0 = start every game from the initial position). A fraction adds one more ply to that
+    # share of games: 2.25 plays 3 random plies in a quarter of the games, 2 in the others.
+    random_opening_plies: float = 0.0
+    # Ramp random_opening_plies over the networks' trainer steps (self-play applies the value
+    # at each network it loads), e.g. from 8 to 0: random openings, then searched ones.
+    random_opening_ramp: RampConfig = field(default_factory=RampConfig)
     temperature_plies: int = -1  # -1: temperature_at_root for the whole game
     temperature_late: float = 0.0  # root temperature after temperature_plies (0 = argmax)
+    # Root temperature of the fast searches (pcr_fast_simulations) during temperature_plies; below
+    # 0 they use temperature_at_root. Their visit counts are flat, so sampling them at 1 blunders.
+    fast_temperature_at_root: float = -1.0
     resign_threshold: float = 0.0  # expected score below which the side to move resigns; 0 = off
     resign_consecutive: int = 2
     resign_playthrough: float = 0.1  # fraction of games that never resign (false-positive audit)
@@ -88,6 +107,9 @@ class SelfPlayConfig:
     # > 0: while moves are sampled (temperature_plies), cheap moves sample the raw
     # policy at this temperature instead of a pcr_fast_simulations search. 0 = off.
     quick_policy_temperature: float = 0.0
+    # Keep the played move's subtree for the game's next search, which then runs only the
+    # simulations its root is missing.
+    tree_reuse: bool = False
     fifo_buffer: bool = False  # ring buffer instead of random replacement when full
 
 
@@ -106,24 +128,27 @@ class LossWeightsConfig:
 class ModelConfig:
     """Network architecture. Stored in every checkpoint so export can rebuild it."""
 
-    arch: str = "resnet"  # "resnet" | "encoder"
-    # ResNet trunk.
-    blocks: int = 4
-    channels: int = 64
-    # Encoder trunk.
+    arch: str = "encoder"  # the transformer in src/models/encoder.py, one token per square
     d_model: int = 128
     layers: int = 4
     heads: int = 8
     d_ff: int = 256
+    # Input plane 104 (side to move). Positions are canonical (the side to move plays white), so "constant"
+    # sets it to 1 everywhere; "colour" sets it to the real side to move before mirroring (1 White, 0 Black),
+    # the network's only sign that it plays the black pieces. Saved with the network (model_spec, .cnet).
+    stm_plane: str = "constant"
+    # INT8 training: the trainer's forward rounds as the fused kernel's INT8 path (src/models/quant.py, gradients
+    # straight through), and the networks are exported with INT8 projections (to_cnet --int8): self-play and the
+    # ladder run that path. Taken from the config on resume, so an FP16 network can be fine-tuned into INT8.
+    int8: bool = False
 
 
 @dataclass
 class GrowthConfig:
     """Function-preserving trunk growth during training (src/models/growth.py).
 
-    `schedule` lists stages, [trainer_step, blocks, channels] for the ResNet or
-    [trainer_step, layers] for the encoder; at each stage the trunk grows to that
-    size so that the network's output is unchanged at the moment of growth."""
+    `schedule` lists stages, [trainer_step, layers]; at each stage the encoder grows to
+    that many layers so that the network's output is unchanged at the moment of growth."""
 
     schedule: list = field(default_factory=list)
     lr_rewarmup_steps: int = 200
@@ -140,7 +165,7 @@ class GrowthConfig:
 class ScheduleConfig:
     """Learning-rate schedule on top of `learning_rate`."""
 
-    kind: str = "constant"  # "constant" | "cosine"
+    kind: str = "constant"  # "constant" | "cosine" | "step"
     # Step the warmup / cosine count from; -1 = the step the run resumes at
     # (resolved once, then saved in checkpoints so later resumes keep it).
     start_step: int = 0
@@ -148,6 +173,10 @@ class ScheduleConfig:
     total_steps: int = 0  # cosine horizon (including hold_steps)
     hold_steps: int = 0  # cosine: constant LR for this many steps, then decay
     final_ratio: float = 0.1  # cosine floor as a fraction of learning_rate
+    # step: the rate is multiplied by gamma at each milestone (steps counted like the cosine's,
+    # from start_step), e.g. milestones [70000], gamma 0.5 halves it from step 70,000 on.
+    milestones: list = field(default_factory=list)
+    gamma: float = 0.5
 
 
 @dataclass
@@ -164,17 +193,20 @@ class TrainingConfig:
     beta2: float = 0.999
     log_every: int = 50
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
-    wandb: WandbConfig = field(default_factory=WandbConfig)
     data: DataConfig = field(default_factory=DataConfig)
     selfplay: SelfPlayConfig = field(default_factory=SelfPlayConfig)
     loss_weights: LossWeightsConfig = field(default_factory=LossWeightsConfig)
     amp_dtype: str = "float16"
     resume_path: Path | None = None
-    run_name: str | None = None
     model: ModelConfig = field(default_factory=ModelConfig)
     growth: GrowthConfig = field(default_factory=GrowthConfig)
     lr_schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
-    optimizer: str = "adam"  # "adam" | "adamw"
+    optimizer: str = "adamw"  # "adamw" | "muon"
+    # optimizer: muon (src/train/muon.py): Muon on the encoder layers' weight matrices, AdamW (learning_rate,
+    # betas, weight_decay) on the other parameters. The schedule scales both learning rates alike.
+    muon_lr: float = 0.006
+    muon_momentum: float = 0.95
+    muon_weight_decay: float = 0.01
     grad_clip: float = 0.0  # 0 = off
     # "played": one-hot on the move actually played. "visits": MCTS visit
     # distribution stored in the v2 record.
@@ -184,11 +216,25 @@ class TrainingConfig:
     # those targets are ~uniform (measured: 98.7% with max prob < 0.4), so the
     # search value only learns from mates found inside the tree. "outcome":
     # value and mlh, trained on game results / true plies left (AlphaZero).
-    # "q_value" and "blend" change only the value (see ExportWrapper in to_onnx.py).
+    # "q_value" and "blend" change only the value (see ExportWrapper in src/export/heads.py).
     search_heads: str = "search"
-    mirror_prob: float = 0.5  # colour-flip augmentation probability
-    compile: bool = False  # torch.compile the training step's forward
-    async_engine_build: bool = False  # build TRT engines in the background
+    # search_heads "blend": the weight of value_q (trained on the search's values) in the WDL the
+    # search reads, the rest on value (trained on game results). search_q_ramp moves it over
+    # trainer steps: each network is exported with the weight at its own step.
+    search_q_weight: float = 0.5
+    search_q_ramp: RampConfig = field(default_factory=RampConfig)
+    compile: bool = False  # torch.compile the training step's forward and losses
+    # FP16 accumulators in the FP16 matrix multiplies (torch.backends.cuda.matmul.
+    # allow_fp16_accumulation): twice the tensor-core rate on GeForce cards. Neutral at today's
+    # size (the multiplies are bound by memory), needed once the model grows.
+    fp16_accumulation: bool = False
+    # The encoder's residual stream in FP16 during training (src/models/encoder.py FP16_RESIDUAL):
+    # half the bytes the step moves through it. The self-play kernel keeps it FP32.
+    fp16_residual: bool = False
+    async_engine_build: bool = False  # export networks in the background
+    # src.run: self-play and trainer under NVIDIA MPS, at the same priority (target_k paces the
+    # trainer; below self-play's priority it starved whenever the searches saturated the GPU).
+    mps: bool = False
     metrics_path: Path | None = None  # JSONL metrics for the dashboard
     expensive_metrics_every: int = 50  # cadence of host-syncing diagnostics
 
@@ -238,11 +284,12 @@ def load_config(path: Path | str) -> TrainingConfig:
     cfg.checkpoint.dir = Path(cfg.checkpoint.dir)
     if cfg.checkpoint.build_script is not None:
         cfg.checkpoint.build_script = Path(cfg.checkpoint.build_script)
+        if cfg.checkpoint.build_script.name == "build_trt.sh":
+            # Configs saved before the fused network replaced TensorRT.
+            cfg.checkpoint.build_script = cfg.checkpoint.build_script.with_name("build_net.sh")
     cfg.checkpoint.engine_dir = Path(cfg.checkpoint.engine_dir)
     cfg.checkpoint.iteration_file = Path(cfg.checkpoint.iteration_file)
     cfg.selfplay.pgn_dir = Path(cfg.selfplay.pgn_dir)
-    if cfg.wandb.dir is not None:
-        cfg.wandb.dir = Path(cfg.wandb.dir)
     cfg.data.dataset_path = Path(cfg.data.dataset_path)
     if cfg.metrics_path is not None:
         cfg.metrics_path = Path(cfg.metrics_path)

@@ -14,8 +14,9 @@ import torch.nn.functional as F
 from rich.console import Console
 from torch import amp, optim
 
-from src.models.factory import build_model, normalize_spec
-from src.models.growth import grow_encoder, grow_resnet
+from src.models import encoder
+from src.models.factory import build_model, normalize_spec, stm_colour
+from src.models.growth import grow_encoder
 from src.models.small.vocab import policy_to_idx
 
 from .config import TrainingConfig
@@ -27,9 +28,10 @@ from .dataset import (
     Batch,
     Prefetcher,
     ReplayBuffer,
-    decode_planes,
-    dense_policy_target,
+    decode_fields,
+    dense_target,
 )
+from .muon import MuonAdamW
 
 AMP_DTYPES: dict[str, torch.dtype] = {
     "float16": torch.float16,
@@ -39,12 +41,19 @@ AMP_DTYPES: dict[str, torch.dtype] = {
     "bf16": torch.bfloat16,
 }
 
-_CASTLE_IDX = torch.tensor(sorted(CASTLE_INDEX))
-_E1, _E8 = 4, 60
+_CASTLE_IDX = torch.tensor(CASTLE_INDEX)
+_E1 = 4
+# The batch fields the step's compiled part reads (the FENs stay outside it).
+_STEP_FIELDS = (
+    "cur_bb", "past_bb", "cur_rep", "past_rep", "castling", "ep", "halfmove",
+    "flags", "played_idx", "policy_idx", "policy_prob", "value_outcome", "value_mcts",
+    "plies_remaining", "backed_plies",
+)  # fmt: skip
 
 
 def legal_move_probability(probs: torch.Tensor, fens: list[str]) -> float:
-    """Mean policy mass on legal moves (python-chess; call on a handful of rows)."""
+    """Mean policy mass on legal moves (python-chess; call on a handful of rows). The records' FENs are
+    canonical (white to move), so the legal moves are already in the vocabulary's view."""
     total = 0.0
     for p, fen in zip(probs, fens, strict=True):
         board = chess.Board(fen)
@@ -88,17 +97,29 @@ class Trainer:
         if config.resume_path:
             ckpt = torch.load(config.resume_path, map_location=self.device, weights_only=False)
             spec = normalize_spec(ckpt.get("model_spec"))
+            if spec["stm_plane"] != normalize_spec(config.model)["stm_plane"]:
+                self.console.log(f"[model] stm_plane {spec['stm_plane']!r}: the checkpoint's, not the config's")
+            # int8 is how the network is trained, not what it is: the config's, so that an FP16 network can be
+            # fine-tuned into INT8 (and back).
+            int8 = normalize_spec(config.model)["int8"]
+            if spec["int8"] != int8:
+                self.console.log(f"[model] int8 {int8}: the config's (the checkpoint was trained with {spec['int8']})")
+            spec["int8"] = int8
         self.model = build_model(spec).to(self.device)
+        # Plane 104 of the decoded inputs: the real side to move (model.stm_plane: colour) or always 1.
+        self.stm_colour = stm_colour(spec)
         self.model.train()
         self.optimizer = self._make_optimizer()
-        self._forward = torch.compile(self.model) if config.compile else self.model
+        if config.fp16_accumulation:
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+        encoder.FP16_RESIDUAL = config.fp16_residual
+        self._step_fn = self._compiled_step()
 
         self.checkpoint_dir = config.checkpoint.dir
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._build_proc: subprocess.Popen | None = None
         self._build_log = None
 
-        self._wandb_run = self._init_wandb()
         if ckpt is not None:
             self._load_checkpoint(ckpt, config.resume_path)
         # start_step -1 = "the step this schedule was first resumed at". Only a value
@@ -119,19 +140,42 @@ class Trainer:
     def param_count(self) -> int:
         return sum(p.numel() for p in self.model.parameters())
 
-    def _make_optimizer(self) -> optim.Optimizer:
+    def _make_optimizer(self) -> optim.Optimizer | MuonAdamW:
         cfg = self.config
         kwargs = dict(lr=cfg.learning_rate, betas=(cfg.beta1, cfg.beta2))
         params = list(self.model.parameters())
+        matrices = []
+        if cfg.optimizer == "muon":
+            if not hasattr(self.model, "muon_matrices"):
+                raise ValueError(
+                    f"optimizer: muon needs the encoder, not {self.model.spec()['arch']}"
+                )
+            matrices = self.model.muon_matrices()
+            on_muon = {id(p) for p, _ in matrices}
+            params = [p for p in params if id(p) not in on_muon]
         if cfg.weight_decay > 0:
             # Decay matrices only: norm weights, biases and scalar gains stay free.
             params = [
                 {"params": [p for p in params if p.ndim >= 2], "weight_decay": cfg.weight_decay},
                 {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0},
             ]
-        if cfg.optimizer == "adamw":
-            return optim.AdamW(params, **kwargs)
-        return optim.Adam(params, **kwargs)
+        # One fused kernel for all parameters on the GPU (with the FP16 loss scaler it also skips
+        # an overflowed step on the GPU, without the host sync of the unfused path).
+        kwargs["fused"] = self.device.type == "cuda"
+        if cfg.optimizer == "muon":
+            if not isinstance(params[0], dict):
+                params = [{"params": params}]
+            return MuonAdamW(
+                matrices, params, muon_lr=cfg.muon_lr, momentum=cfg.muon_momentum,
+                muon_weight_decay=cfg.muon_weight_decay, **kwargs,
+            )  # fmt: skip
+        if cfg.optimizer != "adamw":
+            raise ValueError(f"optimizer: {cfg.optimizer!r}, expected 'adamw' or 'muon'")
+        return optim.AdamW(params, **kwargs)
+
+    def _compiled_step(self):
+        """The step's forward and losses, compiled with the model when config.compile."""
+        return torch.compile(self._losses) if self.config.compile else self._losses
 
     def lr_at(self, step: int) -> float:
         cfg = self.config
@@ -144,6 +188,8 @@ class Trainer:
             factor = sched.final_ratio + (1.0 - sched.final_ratio) * 0.5 * (
                 1.0 + math.cos(math.pi * progress)
             )
+        elif sched.kind == "step":
+            factor = sched.gamma ** sum(1 for m in sched.milestones if rel >= m)
         warm = 1.0
         if sched.warmup_steps > 0:
             warm = min(1.0, (rel + 1) / sched.warmup_steps)
@@ -153,39 +199,9 @@ class Trainer:
         return cfg.learning_rate * factor * warm
 
     # ------------------------------------------------------------------ #
-    def _init_wandb(self):
-        if not self.config.wandb.enabled:
-            return None
-        import wandb
-
-        wandb_dir = self.config.wandb.dir
-        if wandb_dir is not None:
-            Path(wandb_dir).mkdir(parents=True, exist_ok=True)
-        init_kwargs = dict(
-            project=self.config.wandb.project,
-            entity=self.config.wandb.entity,
-            name=self.config.wandb.run_name or self.config.run_name,
-            config=self.config.to_dict(),
-            dir=str(wandb_dir) if wandb_dir is not None else None,
-        )
-        if self.config.wandb.resume_id:
-            init_kwargs["id"] = self.config.wandb.resume_id
-            init_kwargs["resume"] = "allow"
-        run = wandb.init(**init_kwargs)
-        # Surface the run id so external metric producers can attach.
-        try:
-            (self.run_dir / "wandb_run_id.txt").write_text(f"{run.id}\n")
-        except Exception as exc:  # never fail training over this
-            self.console.log(f"[WARN] failed to write wandb_run_id.txt: {exc}")
-        return run
-
     def _write_metrics(self, row: dict) -> None:
         with self.metrics_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
-        if self._wandb_run:
-            import wandb
-
-            wandb.log({k: v for k, v in row.items() if isinstance(v, (int, float))})
 
     def _log_event(self, event: str, **fields) -> None:
         self._write_metrics({"event": event, "step": self.step, "t": time.time(), **fields})
@@ -231,36 +247,22 @@ class Trainer:
         return late - early < g.plateau_min_gain
 
     def _maybe_grow(self) -> None:
-        # Stages: [step, blocks, channels] for the ResNet, [step, layers] for the encoder.
+        # Stages: [step, layers].
         plateau_mode = self.config.growth.trigger == "plateau"
         if plateau_mode and self.step % 100:
             return  # the ladder file only changes every ~30 min
         for stage in sorted(self.config.growth.schedule):
-            cur = self.model.spec()
-            at_step = int(stage[0])
-            if self.step < at_step:
+            at_step, layers = int(stage[0]), int(stage[1])
+            if self.step < at_step or layers <= self.model.spec()["layers"]:
                 continue
-            if cur["arch"] == "encoder":
-                layers = int(stage[1])
-                if layers <= cur["layers"]:
-                    continue
-            else:
-                blocks, channels = int(stage[1]), int(stage[2])
-                if blocks <= cur["blocks"] and channels <= cur["channels"]:
-                    continue
             # This stage would grow the model; in plateau mode only once Elo has flattened.
             if plateau_mode and not self.plateaued():
                 return
             before = self.param_count()
-            if cur["arch"] == "encoder":
-                self.model = grow_encoder(self.model, layers)
-            else:
-                self.model = grow_resnet(
-                    self.model, max(blocks, cur["blocks"]), max(channels, cur["channels"])
-                )
+            self.model = grow_encoder(self.model, layers)
             self.model.train()
             self.optimizer = self._make_optimizer()
-            self._forward = torch.compile(self.model) if self.config.compile else self.model
+            self._step_fn = self._compiled_step()
             self.last_growth_step = self.step
             self._log_event(
                 "grow", spec=self.model.spec(), params_before=before, params=self.param_count()
@@ -270,7 +272,7 @@ class Trainer:
         self._wait_for_warmup()
         cfg = self.config
         target_k = max(0.1, float(cfg.data.target_k))
-        prefetch = Prefetcher(self.buffer, cfg.batch_size, cfg.mirror_prob)
+        prefetch = Prefetcher(self.buffer, cfg.batch_size)
 
         # Token-bucket pacing: the trainer may consume target_k samples per
         # record self-play has written since training started, re-checked every
@@ -299,7 +301,8 @@ class Trainer:
                 # On the step that ends at a multiple of expensive_metrics_every, so that a
                 # logged step (counted after the increment below) includes these metrics.
                 expensive = (self.step + 1) % max(1, cfg.expensive_metrics_every) == 0
-                metrics = self._train_step(batch, expensive)
+                log = (self.step + 1) % cfg.log_every == 0  # logged after the increment below
+                metrics = self._train_step(batch, expensive, log)
                 t1 = time.time()
                 step_dt = t1 - t0
                 step_times.append(step_dt)
@@ -349,29 +352,58 @@ class Trainer:
             self.console.log("Training interrupted by user.")
         finally:
             prefetch.close()
-            if self._wandb_run:
-                import wandb
-
-                wandb.finish()
 
     # ------------------------------------------------------------------ #
-    def _train_step(self, batch: Batch, expensive: bool) -> dict[str, torch.Tensor | float]:
+    def _train_step(
+        self, batch: Batch, expensive: bool, log: bool = False
+    ) -> dict[str, torch.Tensor | float]:
+        """One optimizer step. Returns the metrics on a logged step (log or expensive), else {}:
+        nothing in a step reads a value back from the GPU otherwise."""
         cfg = self.config
+        log = log or expensive
         lr = self.lr_at(self.step)
         for group in self.optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = lr * group.get("lr_scale", 1.0)
         self.optimizer.zero_grad(set_to_none=True)
 
-        inputs = decode_planes(batch)
-        full = (batch.flags & FLAG_FULL_SEARCH) > 0
-        target_mlh = (batch.plies_remaining.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        target_mlh_q = (batch.backed_plies.clamp_min(0.0) / 25.0).clamp_max(4.0)
-        mlh_mask = (batch.plies_remaining > -0.5).float()
-        mlh_q_mask = (batch.backed_plies > -0.5).float()
-        has_visits = full & (batch.policy_prob.sum(dim=1) > 0)
+        fields = {name: getattr(batch, name) for name in _STEP_FIELDS}
+        total_loss, metrics, log_probs = self._step_fn(fields, log)
+
+        self.scaler.scale(total_loss).backward()
+        if cfg.grad_clip > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        if not log:
+            return {}
+        metrics = dict(metrics)
+        metrics["amp/scale"] = self.scaler.get_scale() if self.scaler.is_enabled() else 1.0
+        if expensive:
+            rows = min(16, log_probs.shape[0])
+            metrics["legal_move_prob"] = legal_move_probability(
+                log_probs[:rows].exp().float().cpu(), batch.fens[:rows]
+            )
+        return metrics
+
+    def _losses(self, f: dict[str, torch.Tensor], with_metrics: bool):
+        """The step's forward and losses (compiled with the model, _compiled_step): the total loss,
+        the scalars to log (the diagnostics too when with_metrics) and the policy's log-probs."""
+        cfg = self.config
+        inputs = decode_fields(
+            f["cur_bb"], f["past_bb"], f["cur_rep"], f["past_rep"], f["castling"], f["ep"], f["halfmove"],
+            flags=f["flags"], stm_colour=self.stm_colour,
+        )  # fmt: skip
+        full = (f["flags"] & FLAG_FULL_SEARCH) > 0
+        target_mlh = (f["plies_remaining"].clamp_min(0.0) / 25.0).clamp_max(4.0)
+        target_mlh_q = (f["backed_plies"].clamp_min(0.0) / 25.0).clamp_max(4.0)
+        mlh_mask = (f["plies_remaining"] > -0.5).float()
+        mlh_q_mask = (f["backed_plies"] > -0.5).float()
+        has_visits = full & (f["policy_prob"].sum(dim=1) > 0)
 
         with amp.autocast(device_type=self.device_type, dtype=self.amp_dtype):
-            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self._forward(
+            policy_logits, value_logits, value_q_logits, mlh_pred, mlh_q_pred = self.model(
                 inputs, return_all=True
             )
         policy_logits = policy_logits.float()
@@ -381,17 +413,17 @@ class Trainer:
         mlh_q_pred = mlh_q_pred.float().view(-1)
 
         log_probs = F.log_softmax(policy_logits, dim=-1)
-        visit_target = dense_policy_target(batch)
+        visit_target = dense_target(f["policy_idx"], f["policy_prob"])
         visit_ce = -(visit_target * log_probs).sum(dim=-1)
         visit_loss = (visit_ce * has_visits).sum() / has_visits.sum().clamp_min(1)
-        played = torch.where(
-            full, batch.played_idx, torch.full_like(batch.played_idx, IGNORE_INDEX)
-        )
+        played_idx = f["played_idx"]
+        played = torch.where(full, played_idx, torch.full_like(played_idx, IGNORE_INDEX))
         played_loss = F.cross_entropy(policy_logits, played, ignore_index=IGNORE_INDEX)
         policy_loss = visit_loss if cfg.policy_target == "visits" else played_loss
 
-        value_loss = F.cross_entropy(value_logits, batch.value_outcome)
-        value_q_loss = F.cross_entropy(value_q_logits, batch.value_mcts)
+        value_outcome, value_mcts = f["value_outcome"], f["value_mcts"]
+        value_loss = F.cross_entropy(value_logits, value_outcome)
+        value_q_loss = F.cross_entropy(value_q_logits, value_mcts)
         mlh_loss = ((mlh_pred - target_mlh).pow(2) * mlh_mask).sum() / mlh_mask.sum().clamp_min(1.0)
         mlh_q_loss = (
             (mlh_q_pred - target_mlh_q).pow(2) * mlh_q_mask
@@ -405,27 +437,22 @@ class Trainer:
             + lw.mlh * mlh_loss
             + lw.mlh_q * mlh_q_loss
         )
-
-        self.scaler.scale(total_loss).backward()
-        if cfg.grad_clip > 0:
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.grad_clip)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        metrics: dict[str, torch.Tensor] = {}
+        if not with_metrics:
+            return total_loss, metrics, None
 
         with torch.no_grad():
             probs = log_probs.exp()
-            value_labels = batch.value_outcome.argmax(dim=-1)
-            value_q_labels = batch.value_mcts.argmax(dim=-1)
+            value_labels = value_outcome.argmax(dim=-1)
+            value_q_labels = value_mcts.argmax(dim=-1)
             played_ok = played != IGNORE_INDEX
             top1 = policy_logits.argmax(dim=-1)
             target_entropy = -(visit_target * visit_target.clamp_min(1e-12).log()).sum(-1)
-            vm = batch.value_mcts
-            castle_cand = torch.isin(batch.played_idx, _CASTLE_IDX.to(self.device))
-            kings_home = (((batch.cur_bb[:, 5] >> _E1) & 1) > 0) | (
-                ((batch.cur_bb[:, 11] >> _E8) & 1) > 0
-            )
-            metrics: dict[str, torch.Tensor | float] = {
+            vm = value_mcts
+            castle_cand = torch.isin(played_idx, _CASTLE_IDX.to(played_idx.device))
+            cur_bb = f["cur_bb"]
+            kings_home = ((cur_bb[:, 5] >> _E1) & 1) > 0
+            metrics = {
                 "loss/total": total_loss.detach(),
                 "loss/policy": policy_loss.detach(),
                 "loss/policy_visits": visit_loss.detach(),
@@ -461,14 +488,8 @@ class Trainer:
                 "mlh/target_plies": (target_mlh * mlh_mask).sum()
                 / mlh_mask.sum().clamp_min(1.0)
                 * 25.0,
-                "amp/scale": self.scaler.get_scale() if self.scaler.is_enabled() else 1.0,
             }
-            if expensive:
-                rows = min(16, probs.shape[0])
-                metrics["legal_move_prob"] = legal_move_probability(
-                    probs[:rows].float().cpu(), batch.fens[:rows]
-                )
-        return metrics
+        return total_loss, metrics, log_probs.detach()
 
     # ------------------------------------------------------------------ #
     def _save_checkpoint(self) -> None:
@@ -527,7 +548,9 @@ class Trainer:
             return
         script_path = Path(script).resolve()
         if not script_path.is_file():
-            self.console.log(f"[WARN] build script {script_path} not found; skipping TRT export.")
+            self.console.log(
+                f"[WARN] build script {script_path} not found; skipping the network export."
+            )
             return
         cmd = [
             script_path.as_posix(),
@@ -539,9 +562,9 @@ class Trainer:
         if not self.config.async_engine_build:
             try:
                 subprocess.run(cmd, check=True)
-                self.console.log(f"Updated TensorRT engine via {script_path}.")
+                self.console.log(f"Exported the network via {script_path}.")
             except Exception as exc:
-                self.console.log(f"[WARN] build_trt.sh failed: {exc}")
+                self.console.log(f"[WARN] {script_path.name} failed: {exc}")
             return
         if self._build_proc is not None and self._build_proc.poll() is None:
             self._log_event("build_skipped", checkpoint=checkpoint_path.name)

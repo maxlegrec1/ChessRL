@@ -1,0 +1,335 @@
+"""Fused attention block for the encoder's training step (CUDA): the embedding's re-injection, the
+first RMSNorm, the qkv projection, the attention (QK-norm, pair bias, softmax, values), the out
+projection and the residual add, per position.
+
+Forward: one Triton program per position (64 tokens) loops over the 8 heads, as the self-play
+kernel does: each head's q, k and v come straight from the normed input, its output goes straight
+into the out projection's accumulator, and only the new residual stream (and the normed input,
+which a weight gradient needs) reach memory; qkv and the attention output never do.
+
+Backward: the out projection's input gradient (cuBLAS); one program per (head, 64 positions)
+recomputes the head's q, k and v from the normed input and runs the attention backward, writing
+the qkv gradient and the attention output, with the pair bias's and the QK-norm weights' gradients
+summed over its positions before one atomic add; cuBLAS for the input gradient through qkv and
+the weight gradients (FP32 accumulators); one kernel for the norm's backward, the residual and the
+embedding's gain.
+
+Same function as Block.forward's attention half under FP16 autocast (fused_attention.py's
+conventions for the attention itself: q, k, v rounded to FP16 as the qkv projection's output is).
+The residual stream comes in FP32 or FP16 and leaves in the same type, its gradient too; the
+arithmetic is FP32 either way.
+
+quant (INT8 training, src/models/quant.py; the weights come in already rounded): the normed input is rounded to
+INT8 per token, and so is the attention output, per token over all heads. The forward collects the heads' outputs
+into whole rows (a one-hot product per head places each head's 16 columns, exactly) before the out projection, and
+returns each token's max |output|, from which the backward rounds its recomputed outputs the same way for the out
+projection's weight gradient. Gradients pass straight through the rounding.
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+from triton.language.extra import libdevice
+
+from src.models.fused_attention import reference_attention
+from src.models.quant import fq_tokens
+
+TOKENS, HEADS, HEAD_DIM = 64, 8, 16
+D = HEADS * HEAD_DIM
+_BLOCK = 64  # positions per attention-backward program
+_BM = 64  # tokens per norm-backward program
+# Launch settings measured at batch 2,048 on a 4090: the forward 636 us per layer with 8 warps, 412
+# with 2 warps and no software pipelining (1 stage), 397 reading x and x0 again at the end instead of
+# keeping x + gain x0 in registers through the head loop; the attention backward 373 us with 4 warps
+# (534 with 2, 745 with 8); the norm backward 330 us with 8 warps (365 with 4). The INT8 forward (quant) 534 us
+# with 4 warps (703 with 2, 819 with 8; the FP16 forward 385 on the same box).
+
+
+@triton.jit
+def _int8_round(v, amax):
+    """v [rows, k] FP32 rounded to INT8 per row (amax = each row's max |v|), dequantized: src/models/quant.py."""
+    inv = tl.where(amax > 0, 127.0 / amax, 0.0)
+    return libdevice.rint(v * inv[:, None]) * (amax / 127.0)[:, None]
+
+
+@triton.jit
+def _fwd_kernel(x, x0, gain, w1, wqkv, qw, kw, bias, wout, out, xn_out, amax_out, eps,
+                T: tl.constexpr, H: tl.constexpr, HD: tl.constexpr, RELOAD: tl.constexpr = False,
+                QUANT: tl.constexpr = False):  # fmt: skip
+    pos = tl.program_id(0)
+    DM: tl.constexpr = H * HD
+    rows = tl.arange(0, T)
+    cols = tl.arange(0, DM)
+    hc = tl.arange(0, HD)
+    off = pos * T * DM + rows[:, None] * DM + cols[None, :]
+    g = tl.load(gain)
+    xp = tl.load(x + off).to(tl.float32) + g * tl.load(x0 + off).to(tl.float32)
+    r = tl.rsqrt(tl.sum(xp * xp, 1) / DM + eps)
+    xn32 = xp * r[:, None] * tl.load(w1 + cols)[None, :]
+    if QUANT:
+        xn32 = _int8_round(xn32, tl.max(tl.abs(xn32), 1))
+    xn = xn32.to(tl.float16)
+    tl.store(xn_out + off, xn)
+    wq_n = tl.load(qw + hc)
+    wk_n = tl.load(kw + hc)
+    acc = tl.zeros((T, DM), dtype=tl.float32)
+    for h in range(H):
+        wq = tl.load(wqkv + (h * HD + hc)[:, None] * DM + cols[None, :])
+        wk = tl.load(wqkv + (DM + h * HD + hc)[:, None] * DM + cols[None, :])
+        wv = tl.load(wqkv + (2 * DM + h * HD + hc)[:, None] * DM + cols[None, :])
+        q = tl.dot(xn, tl.trans(wq)).to(tl.float16).to(tl.float32)
+        k = tl.dot(xn, tl.trans(wk)).to(tl.float16).to(tl.float32)
+        v = tl.dot(xn, tl.trans(wv)).to(tl.float16)
+        rq = tl.rsqrt(tl.sum(q * q, 1) / HD + eps)
+        rk = tl.rsqrt(tl.sum(k * k, 1) / HD + eps)
+        qn = (q * rq[:, None] * wq_n[None, :]).to(tl.float16)
+        kn = (k * rk[:, None] * wk_n[None, :]).to(tl.float16)
+        s = tl.dot(qn, tl.trans(kn)) * 0.25 + tl.load(bias + h * T * T + rows[:, None] * T + rows[None, :])
+        p = tl.exp(s - tl.max(s, 1)[:, None])
+        p = p / tl.sum(p, 1)[:, None]
+        o = tl.dot(p.to(tl.float16), v).to(tl.float16)
+        if QUANT:  # acc collects the attention output: the head's columns, by a one-hot product (exact)
+            acc += tl.dot(o, (cols[None, :] == (h * HD + hc)[:, None]).to(tl.float16))
+        else:
+            wo = tl.load(wout + cols[:, None] * DM + (h * HD + hc)[None, :])
+            acc += tl.dot(o, tl.trans(wo))
+    if QUANT:
+        amax = tl.max(tl.abs(acc), 1)
+        tl.store(amax_out + pos * T + rows, amax)
+        oq = _int8_round(acc, amax).to(tl.float16)
+        acc = tl.dot(oq, tl.trans(tl.load(wout + cols[:, None] * DM + cols[None, :])))
+    y = acc.to(tl.float16).to(tl.float32)
+    if RELOAD:  # read x and x0 again instead of keeping x + gain x0 in registers through the loop
+        xp = tl.load(x + off).to(tl.float32) + g * tl.load(x0 + off).to(tl.float32)
+    tl.store(out + off, (xp + y).to(out.dtype.element_ty))
+
+
+@triton.jit
+def _bwd_attn_kernel(xn, wqkv, qw, kw, bias, d_o, o_out, dqkv, dqw, dkw, dbias, amax_o, eps, n_pos,
+                     T: tl.constexpr, H: tl.constexpr, HD: tl.constexpr, BLOCK: tl.constexpr,
+                     QUANT: tl.constexpr = False):  # fmt: skip
+    h = tl.program_id(0)  # heads vary fastest: the 8 programs of a block read the same xn from L2
+    c = tl.program_id(1)
+    DM: tl.constexpr = H * HD
+    rows = tl.arange(0, T)
+    cols = tl.arange(0, DM)
+    hc = tl.arange(0, HD)
+    wq = tl.load(wqkv + (h * HD + hc)[:, None] * DM + cols[None, :])
+    wk = tl.load(wqkv + (DM + h * HD + hc)[:, None] * DM + cols[None, :])
+    wv = tl.load(wqkv + (2 * DM + h * HD + hc)[:, None] * DM + cols[None, :])
+    wq_n = tl.load(qw + hc)
+    wk_n = tl.load(kw + hc)
+    bias_h = tl.load(bias + h * T * T + rows[:, None] * T + rows[None, :])
+    acc_db = tl.zeros((T, T), dtype=tl.float32)
+    acc_dqw = tl.zeros((HD,), dtype=tl.float32)
+    acc_dkw = tl.zeros((HD,), dtype=tl.float32)
+    for i in range(BLOCK):
+        b = c * BLOCK + i
+        if b < n_pos:
+            xt = tl.load(xn + b * T * DM + rows[:, None] * DM + cols[None, :])
+            q = tl.dot(xt, tl.trans(wq)).to(tl.float16).to(tl.float32)
+            k = tl.dot(xt, tl.trans(wk)).to(tl.float16).to(tl.float32)
+            v = tl.dot(xt, tl.trans(wv)).to(tl.float16)
+            rq = tl.rsqrt(tl.sum(q * q, 1) / HD + eps)
+            rk = tl.rsqrt(tl.sum(k * k, 1) / HD + eps)
+            qn = (q * rq[:, None] * wq_n[None, :]).to(tl.float16)
+            kn = (k * rk[:, None] * wk_n[None, :]).to(tl.float16)
+            s = tl.dot(qn, tl.trans(kn)) * 0.25 + bias_h
+            p = tl.exp(s - tl.max(s, 1)[:, None])
+            p = p / tl.sum(p, 1)[:, None]
+            o = tl.dot(p.to(tl.float16), v).to(tl.float16)
+            hoff = b * T * DM + rows[:, None] * DM + h * HD + hc[None, :]
+            if QUANT:  # the out projection's input as the forward rounded it (its weight gradient reads it)
+                tl.store(o_out + hoff, _int8_round(o.to(tl.float32), tl.load(amax_o + b * T + rows)).to(tl.float16))
+            else:
+                tl.store(o_out + hoff, o)
+            do = tl.load(d_o + hoff)
+            dv = tl.dot(tl.trans(p.to(tl.float16)), do)
+            dp = tl.dot(do, tl.trans(v))
+            delta = tl.sum(do.to(tl.float32) * o.to(tl.float32), 1)
+            ds = p * (dp - delta[:, None])
+            acc_db += ds
+            ds16 = ds.to(tl.float16)
+            dqn = tl.dot(ds16, kn) * 0.25
+            dkn = tl.dot(tl.trans(ds16), qn) * 0.25
+            acc_dqw += tl.sum(dqn * q * rq[:, None], 0)
+            acc_dkw += tl.sum(dkn * k * rk[:, None], 0)
+            gq = dqn * wq_n[None, :]
+            gk = dkn * wk_n[None, :]
+            dq = rq[:, None] * gq - q * (rq * rq * rq)[:, None] * (tl.sum(q * gq, 1) / HD)[:, None]
+            dk = rk[:, None] * gk - k * (rk * rk * rk)[:, None] * (tl.sum(k * gk, 1) / HD)[:, None]
+            qoff = b * T * 3 * DM + rows[:, None] * (3 * DM) + h * HD + hc[None, :]
+            tl.store(dqkv + qoff, dq.to(tl.float16))
+            tl.store(dqkv + qoff + DM, dk.to(tl.float16))
+            tl.store(dqkv + qoff + 2 * DM, dv.to(tl.float16))
+    tl.atomic_add(dbias + h * T * T + rows[:, None] * T + rows[None, :], acc_db)
+    tl.atomic_add(dqw + hc, acc_dqw)
+    tl.atomic_add(dkw + hc, acc_dkw)
+
+
+@triton.jit
+def _bwd_norm_kernel(x, x0, gain, w1, dout, dxn, dx, dx0, dgain, dw1, eps, n_rows,
+                     DM: tl.constexpr, BM: tl.constexpr):  # fmt: skip
+    rows = tl.program_id(0) * BM + tl.arange(0, BM)
+    mask = rows < n_rows
+    cols = tl.arange(0, DM)
+    off = rows[:, None] * DM + cols[None, :]
+    g = tl.load(gain)
+    x0t = tl.load(x0 + off, mask=mask[:, None], other=0.0).to(tl.float32)
+    xp = tl.load(x + off, mask=mask[:, None], other=0.0).to(tl.float32) + g * x0t
+    w = tl.load(w1 + cols)
+    r = tl.rsqrt(tl.sum(xp * xp, 1) / DM + eps)
+    dn = tl.load(dxn + off, mask=mask[:, None], other=0.0).to(tl.float32)
+    gq = dn * w[None, :]
+    dxp = tl.load(dout + off, mask=mask[:, None], other=0.0).to(tl.float32) + r[:, None] * gq - xp * (
+        r * r * r
+    )[:, None] * (tl.sum(xp * gq, 1) / DM)[:, None]
+    tl.store(dx + off, dxp.to(dx.dtype.element_ty), mask=mask[:, None])
+    tl.store(dx0 + off, (g * dxp).to(tl.float16), mask=mask[:, None])
+    tl.atomic_add(dgain, tl.sum(tl.sum(x0t * dxp, 1), 0))
+    tl.atomic_add(dw1 + cols, tl.sum(dn * xp * r[:, None], 0))
+
+
+def _stream(t):
+    """The residual stream as the kernels take it: FP16 or FP32 (anything else in FP32), contiguous."""
+    return (t if t.dtype in (torch.float16, torch.float32) else t.float()).contiguous()
+
+
+def _stream_dtype(t):
+    return torch.float16 if t.dtype == torch.float16 else torch.float32
+
+
+def _no_fp16_acc_mm(a, b):
+    """a @ b with FP32 accumulators whatever torch.backends.cuda.matmul.allow_fp16_accumulation
+    says: the weight gradients sum over every token of the batch."""
+    flag = torch.backends.cuda.matmul.allow_fp16_accumulation
+    torch.backends.cuda.matmul.allow_fp16_accumulation = False
+    try:
+        return a @ b
+    finally:
+        torch.backends.cuda.matmul.allow_fp16_accumulation = flag
+
+
+@torch.library.custom_op("chessrl::fused_attention_block", mutates_args=())
+def fused_attention_block(
+    x: torch.Tensor, x0: torch.Tensor, gain: torch.Tensor, norm_weight: torch.Tensor, qkv_weight: torch.Tensor,
+    q_weight: torch.Tensor, k_weight: torch.Tensor, bias: torch.Tensor, out_weight: torch.Tensor, eps: float,
+    quant: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:  # fmt: skip
+    """x [B, 64, 128] FP32 or FP16 (the residual stream), x0 [B, 64, 128] FP16 (the embedding), the
+    gain, norm1's weight [128], the qkv projection's [384, 128], the QK-norm weights [16], the pair
+    bias [8, 64, 64], the out projection's [128, 128] -> (x + gain x0 + attention in x's type, the
+    normed input, with quant each token's max |attention output| [B, 64] (FP32, unset without))."""
+    x = _stream(x)
+    x0 = x0.to(torch.float16).contiguous()
+    n = x.shape[0]
+    out = torch.empty_like(x)
+    xn = torch.empty(x.shape, dtype=torch.float16, device=x.device)
+    amax = torch.empty(n, TOKENS, dtype=torch.float32, device=x.device)
+    _fwd_kernel[(n,)](
+        x, x0, gain.float().reshape(1), norm_weight.float().contiguous(), qkv_weight.half().contiguous(),
+        q_weight.float().contiguous(), k_weight.float().contiguous(), bias.float().contiguous(),
+        out_weight.half().contiguous(), out, xn, amax, eps, T=TOKENS, H=HEADS, HD=HEAD_DIM, RELOAD=True,
+        QUANT=quant, num_warps=4 if quant else 2, num_stages=1,
+    )  # fmt: skip
+    return out, xn, amax
+
+
+@fused_attention_block.register_fake
+def _(x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, eps, quant=False):
+    return (
+        torch.empty_like(x, dtype=_stream_dtype(x)), torch.empty_like(x, dtype=torch.float16),
+        x.new_empty(x.shape[0], TOKENS, dtype=torch.float32),
+    )  # fmt: skip
+
+
+@torch.library.custom_op("chessrl::fused_attention_block_backward", mutates_args=())
+def fused_attention_block_backward(
+    x: torch.Tensor, x0: torch.Tensor, gain: torch.Tensor, norm_weight: torch.Tensor, qkv_weight: torch.Tensor,
+    q_weight: torch.Tensor, k_weight: torch.Tensor, bias: torch.Tensor, out_weight: torch.Tensor,
+    xn: torch.Tensor, amax: torch.Tensor, dout: torch.Tensor, eps: float, quant: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor]:  # fmt: skip
+    x = _stream(x)
+    x0 = x0.to(torch.float16).contiguous()
+    dout = dout.to(x.dtype).contiguous()
+    n = x.shape[0]
+    dev = x.device
+    wqkv16 = qkv_weight.half().contiguous()
+    wout16 = out_weight.half().contiguous()
+    dy = dout.to(torch.float16)
+    d_o = (dy.view(-1, D) @ wout16).view(n, TOKENS, D)  # gradient of the attention output
+    o = torch.empty(n, TOKENS, D, dtype=torch.float16, device=dev)
+    dqkv = torch.empty(n, TOKENS, 3 * D, dtype=torch.float16, device=dev)
+    dqw = torch.zeros(HEAD_DIM, dtype=torch.float32, device=dev)
+    dkw = torch.zeros(HEAD_DIM, dtype=torch.float32, device=dev)
+    dbias = torch.zeros(HEADS, TOKENS, TOKENS, dtype=torch.float32, device=dev)
+    _bwd_attn_kernel[(HEADS, triton.cdiv(n, _BLOCK))](
+        xn, wqkv16, q_weight.float().contiguous(), k_weight.float().contiguous(), bias.float().contiguous(),
+        d_o, o, dqkv, dqw, dkw, dbias, amax.contiguous(), eps, n, T=TOKENS, H=HEADS, HD=HEAD_DIM, BLOCK=_BLOCK,
+        QUANT=quant, num_warps=4,
+    )  # fmt: skip
+    dqkv2 = dqkv.view(-1, 3 * D)
+    dxn = dqkv2 @ wqkv16  # [tokens, 128]: K = 384, FP16 accumulation allowed
+    dwqkv = _no_fp16_acc_mm(dqkv2.t(), xn.view(-1, D)).float()
+    dwout = _no_fp16_acc_mm(dy.view(-1, D).t(), o.view(-1, D)).float()
+    rows = n * TOKENS
+    dx = torch.empty_like(x)
+    dx0 = torch.empty(x.shape, dtype=torch.float16, device=dev)
+    dgain = torch.zeros(1, dtype=torch.float32, device=dev)
+    dw1 = torch.zeros(D, dtype=torch.float32, device=dev)
+    _bwd_norm_kernel[(triton.cdiv(rows, _BM),)](
+        x, x0, gain.float().reshape(1), norm_weight.float().contiguous(), dout, dxn, dx, dx0, dgain, dw1, eps,
+        rows, DM=D, BM=_BM, num_warps=8,
+    )  # fmt: skip
+    return dx, dx0, dgain.reshape(()), dw1, dwqkv, dqw, dkw, dbias, dwout
+
+
+@fused_attention_block_backward.register_fake
+def _(x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, xn, amax, dout, eps, quant):
+    f32 = torch.float32
+    return (
+        torch.empty_like(x, dtype=_stream_dtype(x)), torch.empty_like(x0, dtype=torch.float16),
+        gain.new_empty((), dtype=f32),
+        norm_weight.new_empty(D, dtype=f32), qkv_weight.new_empty(3 * D, D, dtype=f32),
+        q_weight.new_empty(HEAD_DIM, dtype=f32), k_weight.new_empty(HEAD_DIM, dtype=f32),
+        bias.new_empty(HEADS, TOKENS, TOKENS, dtype=f32), out_weight.new_empty(D, D, dtype=f32),
+    )  # fmt: skip
+
+
+def _setup_context(ctx, inputs, output):
+    x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, eps, *rest = inputs
+    ctx.save_for_backward(
+        x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, output[1], output[2]
+    )
+    ctx.eps = eps
+    ctx.quant = bool(rest[0]) if rest else False
+
+
+def _backward(ctx, dout, dxn_unused, damax_unused):
+    x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, xn, amax = ctx.saved_tensors
+    grads = fused_attention_block_backward(
+        x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, xn, amax, dout, ctx.eps,
+        ctx.quant,
+    )
+    inputs = (x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight)
+    return (*(gd.to(t.dtype) for gd, t in zip(grads, inputs, strict=True)), None, None)
+
+
+fused_attention_block.register_autograd(_backward, setup_context=_setup_context)
+
+
+def reference_attention_block(x, x0, gain, norm_weight, qkv_weight, q_weight, k_weight, bias, out_weight, eps,
+                              quant=False):  # fmt: skip
+    """The same function in plain PyTorch, as Block.forward computes it under FP16 autocast."""
+    xp = x.float() + gain * x0.float()
+    xn = xp * torch.rsqrt(xp.pow(2).mean(-1, keepdim=True) + eps) * norm_weight
+    if quant:
+        xn = fq_tokens(xn)
+    qkv = xn.half() @ qkv_weight.half().t()
+    o = reference_attention(qkv, q_weight, k_weight, bias, eps)
+    if quant:
+        o = fq_tokens(o, fp16=True).half()
+    return (xp + (o @ out_weight.half().t()).float()).to(_stream_dtype(x))

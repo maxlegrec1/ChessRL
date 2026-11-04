@@ -110,11 +110,15 @@ def test_parity_repetition_after_knight_dance():
 
 
 def test_parity_black_to_move():
-    # Black-to-move position, fresh — STM plane must be 0 in both encoders,
-    # piece planes in absolute frame (no canonicalization).
+    # Black to move: both encoders mirror the position, history included (the network always plays white), so
+    # the side-to-move plane is 1 and the planes are those of the colour-flipped game, white to move.
     moves = ["e2e4"]  # after this, black to move.
     py = _encode_python(STARTPOS, moves)
     cpp = _encode_cpp(STARTPOS, moves)
-    assert (py[:, :, 104] == 0.0).all()
-    assert (cpp[:, :, 104] == 0.0).all()
+    assert (py[:, :, 104] == 1.0).all()
+    assert (cpp[:, :, 104] == 1.0).all()
     assert np.array_equal(py, cpp), _diff_report(py, cpp)
+    twin_start = pchess.Board(STARTPOS).mirror().fen()  # the start position, black to move
+    twin = _encode_cpp(twin_start, ["e7e5"])
+    assert np.array_equal(cpp, twin), _diff_report(cpp, twin)
+    assert np.array_equal(_encode_python(twin_start, ["e7e5"]), twin)

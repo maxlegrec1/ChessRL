@@ -116,10 +116,13 @@ const std::array<int32_t, kVocabLutSize>& vocab_lut()
     return lut;
 }
 
-inline int vocab_index_for_move_fast(const chess::Move& move) noexcept
+// `mirror`: black to move, the move looked up in white's view (the vocabulary is the side to move's moves as
+// white; mcts/packed_position.hpp).
+inline int vocab_index_for_move_fast(const chess::Move& move, bool mirror) noexcept
 {
-    const int from = static_cast<int>(move.from().index());
-    const int to   = static_cast<int>(move.to().index());
+    const int flip = mirror ? 56 : 0;
+    const int from = static_cast<int>(move.from().index()) ^ flip;
+    const int to   = static_cast<int>(move.to().index()) ^ flip;
     int promo = 0;
     if (move.typeOf() == chess::Move::PROMOTION)
     {
@@ -169,6 +172,9 @@ std::atomic<std::uint64_t> g_ph_enqueue_ns{0};
 std::atomic<std::uint64_t> g_ph_wait_ns{0};
 std::atomic<std::uint64_t> g_ph_expand_ns{0};
 std::atomic<std::uint64_t> g_ph_ctor_ns{0};
+std::atomic<std::uint64_t> g_ph_get_ns{0};     // taking a result (converting its record)
+std::atomic<std::uint64_t> g_ph_finish_ns{0};  // finish(): the summary and the kept subtree
+std::atomic<std::uint64_t> g_ph_free_ns{0};    // destroying a finished search
 inline bool mcts_phases_on()
 {
     static const bool on = (std::getenv("CHESSRL_MCTS_PHASES") != nullptr);
@@ -199,7 +205,7 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
     single::SmallBatchConfig cfg;
     if (options.small_engine_path.empty())
     {
-        cfg.engine_path = "model.trt";
+        cfg.engine_path = "model.cnet";
     }
     else
     {
@@ -211,6 +217,17 @@ single::SmallBatchConfig make_small_batch_config(const MctsOptions& options)
 }
 
 } // namespace
+
+// A search's RNG seed when the caller gives none: from a per-thread generator, seeded once per thread
+// (std::random_device per search was a system call each, 19k searches a second in self-play).
+inline std::uint32_t thread_seed()
+{
+    thread_local std::mt19937 seeder{std::random_device{}()};
+    return static_cast<std::uint32_t>(seeder());
+}
+
+// Tree nodes reserved per simulation: an expansion adds its legal moves as children.
+constexpr size_t kNodesPerSimulation = 32;
 
 class SmallMctsRunner
 {
@@ -225,13 +242,26 @@ public:
               shared_runner ? std::move(shared_runner)
                             : std::make_shared<single::SmallBatchRunner>(small_batch_config_))
         , cache_(std::move(cache))
-        , rng_(std::random_device{}())
+        , rng_(options_.seed != 0 ? static_cast<std::uint32_t>(options_.seed ^ (options_.seed >> 32))
+                                  : thread_seed())
     {
         const bool ph = mcts_phases_on();
         const std::uint64_t t_ctor = ph ? now_ns() : 0;
         // Phase B: Store root board for state reconstruction during traversal
         root_board_ = apply_history(options_.request);
-        tree_.add_root(root_board_, options_.request.history);
+        // Tree reuse (MctsOptions::reuse_tree): continue the kept subtree when it is rooted at
+        // this position; otherwise start a fresh tree.
+        auto& reuse = options_.reuse_tree;
+        if (reuse && options_.simulations > 0 && reuse->root_hash == root_board_.zobrist()
+            && !reuse->nodes.empty() && reuse->nodes.front().expanded)
+        {
+            tree_ = std::move(*reuse);
+        }
+        else
+        {
+            tree_.add_root(root_board_);
+        }
+        reuse.reset();
         // AlphaZero-style 8-board history stack (per-simulation seed). When
         // the caller supplies it (self-play tracks the rolling snapshots) we
         // use it directly. Otherwise — non-self-play callers (brawl /
@@ -246,125 +276,100 @@ public:
             root_history_stack_ = build_root_history_stack(
                 options_.request.fen, options_.request.history, root_board_);
         }
-        const size_t expected_nodes = 1 + static_cast<size_t>(options_.simulations) * 2;
-        tree_.reserve(expected_nodes);
+        // Every expansion adds a node per legal move (about 30 in the middlegame): reserve for the whole search
+        // at once, on top of a reused subtree (kept at its exact size), so the node array is allocated once rather
+        // than grown and copied several times (large arrays come from fresh, zeroed pages).
+        tree_.reserve(tree_.nodes.size() + 1 + static_cast<size_t>(std::max(0, options_.simulations)) * kNodesPerSimulation);
         path_buffer_.reserve(64);
         if (ph) g_ph_ctor_ns.fetch_add(now_ns() - t_ctor, std::memory_order_relaxed);
     }
 
     MctsSummary run()
     {
-        // The root is evaluated synchronously (single-leaf inference call)
-        // because every subsequent descent depends on its expansion.
-        evaluate_node(0, root_board_, root_history_stack_);
-
-        const int width = std::max(1, options_.virtual_loss_width);
-        const int total_sims = options_.simulations;
-
-        std::vector<DescentState> pending;
-        pending.reserve(static_cast<size_t>(width));
-        std::vector<single::BatchTicket<SmallPolicyValue>> tickets;
-        tickets.reserve(static_cast<size_t>(width));
-        std::vector<SmallPolicyValue> cached_evals;
-        cached_evals.reserve(static_cast<size_t>(width));
-        std::vector<bool> have_cached;
-        have_cached.reserve(static_cast<size_t>(width));
-
-        int sims_done = 0;
-        while (sims_done < total_sims)
+        start();
+        while (advance())
         {
-            const int round_width = std::min(width, total_sims - sims_done);
+        }
+        return finish();
+    }
 
-            pending.clear();
-            tickets.clear();
-            cached_evals.assign(static_cast<size_t>(round_width), SmallPolicyValue{});
-            have_cached.assign(static_cast<size_t>(round_width), false);
-
-            const bool ph = mcts_phases_on();
-
-            // ---- Phase 1: do `round_width` descents, applying vloss along the way. ----
-            const std::uint64_t t_p1 = ph ? now_ns() : 0;
-            for (int i = 0; i < round_width; ++i)
+    // run() in three parts, so that one thread can interleave several searches
+    // (run_small_mcts_batch_shared): start() issues the root's evaluation (a fresh root) or the
+    // first round of descents (a reused root); each advance() takes back what is in flight,
+    // waiting for it if needed, applies it and issues the next round, and returns false once
+    // every simulation has run; finish() builds the summary. A search does the same work in the
+    // same order either way.
+    void start()
+    {
+        // A reused root is already expanded and its moves already have visits: run only the
+        // missing simulations, after mixing fresh root noise into its priors. A fresh root is
+        // evaluated first, on its own, because every descent depends on its expansion.
+        reused_visits_ = 0;
+        const TreeNode& root = tree_.nodes.front();
+        if (root.expanded && root.num_children > 0)
+        {
+            for (int child = root.first_child; child < root.first_child + root.num_children; ++child)
             {
-                DescentState d = descend();
-                apply_virtual_loss(d.path);
-
-                if (d.is_terminal)
-                {
-                    // Revert vloss before backup so terminal hits don't double-count.
-                    revert_virtual_loss(d.path);
-                    detail::backpropagate_full(
-                        tree_, d.path, d.terminal_value, d.terminal_wdl, /*leaf_plies=*/0.0F);
-                    ++sims_done;
-                    continue;
-                }
-
-                pending.push_back(std::move(d));
+                reused_visits_ += tree_.nodes[static_cast<size_t>(child)].visit_count;
             }
-            if (ph) g_ph_descent_ns.fetch_add(now_ns() - t_p1, std::memory_order_relaxed);
-
-            // ---- Phase 2: enqueue eval requests for non-terminal leaves. ----
-            // Cache lookups happen synchronously; misses go onto the GPU queue.
-            const std::uint64_t t_p2 = ph ? now_ns() : 0;
-            for (size_t i = 0; i < pending.size(); ++i)
+            if (options_.use_dirichlet)
             {
-                const auto& d = pending[i];
-                if (cache_)
-                {
-                    const uint64_t hash = compute_cache_key(d.leaf_board.zobrist(), d.leaf_history);
-                    if (auto cached = cache_->get(hash))
-                    {
-                        cached_evals[i] = *cached;
-                        have_cached[i] = true;
-                        continue;
-                    }
-                }
-                tickets.push_back(small_batch_runner_->enqueue(
-                    acquire_small_encoding(d.leaf_history, d.leaf_board)));
-            }
-            if (ph) g_ph_enqueue_ns.fetch_add(now_ns() - t_p2, std::memory_order_relaxed);
-
-            // ---- Phase 3: collect evals, expand leaves, revert vloss, backup. ----
-            size_t ticket_idx = 0;
-            for (size_t i = 0; i < pending.size(); ++i)
-            {
-                DescentState& d = pending[i];
-                SmallPolicyValue eval;
-                if (have_cached[i])
-                {
-                    eval = std::move(cached_evals[i]);
-                }
-                else
-                {
-                    const std::uint64_t t_w = ph ? now_ns() : 0;
-                    eval = tickets[ticket_idx++].get();
-                    if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
-                    if (cache_)
-                    {
-                        const uint64_t hash = compute_cache_key(
-                            d.leaf_board.zobrist(), d.leaf_history);
-                        cache_->put(hash, eval);
-                    }
-                }
-
-                const std::uint64_t t_e = ph ? now_ns() : 0;
-                revert_virtual_loss(d.path);
-
-                // If another descent in this same batch already expanded the
-                // leaf, expand_node() is a no-op. We still want to backup with
-                // the leaf's value so this descent counts as one visit.
-                expand_node(d.leaf_node_index, d.leaf_board, eval);
-                const TreeNode& expanded = tree_.nodes[d.leaf_node_index];
-                detail::backpropagate_full(
-                    tree_, d.path, expanded.value_prior, expanded.wdl, expanded.leaf_plies);
-                ++sims_done;
-                if (ph) g_ph_expand_ns.fetch_add(now_ns() - t_e, std::memory_order_relaxed);
+                noise_reused_root();
             }
         }
+        else
+        {
+            issue_root_evaluation();
+        }
 
+        width_ = std::max(1, options_.virtual_loss_width);
+        total_sims_ = std::max(0, options_.simulations - reused_visits_);
+        sims_done_ = 0;
+        positions_.reserve(static_cast<size_t>(width_));
+        tickets_.reserve(static_cast<size_t>(width_));
+        cached_evals_.reserve(static_cast<size_t>(width_));
+        have_cached_.reserve(static_cast<size_t>(width_));
+        if (!root_in_flight_ && sims_done_ < total_sims_)
+        {
+            issue_round();
+        }
+    }
+
+    // advance() would not wait: what is in flight is back (or nothing is).
+    bool ready()
+    {
+        return evals_.ready();
+    }
+
+    bool advance()
+    {
+        if (root_in_flight_)
+        {
+            complete_root_evaluation();
+        }
+        else if (round_in_flight_)
+        {
+            complete_round();
+        }
+        if (sims_done_ < total_sims_)
+        {
+            issue_round();
+            return true;
+        }
+        return false;
+    }
+
+    MctsSummary finish()
+    {
         refine_wdl_recursive();
 
         MctsSummary summary = summarize();
+        summary.new_simulations = total_sims_;
+        summary.reused_visits = reused_visits_;
+        if (options_.keep_tree)
+        {
+            keep_played_subtree(summary);
+        }
 
         if (small_batch_config_.enable_telemetry)
         {
@@ -396,10 +401,17 @@ private:
     // does NOT mutate) virtual_loss along the path, so siblings already
     // chosen by an in-flight descent are deprioritized. The caller is
     // responsible for apply_virtual_loss / revert_virtual_loss.
-    DescentState descend()
+    // Into `d`, a slot of pending_ reused round after round: its board keeps the history capacity it has (a
+    // default-constructed chess::Board reserves 256 states and parses the start position's FEN) and its path
+    // vector its capacity.
+    void descend(DescentState& d)
     {
-        DescentState d;
+        d.path.clear();
         d.path.push_back(0);
+        d.leaf_node_index = -1;
+        d.is_terminal = false;
+        d.terminal_value = 0.0F;
+        d.terminal_wdl = {0.0F, 0.0F, 0.0F};
         d.leaf_board = root_board_;
         d.leaf_history = root_history_stack_;
         int node_index = 0;
@@ -415,14 +427,31 @@ private:
                 d.terminal_value = value;
                 d.terminal_wdl = wdl_from_terminal(value);
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
-            if (!node.expanded || node.children.empty())
+            if (!node.expanded || node.num_children == 0)
             {
+                // First visit: only now check whether the game is over here (expansion
+                // does not, for children that are mostly never visited). A finished game
+                // is marked as add_child used to mark it, so later visits take the branch
+                // above.
+                if (!node.expanded)
+                {
+                    if (auto terminal = terminal_value(d.leaf_board))
+                    {
+                        node.terminal = true;
+                        node.wdl = wdl_from_terminal(*terminal);
+                        d.is_terminal = true;
+                        d.terminal_value = *terminal;
+                        d.terminal_wdl = node.wdl;
+                        d.leaf_node_index = node_index;
+                        return;
+                    }
+                }
                 d.is_terminal = false;
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
             const int child_index = select_child(node_index);
@@ -430,7 +459,7 @@ private:
             {
                 d.is_terminal = false;
                 d.leaf_node_index = node_index;
-                return d;
+                return;
             }
 
             d.leaf_board.makeMove(tree_.nodes[child_index].move_from_parent);
@@ -462,7 +491,7 @@ private:
     int select_child(int node_index) const
     {
         const TreeNode& node = tree_.nodes[node_index];
-        if (node.children.empty())
+        if (node.num_children == 0)
         {
             return -1;
         }
@@ -484,13 +513,11 @@ private:
         //   MLH (prefer faster). When losing/drawing, modifier rewards high
         //   MLH (prefer slower / drag it out).
         constexpr float kMlhEpsilon = 0.05F;
-        constexpr float kPliesScale = 1.0F / 25.0F;
 
-        for (size_t i = 0; i < node.children.size(); ++i)
+        for (int child_index = node.first_child; child_index < node.first_child + node.num_children; ++child_index)
         {
-            const int child_index = node.children[i];
             const TreeNode& child = tree_.nodes[child_index];
-            const float prior = node.child_priors[i];
+            const float prior = child.prior;
             // Virtual loss: each in-flight visit on this child counts as a
             // "phantom win for the child" (= phantom loss for the parent).
             // Increases the effective visit count denominator AND shifts
@@ -510,11 +537,10 @@ private:
             float mlh_modifier = 0.0F;
             if (child.visit_count > 0)
             {
-                // child.wdl is in child's perspective; flip to parent's POV.
+                // child.wdl is in child's perspective; flip to parent's POV. tanh(plies_avg / 25) is kept by the
+                // backup (TreeNode::mlh_tanh).
                 const float w_parent_pov = child.wdl[2];
-                const float inv_n = 1.0F / static_cast<float>(child.visit_count);
-                const float plies_avg = child.plies_sum * inv_n;
-                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * std::tanh(plies_avg * kPliesScale);
+                mlh_modifier = (1.0F - 2.0F * w_parent_pov) * child.mlh_tanh;
             }
 
             const float score = q + u + kMlhEpsilon * mlh_modifier;
@@ -528,55 +554,154 @@ private:
         return best_child;
     }
 
-    // Synchronous evaluate-and-expand. Used for the root only; batched
-    // descents call expand_node() directly with a pre-computed eval.
-    float evaluate_node(
-        int node_index,
-        const chess::Board& board_state,
-        const HistoryStack& history)
+    // ---- Phases 1 and 2 of a round: `round_width` descents (virtual loss applied along each,
+    // finished games backed up at once), then the leaves' evaluations queued, all at once. ----
+    void issue_round()
     {
-        TreeNode& node = tree_.nodes[node_index];
-        if (node.expanded && !node.children.empty())
-        {
-            return node.value_prior;
-        }
+        const int round_width = std::min(width_, total_sims_ - sims_done_);
 
-        if (auto terminal = terminal_value(board_state))
+        n_pending_ = 0;  // pending_ keeps its slots (and their boards) from round to round
+        tickets_.clear();
+        cached_evals_.assign(static_cast<size_t>(round_width), SmallPolicyValue{});
+        have_cached_.assign(static_cast<size_t>(round_width), false);
+
+        const bool ph = mcts_phases_on();
+
+        const std::uint64_t t_p1 = ph ? now_ns() : 0;
+        for (int i = 0; i < round_width; ++i)
+        {
+            if (pending_.size() <= n_pending_) pending_.emplace_back();
+            DescentState& d = pending_[n_pending_];
+            descend(d);
+            apply_virtual_loss(d.path);
+
+            if (d.is_terminal)
+            {
+                // Revert vloss before backup so terminal hits don't double-count.
+                revert_virtual_loss(d.path);
+                detail::backpropagate_full(
+                    tree_, d.path, d.terminal_value, d.terminal_wdl, /*leaf_plies=*/0.0F);
+                ++sims_done_;
+                continue;
+            }
+
+            ++n_pending_;  // a terminal descent's slot is reused by the next one
+        }
+        if (ph) g_ph_descent_ns.fetch_add(now_ns() - t_p1, std::memory_order_relaxed);
+
+        // Cache lookups happen synchronously; misses go onto the GPU queue.
+        const std::uint64_t t_p2 = ph ? now_ns() : 0;
+        for (size_t i = 0; i < n_pending_; ++i)
+        {
+            const auto& d = pending_[i];
+            if (cache_)
+            {
+                const uint64_t hash = compute_cache_key(d.leaf_board.zobrist(), d.leaf_history);
+                if (auto cached = cache_->get(hash))
+                {
+                    cached_evals_[i] = *cached;
+                    have_cached_[i] = true;
+                    continue;
+                }
+            }
+            positions_.push_back(acquire_small_encoding(d.leaf_history, d.leaf_board));
+        }
+        small_batch_runner_->enqueue(positions_, evals_, tickets_);
+        if (ph) g_ph_enqueue_ns.fetch_add(now_ns() - t_p2, std::memory_order_relaxed);
+        round_in_flight_ = true;
+    }
+
+    // ---- Phase 3: collect the round's evaluations, expand the leaves, revert vloss, backup. ----
+    void complete_round()
+    {
+        const bool ph = mcts_phases_on();
+        if (!tickets_.empty())
+        {
+            const std::uint64_t t_w = ph ? now_ns() : 0;
+            evals_.wait();  // one wake-up when all this round's evaluations are back
+            if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
+        }
+        size_t ticket_idx = 0;
+        for (size_t i = 0; i < n_pending_; ++i)
+        {
+            DescentState& d = pending_[i];
+            SmallPolicyValue eval;
+            if (have_cached_[i])
+            {
+                eval = std::move(cached_evals_[i]);
+            }
+            else
+            {
+                const std::uint64_t t_g = ph ? now_ns() : 0;
+                eval = tickets_[ticket_idx++].get();
+                if (ph) g_ph_get_ns.fetch_add(now_ns() - t_g, std::memory_order_relaxed);
+                if (cache_)
+                {
+                    const uint64_t hash = compute_cache_key(
+                        d.leaf_board.zobrist(), d.leaf_history);
+                    cache_->put(hash, eval.owned());
+                }
+            }
+
+            const std::uint64_t t_e = ph ? now_ns() : 0;
+            revert_virtual_loss(d.path);
+
+            // If another descent in this same batch already expanded the
+            // leaf, expand_node() is a no-op. We still want to backup with
+            // the leaf's value so this descent counts as one visit.
+            expand_node(d.leaf_node_index, d.leaf_board, eval);
+            const TreeNode& expanded = tree_.nodes[d.leaf_node_index];
+            detail::backpropagate_full(
+                tree_, d.path, expanded.value_prior, expanded.wdl, expanded.leaf_plies);
+            ++sims_done_;
+            if (ph) g_ph_expand_ns.fetch_add(now_ns() - t_e, std::memory_order_relaxed);
+        }
+        tickets_.clear();  // releases the records in the output buffers
+        round_in_flight_ = false;
+    }
+
+    // The fresh root's evaluation, without waiting for the network: a finished game or a cached
+    // position is expanded at once, otherwise the position is queued and
+    // complete_root_evaluation() expands it.
+    void issue_root_evaluation()
+    {
+        TreeNode& node = tree_.nodes[0];
+        if (auto terminal = terminal_value(root_board_))
         {
             node.expanded = true;
             node.terminal = true;
             node.value_prior = *terminal;
             node.wdl = wdl_from_terminal(*terminal);
             node.leaf_plies = 0.0F;
-            return node.value_prior;
+            return;
         }
-
-        SmallPolicyValue eval;
-        bool cache_hit = false;
-        const uint64_t hash = compute_cache_key(board_state.zobrist(), history);
-
         if (cache_)
         {
-            if (auto cached = cache_->get(hash))
+            if (auto cached = cache_->get(compute_cache_key(root_board_.zobrist(), root_history_stack_)))
             {
-                eval = *cached;
-                cache_hit = true;
+                expand_node(0, root_board_, *cached);
+                return;
             }
         }
+        root_ticket_ = small_batch_runner_->enqueue(
+            acquire_small_encoding(root_history_stack_, root_board_), evals_);
+        root_in_flight_ = true;
+    }
 
-        if (!cache_hit)
+    void complete_root_evaluation()
+    {
+        const bool ph = mcts_phases_on();
+        const std::uint64_t t_w = ph ? now_ns() : 0;
+        evals_.wait();
+        if (ph) g_ph_wait_ns.fetch_add(now_ns() - t_w, std::memory_order_relaxed);
+        SmallPolicyValue eval = root_ticket_.get();
+        if (cache_)
         {
-            auto ticket = small_batch_runner_->enqueue(
-                acquire_small_encoding(history, board_state));
-            eval = ticket.get();
-            if (cache_)
-            {
-                cache_->put(hash, eval);
-            }
+            cache_->put(compute_cache_key(root_board_.zobrist(), root_history_stack_), eval.owned());
         }
-
-        expand_node(node_index, board_state, eval);
-        return tree_.nodes[node_index].value_prior;
+        expand_node(0, root_board_, eval);
+        root_ticket_ = {};  // releases the record
+        root_in_flight_ = false;
     }
 
     // Pure expansion: write the eval into the node, generate priors, attach
@@ -589,7 +714,7 @@ private:
         const SmallPolicyValue& eval)
     {
         TreeNode& node = tree_.nodes[node_index];
-        if (node.expanded && !node.children.empty())
+        if (node.expanded && node.num_children > 0)
         {
             return;
         }
@@ -598,22 +723,10 @@ private:
             return;
         }
 
-        // Terminal-position detection on the eval path. The batched descent
-        // does NOT recheck terminal_value() on every node (it relies on
-        // node.terminal having been set during a prior expansion), so the
-        // first time we visit a checkmated/stalemated position we'll arrive
-        // here with the position still flagged as a regular leaf.
-        if (auto terminal = terminal_value(board_state))
-        {
-            node.expanded = true;
-            node.terminal = true;
-            node.value_prior = *terminal;
-            node.wdl = wdl_from_terminal(*terminal);
-            node.leaf_plies = 0.0F;
-            return;
-        }
+        // No finished-game check here: descend() makes it when it reaches a leaf, and
+        // issue_root_evaluation() before expanding the root.
 
-        if (eval.policy_logits.size() != chessrl::small_policy_size())
+        if (eval.policy_size() != chessrl::small_policy_size())
         {
             throw std::runtime_error("Small inference returned unexpected policy size.");
         }
@@ -622,7 +735,8 @@ private:
         node.value_prior = node.wdl[0] - node.wdl[2];
         node.leaf_plies = std::max(0.0F, eval.mlh_q * 25.0F);
 
-        std::vector<MovePrior> priors = compute_priors(board_state, eval);
+        thread_local std::vector<MovePrior> priors;  // capacity kept across expansions
+        compute_priors(board_state, eval, priors);
         if (priors.empty())
         {
             node.terminal = true;
@@ -637,21 +751,21 @@ private:
 
         for (const auto& entry : priors)
         {
-            chess::Board child_board = board_state;
-            child_board.makeMove(entry.move);
-            tree_.add_child(node_index, entry.move, entry.prior, child_board);
+            tree_.add_child(node_index, entry.move, entry.prior);
         }
 
         tree_.nodes[node_index].expanded = true;
     }
 
 
-    std::vector<MovePrior> compute_priors(const chess::Board& board, const SmallPolicyValue& eval) const
+    // Into `entries` (cleared; its capacity is kept: expand_node passes a per-thread scratch vector).
+    void compute_priors(const chess::Board& board, const SmallPolicyValue& eval,
+                        std::vector<MovePrior>& entries) const
     {
         chess::Movelist legal_moves;
         chess::movegen::legalmoves(legal_moves, board);
 
-        std::vector<MovePrior> entries;
+        entries.clear();
         entries.reserve(legal_moves.size());
 
         float max_logit = -std::numeric_limits<float>::infinity();
@@ -659,6 +773,7 @@ private:
         int mapped_count = 0;
 
         const bool use_fast_lut = !board.chess960();
+        const bool mirror = board.sideToMove() == chess::Color::BLACK;
         for (const auto& move : legal_moves)
         {
             MovePrior entry;
@@ -673,19 +788,19 @@ private:
             int policy_index = -1;
             if (use_fast_lut && move.typeOf() != chess::Move::CASTLING)
             {
-                policy_index = vocab_index_for_move_fast(move);
+                policy_index = vocab_index_for_move_fast(move, mirror);
             }
             if (policy_index < 0)
             {
                 const std::string key = move_to_vocab_key(board, move);
-                auto it = vocab_index_.find(key);
+                auto it = vocab_index_.find(mirror ? mirror_uci(key) : key);
                 if (it != vocab_index_.end()) policy_index = it->second;
             }
             if (policy_index >= 0)
             {
                 entry.policy_index = policy_index;
-                if (entry.policy_index < static_cast<int>(eval.policy_logits.size())) {
-                    entry.logit = eval.policy_logits[static_cast<size_t>(entry.policy_index)];
+                if (entry.policy_index < static_cast<int>(eval.policy_size())) {
+                    entry.logit = eval.logit(static_cast<size_t>(entry.policy_index));
                     if (!has_logit || entry.logit > max_logit)
                     {
                         max_logit = entry.logit;
@@ -704,7 +819,7 @@ private:
 
         if (entries.empty())
         {
-            return entries;
+            return;
         }
 
         if (mapped_count == 0)
@@ -714,7 +829,7 @@ private:
             {
                 entry.prior = uniform;
             }
-            return entries;
+            return;
         }
 
         if (options_.temperature <= 1e-5F)
@@ -727,7 +842,7 @@ private:
                 const bool is_best = (entry.policy_index >= 0) && (&entry == &*best_it);
                 entry.prior = is_best ? 1.0F : 0.0F;
             }
-            return entries;
+            return;
         }
 
         const float inv_temp = 1.0F / options_.temperature;
@@ -759,7 +874,7 @@ private:
                     entry.prior = uniform;
                 }
             }
-            return entries;
+            return;
         }
 
         const float inv_sum = static_cast<float>(1.0 / sum);
@@ -771,7 +886,7 @@ private:
             }
         }
 
-        return entries;
+        return;
     }
 
     void apply_dirichlet_noise(std::vector<MovePrior>& priors)
@@ -802,6 +917,51 @@ private:
         }
     }
 
+    // A reused root was expanded by an earlier search as an inner node, without root noise:
+    // mix fresh noise into its moves' priors, as a newly expanded root gets.
+    void noise_reused_root()
+    {
+        const TreeNode& root = tree_.nodes.front();
+        std::vector<MovePrior> priors(static_cast<size_t>(root.num_children));
+        for (size_t i = 0; i < priors.size(); ++i)
+        {
+            priors[i].prior = tree_.nodes[static_cast<size_t>(root.first_child) + i].prior;
+        }
+        apply_dirichlet_noise(priors);
+        for (size_t i = 0; i < priors.size(); ++i)
+        {
+            tree_.nodes[static_cast<size_t>(root.first_child) + i].prior = priors[i].prior;
+        }
+    }
+
+    // MctsOptions::keep_tree: hand back the subtree under the move to play, as a tree of its
+    // own rooted at the position after that move. Nothing when that move was never searched.
+    void keep_played_subtree(MctsSummary& summary) const
+    {
+        if (summary.action.empty())
+        {
+            return;
+        }
+        const TreeNode& root = tree_.nodes.front();
+        const bool chess960 = root_board_.chess960();
+        for (int child = root.first_child; child < root.first_child + root.num_children; ++child)
+        {
+            const TreeNode& node = tree_.nodes[static_cast<size_t>(child)];
+            if (chess::uci::moveToUci(node.move_from_parent, chess960) != summary.action)
+            {
+                continue;
+            }
+            if (node.visit_count == 0 || !node.expanded || node.terminal || node.num_children == 0)
+            {
+                return;
+            }
+            chess::Board after = root_board_;
+            after.makeMove(node.move_from_parent);
+            summary.tree = std::make_shared<SearchTree>(extract_subtree(tree_, child, after.zobrist()));
+            return;
+        }
+    }
+
     void refine_wdl_recursive()
     {
         std::vector<bool> visited(tree_.nodes.size(), false);
@@ -813,7 +973,7 @@ private:
         const TreeNode& root = tree_.nodes.front();
 
         std::vector<std::pair<std::string, float>> distribution;
-        distribution.reserve(root.children.size());
+        distribution.reserve(static_cast<size_t>(root.num_children));
 
         struct Aggregated
         {
@@ -825,17 +985,16 @@ private:
         };
 
         std::vector<Aggregated> aggregated;
-        aggregated.reserve(root.children.size());
+        aggregated.reserve(static_cast<size_t>(root.num_children));
         std::unordered_map<std::string, size_t> index;
 
         int total_visits = 0;
         float total_priors = 0.0F;
 
-        for (size_t i = 0; i < root.children.size(); ++i)
+        for (int child_index = root.first_child; child_index < root.first_child + root.num_children; ++child_index)
         {
-            const int child_index = root.children[i];
             const TreeNode& child = tree_.nodes[child_index];
-            const chess::Move move = root.child_moves[i];
+            const chess::Move move = child.move_from_parent;
             // Phase B: Use root_board_ instead of root.board
             const std::string uci = chess::uci::moveToUci(move, root_board_.chess960());
 
@@ -847,7 +1006,7 @@ private:
 
             Aggregated& entry = aggregated[it->second];
             entry.visit_sum += child.visit_count;
-            entry.prior_sum += root.child_priors[i];
+            entry.prior_sum += child.prior;
             entry.value_sum += child.value_sum;
             if (entry.representative_child < 0 || child.visit_count > tree_.nodes[entry.representative_child].visit_count)
             {
@@ -855,7 +1014,7 @@ private:
             }
 
             total_visits += child.visit_count;
-            total_priors += root.child_priors[i];
+            total_priors += child.prior;
         }
 
         if (aggregated.empty())
@@ -1012,7 +1171,7 @@ private:
             }
             detail.prior = entry.prior_sum;
             detail.average_value = entry.visit_sum > 0 ? -entry.value_sum / static_cast<float>(entry.visit_sum) : 0.0F;
-            if (entry.representative_child >= 0)
+            if (entry.representative_child >= 0 && options_.principal_variations)
             {
                 // Phase B: Pass root_board_ to principal_variation
                 detail.continuation = principal_variation(tree_, entry.representative_child, root_board_);
@@ -1022,9 +1181,9 @@ private:
         return summary;
     }
 
-    // Produce the compact ~776 B packed snapshot for a leaf. The dense 111
-    // planes are materialized on the GPU (launch_expand_planes) just before
-    // the TRT enqueue — no per-leaf 28 KB float tensor on the host path.
+    // Produce the compact ~776 B packed snapshot for a leaf. The fused network
+    // expands it to the 111 input planes on the GPU — no per-leaf 28 KB float
+    // tensor on the host path.
     std::shared_ptr<const single::SmallPackedPosition> acquire_small_encoding(
         const HistoryStack& history,
         const chess::Board& board)
@@ -1073,6 +1232,21 @@ private:
     const std::unordered_map<std::string, int>& vocab_index_;
     single::SmallBatchConfig small_batch_config_;
     std::shared_ptr<single::SmallBatchRunner> small_batch_runner_;
+    single::EvalGroup evals_;  // this search's evaluations in flight
+    // The search between start(), advance() and finish().
+    int reused_visits_{0};
+    int total_sims_{0};
+    int sims_done_{0};
+    int width_{1};
+    bool root_in_flight_{false};
+    bool round_in_flight_{false};
+    single::SmallBatchRunner::Ticket root_ticket_;
+    std::vector<DescentState> pending_;  // reused slots; the round's descents are the first n_pending_
+    size_t n_pending_{0};
+    std::vector<single::SmallBatchRunner::Ticket> tickets_;
+    std::vector<std::shared_ptr<const single::SmallPackedPosition>> positions_;
+    std::vector<SmallPolicyValue> cached_evals_;
+    std::vector<bool> have_cached_;
     std::shared_ptr<TranspositionTable> cache_;
     std::mt19937 rng_;
     std::vector<int> path_buffer_;
@@ -1089,7 +1263,8 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     std::vector<MctsOptions> batch_options,
     std::shared_ptr<single::SmallBatchRunner> shared_runner,
     std::shared_ptr<TranspositionTable> cache,
-    int requested_threads)
+    int requested_threads,
+    int searches_per_thread)
 {
     if (batch_options.empty())
     {
@@ -1108,18 +1283,57 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
     std::vector<std::thread> workers;
     workers.reserve(num_threads);
 
-    // Worker routine: fetch jobs from the queue until all are processed
-    auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index]() {
-        while (true)
-        {
+    // Each thread keeps up to `searches_per_thread` searches going and advances them in the
+    // order their evaluations were queued: while it waits for the network on one, the others'
+    // rounds are in flight. With one search per thread, a thread slept and woke once per round
+    // (about 120k wake-ups a second for the recipe's 128 threads), and woken threads waited for a
+    // core. Each search does the same work in the same order either way.
+    const size_t per_thread = static_cast<size_t>(std::max(1, searches_per_thread));
+    auto worker_routine = [&batch_options, shared_runner, cache, &summaries, &next_job_index,
+                           per_thread]() {
+        std::vector<std::pair<size_t, std::unique_ptr<SmallMctsRunner>>> active;
+        auto take = [&]() {
             const size_t job_id = next_job_index.fetch_add(1);
             if (job_id >= batch_options.size())
             {
-                break;
+                return false;
             }
-            
-            SmallMctsRunner runner(batch_options[job_id], shared_runner, cache);
-            summaries[job_id] = runner.run();
+            active.emplace_back(job_id, std::make_unique<SmallMctsRunner>(batch_options[job_id], shared_runner, cache));
+            active.back().second->start();
+            return true;
+        };
+        while (active.size() < per_thread && take())
+        {
+        }
+        // `active` is in the order the searches' evaluations were queued. Advance the first whose
+        // evaluations are all back, and wait on the oldest only when none is; an advanced search
+        // has just queued its next round, so it moves to the back.
+        while (!active.empty())
+        {
+            size_t i = 0;
+            if (per_thread > 1)
+            {
+                while (i < active.size() && !active[i].second->ready()) ++i;
+                if (i == active.size()) i = 0;
+            }
+            auto& [job_id, runner] = active[i];
+            if (runner->advance())
+            {
+                std::rotate(active.begin() + static_cast<std::ptrdiff_t>(i),
+                            active.begin() + static_cast<std::ptrdiff_t>(i) + 1, active.end());
+                continue;
+            }
+            const bool ph = mcts_phases_on();
+            const std::uint64_t t_f = ph ? now_ns() : 0;
+            summaries[job_id] = runner->finish();
+            const std::uint64_t t_d = ph ? now_ns() : 0;
+            active.erase(active.begin() + static_cast<std::ptrdiff_t>(i));
+            if (ph)
+            {
+                g_ph_finish_ns.fetch_add(t_d - t_f, std::memory_order_relaxed);
+                g_ph_free_ns.fetch_add(now_ns() - t_d, std::memory_order_relaxed);
+            }
+            take();  // a new search goes last: its first evaluation is the newest
         }
     };
 
@@ -1138,6 +1352,30 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
         }
     }
 
+    report_mcts_phases(static_cast<int>(num_threads));
+
+    return summaries;
+}
+
+MctsSummary run_small_mcts_shared(
+    MctsOptions options,
+    std::shared_ptr<single::SmallBatchRunner> shared_runner,
+    std::shared_ptr<TranspositionTable> cache)
+{
+    SmallMctsRunner runner(std::move(options), std::move(shared_runner), std::move(cache));
+    runner.start();
+    while (runner.advance())
+    {
+    }
+    const bool ph = mcts_phases_on();
+    const std::uint64_t t_f = ph ? now_ns() : 0;
+    MctsSummary summary = runner.finish();
+    if (ph) g_ph_finish_ns.fetch_add(now_ns() - t_f, std::memory_order_relaxed);
+    return summary;
+}
+
+void report_mcts_phases(int threads)
+{
     if (mcts_phases_on())
     {
         // Sums are across all worker threads (wall ≈ sum / num_threads).
@@ -1152,10 +1390,11 @@ std::vector<MctsSummary> run_small_mcts_batch_shared(
                   << g_ph_wait_ns.exchange(0, std::memory_order_relaxed) / ms
                   << " expand+backup="
                   << g_ph_expand_ns.exchange(0, std::memory_order_relaxed) / ms
-                  << " (threads=" << num_threads << ")\n";
+                  << " get=" << g_ph_get_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " finish=" << g_ph_finish_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " free=" << g_ph_free_ns.exchange(0, std::memory_order_relaxed) / ms
+                  << " (threads=" << threads << ")\n";
     }
-
-    return summaries;
 }
 
 std::vector<MctsSummary> run_small_mcts_batch(std::vector<MctsOptions> batch_options)

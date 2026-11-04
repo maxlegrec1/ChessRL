@@ -111,7 +111,7 @@ TEST_CASE("MctsOptions defaults are pinned")
     CHECK(opts.dirichlet_alpha == doctest::Approx(0.3F));
     CHECK(opts.dirichlet_epsilon == doctest::Approx(0.25F));
     CHECK(!opts.use_dirichlet);
-    CHECK(opts.small_engine_path == "model.trt");
+    CHECK(opts.small_engine_path == "model.cnet");
 }
 
 // -----------------------------------------------------------------------------
@@ -151,7 +151,7 @@ TEST_CASE("SearchTree.add_root produces a single-node tree and an empty PV")
 {
     SearchTree tree;
     chess::Board board(std::string{chess::constants::STARTPOS});
-    const int root = tree.add_root(board, {});
+    const int root = tree.add_root(board);
     REQUIRE(root == 0);
     REQUIRE(tree.nodes.size() == 1);
     CHECK(tree.nodes[0].parent == -1);
@@ -166,13 +166,13 @@ TEST_CASE("SearchTree.add_child wires parent/child relationships")
 {
     SearchTree tree;
     chess::Board root_board(std::string{chess::constants::STARTPOS});
-    const int root = tree.add_root(root_board, {});
+    const int root = tree.add_root(root_board);
 
     chess::Board child_board = root_board;
     const chess::Move e2e4 = chess::uci::uciToMove(child_board, "e2e4");
     child_board.makeMove(e2e4);
 
-    const int child = tree.add_child(root, e2e4, /*prior=*/0.5F, child_board);
+    const int child = tree.add_child(root, e2e4, /*prior=*/0.5F);
     REQUIRE(child == 1);
     REQUIRE(tree.nodes.size() == 2);
     CHECK(tree.nodes[child].parent == root);
@@ -184,8 +184,8 @@ TEST_CASE("SearchTree.add_child rejects an out-of-range parent")
 {
     SearchTree tree;
     chess::Board board(std::string{chess::constants::STARTPOS});
-    tree.add_root(board, {});
-    CHECK_THROWS_AS(tree.add_child(99, chess::Move::NO_MOVE, 0.0F, board), std::out_of_range);
+    tree.add_root(board);
+    CHECK_THROWS_AS(tree.add_child(99, chess::Move::NO_MOVE, 0.0F), std::out_of_range);
 }
 
 // -----------------------------------------------------------------------------
@@ -327,17 +327,17 @@ TEST_CASE("detail::backpropagate flips the sign at every ply")
     // Build a 3-deep linear path: root -> child -> grandchild.
     mcts::SearchTree tree;
     chess::Board root_board{std::string{chess::constants::STARTPOS}};
-    const int root = tree.add_root(root_board, {});
+    const int root = tree.add_root(root_board);
 
     chess::Board after_e2e4 = root_board;
     chess::Move e2e4 = chess::uci::uciToMove(after_e2e4, "e2e4");
     after_e2e4.makeMove(e2e4);
-    const int child = tree.add_child(root, e2e4, /*prior=*/0.5F, after_e2e4);
+    const int child = tree.add_child(root, e2e4, /*prior=*/0.5F);
 
     chess::Board after_e7e5 = after_e2e4;
     chess::Move e7e5 = chess::uci::uciToMove(after_e7e5, "e7e5");
     after_e7e5.makeMove(e7e5);
-    const int grand = tree.add_child(child, e7e5, /*prior=*/0.5F, after_e7e5);
+    const int grand = tree.add_child(child, e7e5, /*prior=*/0.5F);
 
     mcts::detail::backpropagate(tree, {root, child, grand}, +0.4F);
 
@@ -360,17 +360,17 @@ TEST_CASE("detail::refine_wdl_node flips child WDL into parent and visit-weights
     // Expected root.wdl = (3*[1,0,0] + 1*[0,1,0]) / 4 = [0.75, 0.25, 0.0]
     mcts::SearchTree tree;
     chess::Board startpos{std::string{chess::constants::STARTPOS}};
-    const int root = tree.add_root(startpos, {});
+    const int root = tree.add_root(startpos);
 
     // Add a placeholder child by playing e2e4.
     chess::Board ba = startpos;
     chess::Move e2e4 = chess::uci::uciToMove(ba, "e2e4");
     ba.makeMove(e2e4);
-    const int a = tree.add_child(root, e2e4, 0.5F, ba);
+    const int a = tree.add_child(root, e2e4, 0.5F);
     chess::Board bb = startpos;
     chess::Move d2d4 = chess::uci::uciToMove(bb, "d2d4");
     bb.makeMove(d2d4);
-    const int b = tree.add_child(root, d2d4, 0.5F, bb);
+    const int b = tree.add_child(root, d2d4, 0.5F);
 
     // Manually set children to look like terminal leaves for the test.
     tree.nodes[a].terminal = true;
@@ -393,14 +393,14 @@ TEST_CASE("detail::refine_wdl_node leaves unvisited subtrees alone")
 {
     mcts::SearchTree tree;
     chess::Board startpos{std::string{chess::constants::STARTPOS}};
-    const int root = tree.add_root(startpos, {});
+    const int root = tree.add_root(startpos);
     tree.nodes[root].wdl = {0.4F, 0.3F, 0.3F};  // NN prior
 
     // Add a child but keep visit_count = 0 → root should NOT update from it.
     chess::Board ba = startpos;
     chess::Move e2e4 = chess::uci::uciToMove(ba, "e2e4");
     ba.makeMove(e2e4);
-    const int a = tree.add_child(root, e2e4, 0.5F, ba);
+    const int a = tree.add_child(root, e2e4, 0.5F);
     tree.nodes[a].wdl = {0.9F, 0.05F, 0.05F};
     tree.nodes[a].visit_count = 0;
 
@@ -410,6 +410,61 @@ TEST_CASE("detail::refine_wdl_node leaves unvisited subtrees alone")
     CHECK(refined[0] == doctest::Approx(0.4F));
     CHECK(refined[1] == doctest::Approx(0.3F));
     CHECK(refined[2] == doctest::Approx(0.3F));
+}
+
+TEST_CASE("extract_subtree re-roots a played move's subtree for the next search")
+{
+    mcts::SearchTree tree;
+    chess::Board startpos{std::string{chess::constants::STARTPOS}};
+    const int root = tree.add_root(startpos);
+    chess::Board after_e4 = startpos;
+    const chess::Move e2e4 = chess::uci::uciToMove(after_e4, "e2e4");
+    after_e4.makeMove(e2e4);
+    const int a = tree.add_child(root, e2e4, 0.6F);
+    chess::Board after_d4 = startpos;
+    const chess::Move d2d4 = chess::uci::uciToMove(after_d4, "d2d4");
+    after_d4.makeMove(d2d4);
+    tree.add_child(root, d2d4, 0.4F);
+    chess::Board after_e5 = after_e4;
+    const chess::Move e7e5 = chess::uci::uciToMove(after_e5, "e7e5");
+    after_e5.makeMove(e7e5);
+    const int c = tree.add_child(a, e7e5, 0.7F);
+    chess::Board after_c5 = after_e4;
+    const chess::Move c7c5 = chess::uci::uciToMove(after_c5, "c7c5");
+    after_c5.makeMove(c7c5);
+    const int d = tree.add_child(a, c7c5, 0.3F);
+
+    tree.nodes[a].expanded = true;
+    tree.nodes[a].visit_count = 3;
+    tree.nodes[a].wdl_sum = {1.5F, 0.9F, 0.6F};
+    tree.nodes[a].wdl = {0.9F, 0.05F, 0.05F};  // as refine_wdl_node leaves it
+    tree.nodes[a].virtual_loss = 2.0F;
+    tree.nodes[c].visit_count = 2;
+    tree.nodes[c].wdl_sum = {0.4F, 0.6F, 1.0F};
+    tree.nodes[c].value_sum = -0.3F;
+
+    const mcts::SearchTree sub = mcts::extract_subtree(tree, a, after_e4.zobrist());
+    REQUIRE(sub.nodes.size() == 3);
+    CHECK(sub.root_hash == after_e4.zobrist());
+    const auto& r = sub.nodes[0];
+    CHECK(r.parent == -1);
+    CHECK(r.move_from_parent == chess::Move::NO_MOVE);
+    CHECK(r.visit_count == 3);
+    CHECK(r.virtual_loss == 0.0F);
+    CHECK(r.wdl[0] == doctest::Approx(0.5F));  // wdl_sum / visits, not the refined value
+    REQUIRE(r.num_children == 2);
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child)].move_from_parent == e7e5);
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child) + 1].prior == doctest::Approx(0.3F));
+    const auto& sc = sub.nodes[static_cast<size_t>(r.first_child)];
+    CHECK(sc.parent == 0);
+    CHECK(sc.move_from_parent == e7e5);
+    CHECK(sc.visit_count == 2);
+    CHECK(sc.value_sum == doctest::Approx(-0.3F));
+    CHECK(sc.wdl[2] == doctest::Approx(0.5F));
+    CHECK(sub.nodes[static_cast<size_t>(r.first_child) + 1].move_from_parent == c7c5);
+    (void)d;
+
+    CHECK(mcts::extract_subtree(tree, 99, 0).nodes.empty());  // out of range: empty tree
 }
 
 // -----------------------------------------------------------------------------

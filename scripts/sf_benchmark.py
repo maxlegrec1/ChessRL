@@ -6,7 +6,7 @@ defaults): Stockfish 16 with UCI_LimitStrength + UCI_Elo, 100 ms per move; the n
 initial position, alternating colours. The implied Elo is the Stockfish level plus the Elo
 difference for the score, as in the first post.
 
-  uv run python scripts/sf_benchmark.py --engines a.trt b.trt --elo 1400 2000 --games 100 --out bench.jsonl
+  uv run python scripts/sf_benchmark.py --engines a.cnet b.cnet --elo 1400 2000 --games 100 --out bench.jsonl
 """
 
 from __future__ import annotations

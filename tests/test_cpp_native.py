@@ -45,7 +45,7 @@ def cpp_test_binary() -> Path:
         )
         if result.returncode != 0:
             pytest.skip(
-                f"cpp test build failed (likely missing TensorRT/CUDA): "
+                f"cpp test build failed (needs g++ and the chess-library submodule): "
                 f"{result.stderr.strip().splitlines()[-1] if result.stderr else 'unknown'}"
             )
     return TEST_BIN

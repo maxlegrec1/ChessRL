@@ -16,17 +16,15 @@ a path inside the run directory. [`ARCHITECTURE.md`](ARCHITECTURE.md) explains t
   list only what changes.
 - The launcher writes the merged YAML to `<run>/config.yaml` after rewriting the paths
   (`data.dataset_path`, `checkpoint.dir`, `checkpoint.engine_dir`, `checkpoint.iteration_file`,
-  `selfplay.pgn_dir`, `wandb.dir`) and, on resume, setting `resume_path` and keeping any earlier
-  `wandb.resume_id`. Self-play and the trainer both read that snapshot. It holds the keys the YAML
+  `selfplay.pgn_dir`) and, on resume, setting `resume_path`. Self-play and the trainer both read
+  that snapshot. It holds the keys the YAML
   sets and the rewritten paths, without `extends:` and without the dataclass defaults.
 - `load_config` starts from the dataclass defaults and overlays the YAML. **Unknown keys are
   ignored without a warning**, so a misspelt key silently keeps the default.
 - **The dataclass defaults are not the recipe.** Optional features default to off, and several
-  basic values differ (`batch_size` 256, `learning_rate` 1e-5, `optimizer: adam`,
-  `selfplay.simulations` 800, `selfplay.max_buffer_size` 10,000,000, among others). A config
+  basic values differ (`batch_size` 256, `learning_rate` 1e-5, `selfplay.simulations` 800, `selfplay.max_buffer_size` 10,000,000, among others). A config
   should set every value it relies on. The recipe does; the keys it leaves out are optional
-  features that stay off (growth, the cosine schedule, resign calibration, `torch.compile`) and
-  logging details. Since snapshots store only the YAML's keys, changing a default in `config.py`
+  features that stay off (growth, resign calibration, the value ramps) and logging details. Since snapshots store only the YAML's keys, changing a default in `config.py`
   also changes it for resumed runs whose YAML omits that key.
 - `python -m src.self_play --config <yaml>` and `python -m src.train --config <yaml>` also run on
   their own (default `src/train/config.yaml`). Their paths are then used as written.
@@ -46,24 +44,30 @@ Launcher flags (`python -m src.run`):
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `device` | `cuda` | `cuda` | Torch device for training. Self-play always runs on the GPU through TensorRT. |
+| `device` | `cuda` | `cuda` | Torch device for training. Self-play always runs on the GPU (the fused CUDA network). |
 | `batch_size` | 2048 | 256 | Records per training step. |
 | `learning_rate` | 0.001 | 1e-5 | Peak learning rate; `lr_schedule` and growth re-warmup scale it. |
-| `optimizer` | `adamw` | `adam` | `adamw`: `torch.optim.AdamW`, decoupled weight decay. `adam`: `torch.optim.Adam`, where `weight_decay` becomes an L2 term in the gradient. |
-| `weight_decay` | 0.05 | 0.0 | Applied only to parameters with two or more dimensions (weight matrices, embeddings, the attention pair bias); norm gains, biases and scalar gains are exempt. Decoupled only with `optimizer: adamw`. The recipe uses it to keep the encoder's activations inside FP16 range for TensorRT. |
+| `optimizer` | `adamw` | `adamw` | `adamw`: `torch.optim.AdamW`, decoupled weight decay. `muon` (`src/train/muon.py`, encoder only): Muon on the layers' weight matrices (q, k, v and the feed-forward's gate and up halves orthogonalised separately), AdamW with `learning_rate`, the betas and `weight_decay` on every other parameter; the schedule scales both learning rates alike. |
+| `muon_lr` | *unset* | 0.006 | Muon's learning rate (the chess speedrun's value). |
+| `muon_momentum` | *unset* | 0.95 | Muon's momentum (Nesterov). |
+| `muon_weight_decay` | *unset* | 0.01 | Muon's decoupled weight decay (the speedrun's value). |
+| `weight_decay` | 0.05 | 0.0 | Applied only to parameters with two or more dimensions (weight matrices, embeddings, the attention pair bias); norm gains, biases and scalar gains are exempt. The recipe uses it to keep the encoder's activations inside FP16 range. |
 | `beta1`, `beta2` | 0.9, 0.999 | 0.9, 0.999 | Adam betas. |
 | `grad_clip` | 1.0 | 0.0 | Maximum global gradient norm, applied after unscaling the FP16 loss scale. 0 = off. |
 | `amp_dtype` | `float16` | `float16` | Autocast dtype: `float16` (also `fp16`, `half`) with a gradient scaler, or `bfloat16` (`bf16`) without one. Unknown values fall back to float16. |
-| `log_every` | 5 | 50 | Steps between rows of `metrics/train.jsonl` (and W&B). The console prints every 10 rows. |
+| `log_every` | 5 | 50 | Steps between rows of `metrics/train.jsonl`. The console prints every 10 rows. |
 | `policy_target` | `visits` | `played` | `visits`: cross-entropy to the record's visit distribution. `played`: cross-entropy to the move played. Both losses are logged either way. The default `loss_weights.policy` (0.1) is the one for `played`; the recipe pairs `visits` with 1.0. |
-| `search_heads` | `outcome` | `search` | Which heads the engine gives MCTS. `outcome`: value and mlh, trained on game results. `search`: value_q and mlh_q, trained on the search's own estimates. `q_value` (value_q with mlh) and `blend` (the average of both WDLs, with mlh) are value-only variants. Applied at export from the config saved in each checkpoint, so a change affects engines built from later checkpoints; `src.export.to_onnx --search_heads` overrides it. |
-| `mirror_prob` | 0.5 | 0.5 | Probability that a sampled record is colour-flipped (ranks mirrored, colours swapped, moves remapped). The only augmentation. |
-| `compile` | *unset* | false | Wrap the model in `torch.compile` for training. |
+| `search_heads` | `outcome` | `search` | Which heads the engine gives MCTS. `outcome`: value and mlh, trained on game results. `search`: value_q and mlh_q, trained on the search's own estimates. `q_value` (value_q with mlh) and `blend` (both WDLs mixed with weight `search_q_weight` on value_q, with mlh) are value-only variants. Applied at export from the config saved in each checkpoint, so a change affects networks exported from later checkpoints; `src.export.to_cnet --search_heads` overrides it. |
+| `search_q_weight` | *unset* | 0.5 | `search_heads: blend`: value_q's weight in the WDL the search reads (the network file's `wdl_w`), the rest on value. 0 reads only the outcome-trained head, 1 only the search-trained one. |
+| `search_q_ramp` | *unset* | off | Moves `search_q_weight` over trainer steps: `{start, end, start_step, end_step}`, `start` up to `start_step`, linear to `end` at `end_step`, `end` after. Each network is exported with the weight at its own step, so self-play, the ladder and the analysis board read the same blend. Off while `end_step` is 0. |
+| `compile` | true | false | Wrap the model in `torch.compile` for training: the step takes 34 ms instead of 102 on an RTX 4090 (batch 2,048, the 128 x 4 encoder); the first step compiles, about a minute, and growing the network compiles again. |
+| `fp16_accumulation` | true | false | FP16 accumulators in the trainer's FP16 matrix multiplies (`torch.backends.cuda.matmul.allow_fp16_accumulation`), as in the self-play kernel: twice the tensor-core rate on GeForce cards. Neutral at the 128 x 4 encoder's size (the multiplies are bound by memory). The weight gradients, summed over the whole batch, keep FP32 accumulators. |
+| `fp16_residual` | true | false | The encoder's residual stream in FP16 during training (under CUDA autocast), its gradient too: half the bytes the fused kernels move through it. Its rounding adds about a quarter to the FP16 noise the step already has. The self-play kernel keeps the stream in FP32. false: FP32. |
+| `mps` | true | false | `src.run` starts an NVIDIA MPS daemon for the run when it launches both processes, so self-play's and the trainer's kernels share the GPU instead of taking turns, at the same priority (`data.target_k` paces the trainer; below self-play's priority it starved whenever the searches saturated the GPU). If the daemon or a test client fails, the run goes on without MPS. Self-play alone or the trainer alone never uses it. |
 | `async_engine_build` | true | false | Build engines in a background process while training continues. A checkpoint saved while the previous build still runs gets no engine (`build_skipped` event). false: the trainer waits for each build. |
 | `metrics_path` | *unset* | null | Trainer metrics file. null: `<run>/metrics/train.jsonl` (the parent of `checkpoint.dir`). Self-play always writes `<run>/metrics/selfplay.jsonl`. |
 | `expensive_metrics_every` | *unset* | 50 | Steps between host-syncing diagnostics (`legal_move_prob`, the policy mass on legal moves, from 16 rows with python-chess). They are computed on the step that ends at a multiple of this value, so they appear in that step's row when `log_every` divides it (the recipe's 5 and 50). |
 | `resume_path` | set by `--resume` | null | Checkpoint to resume from. |
-| `run_name` | *unset* | null | W&B run name when `wandb.run_name` is unset. |
 
 ## `model`
 
@@ -72,15 +76,15 @@ trainer rebuilds the architecture stored in its checkpoint (`model_spec`) instea
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `arch` | `encoder` | `resnet` | `encoder`: the transformer in `src/models/encoder.py`. `resnet`: `src/models/small/small_model.py`. |
+| `arch` | `encoder` | `encoder` | The transformer in `src/models/encoder.py`, the only architecture (the fused self-play network is encoder-only). |
 | `d_model` | 128 | 128 | Encoder width. |
 | `layers` | 4 | 4 | Encoder blocks. |
 | `heads` | 8 | 8 | Attention heads (`d_model` must divide by it). |
 | `d_ff` | 256 | 256 | Hidden width of the SwiGLU feed-forward. |
-| `blocks` | *unset* | 4 | ResNet residual blocks. |
-| `channels` | *unset* | 64 | ResNet trunk width. |
+| `stm_plane` | `colour` | `constant` | Input plane 104. Positions are mirrored so that the side to move plays white; `colour` sets the plane to the real side to move before mirroring (1 White, 0 Black), the network's only sign that it plays the black pieces. `constant`: 1 for every position, as every network before this key was trained. Saved with the network (`model_spec`, and an `stm_colour` entry in the `.cnet`), so a resumed run keeps its checkpoint's setting. |
+| `int8` | `true` | `false` | INT8 training and INT8 networks. The trainer's forward rounds as the fused kernel's INT8 path does (`src/models/quant.py`; gradients pass straight through the rounding): weights to one scale per output row, activations to one per token. The networks are exported with INT8 projections (`to_cnet --int8`), which self-play and the ladder run (v3 on an RTX 4090: 2.9M positions/s against 2.24M in FP16). Read from the config on resume, so an FP16 network can be fine-tuned into INT8. A post-training INT8 v3 played the FP16 one to an even score (1,000 games at 200 simulations). In the 8-hour recipe run (with the search fixes and the poller) self-play recorded 4,800 positions/s against 3,980 in FP16 on the same box, and the ladder ended at the same level (about 2,520 over the last half hour). Keep AdamW with it: INT8 with Muon lost about 50 Elo per trainer step, head to head. |
 
-The recipe's encoder has 812,557 parameters; the default 4 x 64 ResNet has 1,285,921.
+The recipe's encoder has 812,557 parameters.
 
 ## `lr_schedule`
 
@@ -88,12 +92,14 @@ The learning rate is `learning_rate` x schedule factor x warmup factor (and the 
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `kind` | `constant` | `constant` | `constant` or `cosine`. |
+| `kind` | `cosine` | `constant` | `constant`, `cosine` or `step`. The recipe holds `learning_rate` to step 70,000 (~2 h on an RTX 4090 + Ryzen 7950X), then decays to a tenth at step 280,000 (~8 h): a constant rate plateaus around 2,300-2,400 on the ladder, the decay carried a run to ~2,520. The schedule counts steps, so a longer run should stretch `total_steps`. |
 | `warmup_steps` | 1000 | 0 | Linear warmup from `learning_rate / warmup_steps` to `learning_rate`, counted from `start_step`. |
 | `start_step` | *unset* | 0 | Step the warmup and the cosine count from. -1: the step the run resumes at, resolved once and saved in checkpoints (`lr_start_step`) so later resumes keep it. |
-| `total_steps` | *unset* | 0 | Cosine only: length of the schedule from `start_step`, including `hold_steps`. 0 disables the cosine. |
-| `hold_steps` | *unset* | 0 | Cosine only: steps at the full rate before the decay starts. |
-| `final_ratio` | *unset* | 0.1 | Cosine only: the final rate as a fraction of `learning_rate`. |
+| `total_steps` | 280000 | 0 | Cosine only: length of the schedule from `start_step`, including `hold_steps`. 0 disables the cosine. |
+| `hold_steps` | 70000 | 0 | Cosine only: steps at the full rate before the decay starts. |
+| `final_ratio` | 0.1 | 0.1 | Cosine only: the final rate as a fraction of `learning_rate`. |
+| `milestones` | *unset* | [] | Step only: steps (counted from `start_step`, like the cosine's) at which the rate is multiplied by `gamma`. `[70000]` with `gamma: 0.5` halves it from step 70,000 on. |
+| `gamma` | *unset* | 0.5 | Step only: the factor applied at each milestone. |
 
 ## `loss_weights`
 
@@ -113,10 +119,10 @@ capped at 4 (100 plies).
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
 | `dir` | *run path* `checkpoints/` | `artifacts/checkpoints` | Where `step_NNNNNNNN.pt` go. Its parent counts as the run directory (metrics, `engine_builds.log`, the ladder file read by growth). |
-| `every_steps` | 500 | 1000 | Training steps between checkpoints, and so between engine builds. |
+| `every_steps` | 500 | 1000 | Training steps between checkpoints, and so between network exports. |
 | `keep_last` | 999999 | 5 | After each save the trainer deletes all but the newest `keep_last` `step_*.pt`. 0 or less keeps all. |
-| `build_script` | `scripts/build_trt.sh` | `scripts/build_trt.sh` | Run after each checkpoint as `<script> <ckpt> <step> <engine_dir> <iteration_file>`; null = no engines. The launcher's initial and resume engines always use `scripts/build_trt.sh`. |
-| `engine_dir` | *run path* `engines/` | `artifacts/engines` | Where engines (`.onnx`, `.trt`) are built. |
+| `build_script` | `scripts/build_net.sh` | `scripts/build_net.sh` | Run after each checkpoint as `<script> <ckpt> <step> <engine_dir> <iteration_file>`; null = no networks. The launcher's initial and resume networks always use `scripts/build_net.sh`, and a config naming the old `scripts/build_trt.sh` runs `build_net.sh`. |
+| `engine_dir` | *run path* `engines/` | `artifacts/engines` | Where networks (`.cnet`) are exported. |
 | `iteration_file` | *run path* `engines/.iteration` | `artifacts/engines/.iteration` | CSV (`iteration,engine_path`) the build script appends to and self-play reads. |
 
 ## `data`
@@ -145,28 +151,32 @@ ply.
 |---|---|---|---|
 | `boards` | 1024 | 1024 | Concurrent games. Each worker step searches one move in every game. |
 | `threads` | 128 | 256 | CPU threads running the searches. Also the inference batch size at which a batch is dispatched. |
+| `async_play` | true | false | Each search thread plays its own boards in turn, with no step barrier: the GPU never waits for a step's last searches or for the moves to be applied. A worker step then returns after one move per board's worth of moves. false: each step searches every board once, all at once. |
 | `hash_size` | 0 | 0 | Transposition table size in MB, shared by all searches. 0 = off. |
 | `simulations` | 400 | 800 | Simulations of a full search. |
 | `pcr_full_prob` | 0.25 | 1.0 | Playout-cap randomisation: probability that a move gets a full search, which is recorded and gets Dirichlet noise. 1.0 = every move. |
 | `pcr_fast_simulations` | 50 | 100 | Simulations of the other moves (not recorded, no noise). |
+| `tree_reuse` | true | false | Keep the subtree of the move played for the game's next search, which continues it: `simulations` (or `pcr_fast_simulations`) is then the number of visits the root's moves end up with, and only the missing ones are run. A full search mixes fresh Dirichlet noise into a reused root. Not for policy-sampled moves. |
 | `quick_policy_temperature` | *unset* | 0.0 | Optional. When > 0, fast moves during the sampling phase (`temperature_plies`, root temperature > 0) skip the search and sample the raw policy at this temperature (one network call). 0 = off. |
 | `cpuct` | 0.65 | 0.65 | PUCT exploration constant. |
 | `temperature` | 1.3 | 1.3 | Prior temperature: priors are softmax(logits / `temperature`) at every node. 0 puts the whole prior on the top move. |
 | `temperature_at_root` | 1.0 | 1.0 | Move choice during the first `temperature_plies`: sampled with probability proportional to visits^(1 / T). 0 = the most visited move. |
-| `temperature_plies` | 30 | -1 | Searched plies that use `temperature_at_root`. -1 = the whole game. |
+| `temperature_plies` | 40 | -1 | Searched plies that use `temperature_at_root`. -1 = the whole game. |
 | `temperature_late` | 0.0 | 0.0 | Root temperature after `temperature_plies`. 0 = the most visited move. |
+| `fast_temperature_at_root` | 0.7 | -1.0 | Root temperature of the fast searches (`pcr_fast_simulations`) during `temperature_plies`; below 0 they use `temperature_at_root`. Their 50-simulation visit counts are flat (about 11 effective moves against the policy's 6), so sampling them at 1 plays many weak moves; 0.7 samples them more sharply while the full searches keep `temperature_at_root`. |
 | `virtual_loss_width` | 8 | 8 | Leaves each search collects with virtual loss before one network round. 1 = strictly sequential search. |
 | `use_dirichlet` | true | true | Root Dirichlet noise on full searches (never on fast ones). |
 | `dirichlet_alpha` | 0.3 | 0.12 | Dirichlet α. |
 | `dirichlet_epsilon` | 0.25 | 0.05 | Noise weight ε: root prior = (1 - ε) P + ε noise. |
-| `random_opening_plies` | 8 | 0 | Uniformly random legal plies at the start of every game. They produce no records. |
+| `random_opening_plies` | 0 | 0 | Uniformly random legal plies at the start of every game. They produce no records. A fraction adds one more ply to that share of games (2.25: 3 plies in a quarter of them, 2 in the others). |
+| `random_opening_ramp` | *unset* | off | Moves `random_opening_plies` over the networks' trainer steps, `{start, end, start_step, end_step}` as for `search_q_ramp`; self-play applies the value at each network it loads (logged as `[ramp]`, and in `metrics/selfplay.jsonl`). From 8 to 0: random openings early, searched and sampled ones later. Off while `end_step` is 0. |
 | `max_plies` | 600 | 600 | Searched plies after which a game is a draw (flag 32 in its records). |
 | `resign_threshold` | 0.05 | 0.0 | Root expected score (W + D/2) below which the side to move counts towards resigning. 0 = never resign, and no playthrough games. |
 | `resign_consecutive` | 3 | 2 | Own moves in a row below the threshold before resigning. Moves sampled from the raw policy (`quick_policy_temperature`) neither extend nor reset the count. |
 | `resign_playthrough` | 0.1 | 0.1 | Fraction of games that never resign; in them a would-be resignation is counted, and counted as wrong if that side did not lose. |
 | `resign_target_fp` | *unset* | 0.0 | Optional calibration. When > 0 (with `resign_threshold` > 0): after every `resign_calibration_window` would-be resignations in playthrough games, the threshold is multiplied by 0.8 if the wrong share exceeded this target, or by 1.1 if it was under half of it, within 0.005 to 0.2. 0 = fixed threshold. |
 | `resign_calibration_window` | *unset* | 400 | Would-be resignations per calibration step (`resign_target_fp` only). |
-| `max_buffer_size` | 2000000 | 10000000 | Buffer capacity in records (1,280 bytes each: 2.56 GB for the recipe). |
+| `max_buffer_size` | 6000000 | 10000000 | Buffer capacity in records (1,280 bytes each: 7.68 GB for the recipe). With 2M, the sampling window stopped growing at 8 minutes of self-play and the value head overfitted the newest games. |
 | `fifo_buffer` | true | false | When the buffer is full: true = ring, the oldest record is overwritten; false = a random record is replaced. `data.window_c` needs true. |
 | `poll_seconds` | 300 | 300 | How often self-play checks `.iteration` for a new engine. |
 | `save_pgn` | false | false | Write each finished game as a PGN file in `pgn_dir`. |
@@ -182,26 +192,12 @@ in the recipe.
 
 | Key | Recipe | Default | What it does |
 |---|---|---|---|
-| `schedule` | *unset* | `[]` | Stages `[step, layers]` for the encoder or `[step, blocks, channels]` for the ResNet. Once the trainer reaches `step`, the trunk grows to that size (never shrinks) without changing the network's output. Empty = no growth. |
+| `schedule` | *unset* | `[]` | Stages `[step, layers]`. Once the trainer reaches `step`, the encoder grows to that many layers (never shrinks) without changing the network's output. Empty = no growth. |
 | `trigger` | *unset* | `steps` | `steps`: grow when a stage's step is reached. `plateau`: also wait until the run's ladder Elo (`<run>/ladder/ladder.jsonl`) has flattened; checked every 100 steps. |
 | `lr_rewarmup_steps` | *unset* | 200 | After a growth the optimizer is rebuilt (its state starts fresh) and the learning rate ramps back up linearly over this many steps. |
 | `plateau_hours` | *unset* | 2.0 | `plateau` only: the ratings since the last growth must span this long, and the gain is measured over the last `plateau_hours`. |
 | `plateau_min_gain` | *unset* | 50.0 | `plateau` only: grow when the mean Elo of the window's last third minus its first third is below this. |
 | `plateau_min_ratings` | *unset* | 4 | `plateau` only: ratings needed since the last growth. |
-
-## `wandb`
-
-Metrics always go to `<run>/metrics/*.jsonl`, which the dashboard reads. W&B is an optional copy
-of the trainer's rows.
-
-| Key | Recipe | Default | What it does |
-|---|---|---|---|
-| `enabled` | false | true | Also log the trainer's numeric metrics to Weights & Biases. |
-| `project` | `self_play` | `self_play` | W&B project. |
-| `entity` | null | null | W&B entity (user or team). |
-| `run_name` | *unset* | null | W&B run name; falls back to the top-level `run_name`. |
-| `dir` | *run path* `wandb/` | null | W&B local directory. |
-| `resume_id` | *unset* | null | Attach to an existing W&B run id instead of starting one. `--resume` keeps it from the run's previous config. The trainer writes the id it uses to `<run>/wandb_run_id.txt`. |
 
 ## Environment variables
 
@@ -209,10 +205,14 @@ Settings outside the YAML, read by the C++ extension at run time or by the build
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CHESSRL_INFER_WORKERS` | 4 | Inference worker threads per batch runner, each with its own TensorRT context and CUDA stream. |
-| `CHESSRL_CUDA_GRAPHS` | 1 | 0 runs inference without CUDA graphs. |
-| `CHESSRL_GRAPH_BUCKETS` | `32,64,128,256` | Batch sizes captured as CUDA graphs. The list is trimmed or extended so that its largest size covers the runner's maximum batch (`selfplay.threads` in self-play). |
+| `CHESSRL_INFER_WORKERS` | 6 | Inference worker threads per batch runner, each with its own CUDA stream. |
+| `CHESSRL_KERNEL_BLOCKS` | 2 | 2: the fused kernel keeps two blocks (positions) on each SM, at most 128 registers per thread; 1: the one-block build (up to 255 registers). Only with the default FP16 accumulation; the other accumulation settings always use one block. |
 | `CHESSRL_MCTS_FLUSH_US` | 100 | Microseconds the batcher waits for a full batch before dispatching a partial one. |
-| `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. Engines from `build_trt.sh` accept at most 512. |
-| `CHESSRL_CUDA_ARCH`, `TENSORRT_ROOT`, `CUDA_ROOT` | `sm_90`, `/usr/local/TensorRT-10.14.1.48`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture and toolkit locations. |
+| `CHESSRL_FP16_ACC` | 256 | The fused network's projection multiplies sum in FP16: N terms per FP16 sum before an FP32 addition (32, 64, or 256 for whole sums); 0 keeps FP32 accumulators. The attention and policy-logit multiplies and the residual stream are FP32 either way. |
+| `CHESSRL_POLLER` | 1 | One thread watches the inference workers' batches (CUDA events) and hands each finished batch back, while the workers sleep: as fast as each worker spinning in `cudaStreamSynchronize`, with 2.6 fewer cores busy. 0: the workers spin (or sleep, with `CHESSRL_BLOCKING_SYNC=1`). |
+| `CHESSRL_BLOCKING_SYNC` | 0 | 1, with the poller off (`CHESSRL_POLLER=0`, or `CHESSRL_POLLER` unset, which this then implies): inference workers sleep on a blocking-sync event while the GPU runs their batch instead of spinning (saves about 2 cores, costs 3 to 4% when the CPU is not short). |
+| `CHESSRL_SEARCHES_PER_THREAD` | 1 | Searches each self-play thread interleaves (`threads` x this many in flight; the batch threshold counts them all). Fewer threads wake less often and use less CPU, but each search waits for its thread; 32 x 4 was 2% slower than 128 x 1 on the 4090 box. |
+| `CHESSRL_MCTS_PHASES` | unset | Set: print where the search threads' time goes after each self-play step (`[mcts-phases]`) and the step's serial parts (`[step-phases]`). |
+| `CHESSRL_MCTS_SMALL_BATCH_SIZE`, `CHESSRL_MCTS_BATCH_SIZE` | 1024 | Maximum batch of searches outside self-play (ladder, scripts); the first takes precedence. |
+| `CHESSRL_CUDA_ARCH`, `CUDA_ROOT` | `sm_90`, `/usr/local/cuda` | Build time (`uv sync`): GPU architecture (the fused kernel needs `sm_80` or newer) and toolkit location. |
 | `CHESSRL_RUNS_ROOT` | `artifacts/runs` (dashboard), `~/chessrl-runs` (analysis board) | Where the dashboard and the analysis board look for runs; colon-separated for the dashboard. |

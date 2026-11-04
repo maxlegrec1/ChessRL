@@ -1,6 +1,9 @@
-"""111-plane AlphaZero-style encoder.
+"""111-plane AlphaZero-style encoder, canonical: the side to move plays white. A position with black to move
+is encoded mirrored (ranks reversed, white's and black's pieces and castling rights swapped, history included), as
+python-chess's Board.mirror() would give it, so the network only ever sees white to move; its moves are then
+white's (src/models/small/vocab.py's canonical_key).
 
-Channel layout (kept absolute, not STM-canonicalized):
+Channel layout:
 
   Slot 0  (current position):
     [ 0..11]: 12 piece planes  (W:PNBRQK then B:PNBRQK)
@@ -14,7 +17,7 @@ Channel layout (kept absolute, not STM-canonicalized):
     [78..89]   t-6 piece planes;     [90]    t-6 repetition flag
     [91..102]  t-7 piece planes;     [103]   t-7 repetition flag
   Global planes (broadcast over the 8x8 board):
-    [104]: side-to-move (1.0 if white)
+    [104]: side-to-move: 1.0, or with model.stm_plane colour the real side to move (1.0 White, 0.0 Black)
     [105]: en passant target square (one-hot at the EP square)
     [106]: castling W kingside
     [107]: castling W queenside
@@ -104,13 +107,30 @@ def _encode_globals(board: bulletchess.Board, tensor: np.ndarray) -> None:
     tensor[:, :, PLANE_HMC] = min(board.halfmove_clock / 100.0, 1.0)
 
 
+def mirror_planes(tensor: np.ndarray) -> np.ndarray:
+    """The [8, 8, 111] planes of the mirrored position: ranks reversed (rows are ranks), every history slot's
+    white and black piece planes swapped, and the castling rights."""
+    order = list(range(INPUT_PLANES))
+    for slot in range(HISTORY_DEPTH):
+        base = _slot_base(slot)
+        order[base : base + _PIECE_PLANES] = [*range(base + 6, base + 12), *range(base, base + 6)]
+    order[PLANE_CASTLING_WK : PLANE_CASTLING_BQ + 1] = [
+        PLANE_CASTLING_BK, PLANE_CASTLING_BQ, PLANE_CASTLING_WK, PLANE_CASTLING_WQ,
+    ]  # fmt: skip
+    return np.ascontiguousarray(tensor[::-1, :, order])
+
+
 def fen_to_tensor(
     fen: str,
     past_boards: list[bulletchess.Board] | None = None,
     past_repetitions: list[bool] | None = None,
     current_repetition: bool = False,
+    stm_colour: bool = False,
 ) -> np.ndarray:
     """Encode a position with optional history into [8, 8, 111] float32.
+
+    stm_colour (model.stm_plane: colour): plane 104 is the real side to move, 0 when black is to move
+    (after mirroring); otherwise it is always 1.
 
     Args:
         fen: current position as FEN string.
@@ -150,6 +170,9 @@ def fen_to_tensor(
 
     # Globals (planes 104..110).
     _encode_globals(board, tensor)
+    if board.turn == bulletchess.BLACK:
+        tensor = mirror_planes(tensor)
+        tensor[:, :, PLANE_STM] = 0.0 if stm_colour else 1.0
     return tensor
 
 
@@ -157,7 +180,9 @@ def fen_to_tensor(
 #                     Buffer records
 # --------------------------------------------------------------------------- #
 #
-# Records store the 7 past positions as raw uint64 piece bitboards (12 per
+# Records store positions canonically (src/train/dataset.py): the FEN and the
+# bitboards are already white to move, so no mirroring happens here. They store
+# the 7 past positions as raw uint64 piece bitboards (12 per
 # position). This reference encoder (used by the tests and
 # scripts/check_buffer.py) fills the planes straight from those bitboards; the
 # trainer decodes records in bulk in src/train/dataset.py.

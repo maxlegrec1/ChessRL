@@ -12,10 +12,6 @@
 namespace chessrl::mcts
 {
 
-struct HistoryEntry;
-
-using HistoryHandle = std::shared_ptr<const HistoryEntry>;
-
 // Compact piece-bitboard snapshot of a board position, used as the
 // per-history-slot payload for the AlphaZero-style 8-board input stack.
 // Layout matches the Python encoder: bitboards[0..5] = white PNBRQK,
@@ -53,18 +49,24 @@ struct SearchInput
 // position chain.
 PiecePlanes snapshot_piece_planes(const chess::Board& board);
 
+// The canonical view (the network always plays white; mcts/packed_position.hpp): a move or position of black's
+// seen from white's side, ranks reversed and colours swapped (python-chess Board.mirror()).
+std::string mirror_uci(const std::string& uci);
+std::string mirror_fen(const std::string& fen);
+
 // Push `snap` onto the front of `stack` (slot 0), shifting older entries
 // down by one. The oldest (formerly slot 7) is dropped.
 void history_stack_push(HistoryStack& stack, const PiecePlanes& snap);
 
 // Build the initial 8-slot stack for a fresh search: slot 0 is the
 // position represented by `root_board`, slots 1..7 are populated by
-// replaying the move list backwards through chess::Board.makeMove (the
-// HistoryHandle linked list only stores moves, not board states).
+// replaying the move list backwards through chess::Board.makeMove.
 HistoryStack build_root_history_stack(
     const std::string& fen,
     const std::vector<std::string>& moves,
     const chess::Board& root_board);
+
+struct SearchTree;
 
 struct MctsOptions
 {
@@ -88,7 +90,20 @@ struct MctsOptions
     float dirichlet_epsilon{0.25F};
     bool use_dirichlet{false};
     float temperature{1.0F};
-    std::string small_engine_path{"model.trt"};
+    std::string small_engine_path{"model.cnet"};
+    // Seed of the search's random numbers (Dirichlet noise, root move sampling).
+    // 0 = a fresh random seed per search.
+    std::uint64_t seed{0};
+    // Tree reuse. reuse_tree: the subtree a previous search kept for the move that was
+    // played (MctsSummary::tree), whose root is this search's position. The search continues
+    // it: `simulations` is then the number of visits the root's moves end up with, so only the
+    // missing ones are run. Ignored unless its root_hash is this position's, and when
+    // `simulations` is 0. keep_tree: return the subtree under the move this search plays.
+    std::shared_ptr<SearchTree> reuse_tree;
+    bool keep_tree{false};
+    // Fill each root move's principal variation (MctsSummary::rollouts[].continuation). Self-play
+    // never reads them and turns this off: a board copy and a UCI string per ply of each line.
+    bool principal_variations{true};
 };
 
 MctsOptions parse_cli(int argc, char** argv);
@@ -101,8 +116,6 @@ struct TreeNode
 {
     int parent{-1};
     chess::Move move_from_parent{chess::Move::NO_MOVE}; // The move that led to this node
-    bool terminal{false};
-    bool expanded{false};
     float prior{0.0F};
     float value_sum{0.0F};
     float virtual_loss{0.0F};
@@ -126,27 +139,45 @@ struct TreeNode
     // Computed from the NN's mlh_q head as `mlh_q * 25` (the head outputs
     // plies/25). Terminal nodes use 0.
     float leaf_plies{0.0F};
-    HistoryHandle history;
-    std::vector<int> children;
-    std::vector<chess::Move> child_moves;
-    std::vector<float> child_priors;
+    // mlh_tanh: tanh(plies_sum / visit_count * kMlhPliesScale), the selection's moves-left term, kept by
+    // backpropagate_full whenever the two change (selection evaluated it for every visited child at every step).
+    float mlh_tanh{0.0F};
+    // Children: `num_children` consecutive nodes from `first_child` (all added when this node is
+    // expanded); each holds its own move (move_from_parent) and prior. No per-node allocation, so
+    // copying a subtree for reuse and freeing a tree move only the node array.
+    int first_child{-1};
+    // At most 218 legal moves: 16 bits, packed with the two flags, keep the node at 72 bytes (a multiple of 8).
+    // At 76 bytes every other node was only 4-byte aligned, and the wide stores and copies of nodes split across
+    // cache lines: expansion's add_child took 37% longer (perf5 profile).
+    std::uint16_t num_children{0};
+    bool terminal{false};
+    bool expanded{false};
 };
+static_assert(sizeof(TreeNode) == 72, "TreeNode: keep it 72 bytes (expansion and tree reuse write and copy them)");
+
+// The moves-left term's scale: plies are squashed by tanh(plies / 25).
+constexpr float kMlhPliesScale = 1.0F / 25.0F;
 
 struct SearchTree
 {
     std::vector<TreeNode> nodes;
+    // Zobrist hash of the root position, set by extract_subtree (0 for a fresh tree).
+    std::uint64_t root_hash{0};
 
-    int add_root(const chess::Board& board, const std::vector<std::string>& history);
+    int add_root(const chess::Board& board);
     void reserve(size_t count);
-    int add_child(
-        int parent_index,
-        chess::Move move,
-        float prior,
-        const chess::Board& child_board);
+    // A child is not checked for a finished game here: the search does that when a
+    // descent first reaches it (most children are never visited).
+    int add_child(int parent_index, chess::Move move, float prior);
 };
 
+// The subtree under `new_root` as a tree of its own (new_root becomes node 0), so the next
+// search can continue it once its move is played. Visits and values are kept; each node's wdl
+// is reset to the running average of its backups (refine_wdl_node overwrites it after a
+// search) and virtual losses to 0. `root_hash` is the zobrist hash of the new root position.
+SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t root_hash);
+
 std::vector<std::string> principal_variation(const SearchTree& tree, int node_index, const chess::Board& root_board);
-std::vector<std::string> history_to_vector(const HistoryHandle& tail);
 
 // Returns the terminal value of `board` from the side-to-move's perspective:
 // +1 = win, -1 = loss (checkmate), 0 = draw, nullopt = non-terminal. Note that

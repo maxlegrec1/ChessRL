@@ -1,8 +1,9 @@
 """CPU analysis engine: a checkpoint's policy/value heads plus a PUCT search.
 
-Mirrors the self-play engine's conventions (cpp/mcts/mcts_small.cpp): absolute
-111-plane input with 7 plies of history and repetition flags, UCI policy
-vocabulary (castling as the king's move, knight promotions as the bare move),
+Mirrors the self-play engine's conventions (cpp/mcts/mcts_small.cpp): canonical
+111-plane input with 7 plies of history and repetition flags (a position with
+black to move is seen mirrored, as white), UCI policy vocabulary in white's view
+(castling as the king's move, knight promotions as the bare move),
 WDL from the side to move, values in [-1, 1], unvisited children at Q = 0,
 U = cpuct * P * sqrt(N_parent) / (1 + N). No root noise (this is analysis).
 Leaves are evaluated in small batches with virtual loss.
@@ -17,6 +18,10 @@ move) is an automatic draw, both inside the tree and as the game's end.
   When winning it prefers shorter wins; when losing, longer games.
 - twofold_draw (off by default): also score a position's second occurrence as a
   draw inside the tree, Leela-style.
+- prior_temperature (1 by default): priors softmax(logit / T) at every node; self-play
+  uses 1.3.
+- root_noise (off by default): (alpha, epsilon, rng) mixes Dirichlet noise into the root
+  priors, as self-play does on its full searches.
 """
 
 from __future__ import annotations
@@ -31,21 +36,23 @@ import chess
 import numpy as np
 import torch
 
-from src.models.factory import model_from_checkpoint
+from src.export.heads import search_q_weight
+from src.models.factory import model_from_checkpoint, stm_colour
 from src.models.small.fen_encoder import fen_to_tensor
-from src.models.small.vocab import policy_to_idx
+from src.models.small.vocab import canonical_key, policy_to_idx
 
 HISTORY = 7
 
 
-def policy_key(move: chess.Move) -> str:
-    """The vocabulary's name for a move (knight promotions are the bare move)."""
-    u = move.uci()
-    return u[:4] if move.promotion == chess.KNIGHT else u
+def policy_key(move: chess.Move, white_to_move: bool = True) -> str:
+    """The vocabulary's name for a move of the side to move: in white's view (mirrored when black moves), knight
+    promotions as the bare move."""
+    return canonical_key(move.uci(), white_to_move)
 
 
-def encode(board: chess.Board) -> np.ndarray:
-    """[8, 8, 111] input for the position, history taken from the board's move stack."""
+def encode(board: chess.Board, stm_colour: bool = False) -> np.ndarray:
+    """[8, 8, 111] input for the position, history taken from the board's move stack. stm_colour: plane 104 is
+    the real side to move (networks with model.stm_plane colour)."""
     b = board.copy()
     current_rep = b.is_repetition(2)
     past_fens, past_reps = [], []
@@ -56,7 +63,7 @@ def encode(board: chess.Board) -> np.ndarray:
         past_fens.append(b.fen())
         past_reps.append(b.is_repetition(2))
     past = [bulletchess.Board.from_fen(f) for f in past_fens]
-    return fen_to_tensor(board.fen(), past, past_reps, current_rep)
+    return fen_to_tensor(board.fen(), past, past_reps, current_rep, stm_colour=stm_colour)
 
 
 class Net:
@@ -67,8 +74,12 @@ class Net:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         self.model = model_from_checkpoint(ckpt, "cpu").eval()
         self.spec = dict(ckpt.get("model_spec") or {})
+        self.stm_colour = stm_colour(self.spec)
         self.params = sum(p.numel() for p in self.model.parameters())
-        self.outcome_heads = (ckpt.get("config") or {}).get("search_heads", "search") == "outcome"
+        heads = (ckpt.get("config") or {}).get("search_heads", "search")
+        # As the search reads them: value_q's weight in the WDL, and moves-left from mlh_q or mlh.
+        self.q_weight = {"outcome": 0.0, "blend": search_q_weight(ckpt)}.get(heads, 1.0)
+        self.mlh_q = heads == "search"
         self.step = int(ckpt.get("step", 0) or 0)
 
     @classmethod
@@ -76,8 +87,9 @@ class Net:
         """A Net around an in-memory model (tests)."""
         net = cls.__new__(cls)
         net.model, net.spec, net.step = model.eval(), {}, 0
+        net.stm_colour = getattr(model, "cfg", {}).get("stm_plane") == "colour"
         net.params = sum(p.numel() for p in model.parameters())
-        net.outcome_heads = outcome_heads
+        net.q_weight, net.mlh_q = (0.0, False) if outcome_heads else (1.0, True)
         return net
 
     @torch.no_grad()
@@ -85,15 +97,16 @@ class Net:
         self, boards: list[chess.Board]
     ) -> list[tuple[dict[chess.Move, float], tuple[float, float, float], float]]:
         """Per board: legal-move priors, WDL for the side to move, estimated plies left."""
-        x = torch.from_numpy(np.stack([encode(b) for b in boards]))
+        x = torch.from_numpy(np.stack([encode(b, self.stm_colour) for b in boards]))
         p, v, vq, mlh, mlh_q = self.model(x, return_all=True)
-        wdl = torch.softmax(v if self.outcome_heads else vq, dim=-1).numpy()
-        plies = (mlh if self.outcome_heads else mlh_q).float().clamp_min(0).numpy() * 25.0
+        w = self.q_weight
+        wdl = ((1.0 - w) * torch.softmax(v, dim=-1) + w * torch.softmax(vq, dim=-1)).numpy()
+        plies = (mlh_q if self.mlh_q else mlh).float().clamp_min(0).numpy() * 25.0
         logits = p.float().numpy()
         out = []
         for i, b in enumerate(boards):
             moves = list(b.legal_moves)
-            idx = [policy_to_idx.get(policy_key(m), -1) for m in moves]
+            idx = [policy_to_idx.get(policy_key(m, b.turn == chess.WHITE), -1) for m in moves]
             lg = np.array([logits[i, j] if j >= 0 else -1e9 for j in idx], dtype=np.float64)
             pr = np.exp(lg - lg.max()) if len(lg) else lg
             pr = pr / pr.sum() if len(pr) else pr
@@ -164,6 +177,8 @@ def search(
     batch: int = 8,
     twofold_draw: bool = False,
     mlh_eps: float = 0.05,
+    prior_temperature: float = 1.0,
+    root_noise: tuple[float, float, np.random.Generator] | None = None,
 ) -> dict:
     """PUCT search from `board`. Returns the root, its evaluation and timing."""
     t0 = time.time()
@@ -171,7 +186,12 @@ def search(
     root.terminal = terminal_value(root.board)
     if root.terminal is None:
         ((priors, wdl, plies),) = net.evaluate([root.board])
-        _expand(root, priors, wdl, plies, twofold_draw)
+        _expand(root, _tempered(priors, prior_temperature), wdl, plies, twofold_draw)
+        if root_noise is not None and root.children:
+            alpha, eps, rng = root_noise
+            noise = rng.dirichlet([alpha] * len(root.children))
+            for c, x in zip(root.children.values(), noise, strict=True):
+                c.prior = (1 - eps) * c.prior + eps * float(x)
     done = 0
     while done < sims and root.terminal is None:
         leaves, paths = [], []
@@ -194,7 +214,7 @@ def search(
             for l, (priors, wdl, plies) in zip(
                 pending, net.evaluate([l.board for l in pending]), strict=True
             ):
-                _expand(l, priors, wdl, plies, twofold_draw)
+                _expand(l, _tempered(priors, prior_temperature), wdl, plies, twofold_draw)
         for leaf, path in zip(leaves, paths, strict=True):
             for nd in path[1:]:
                 nd.vloss -= 1
@@ -209,6 +229,15 @@ def search(
                 plies += 1.0
         done += len(leaves)
     return {"root": root, "sims": done, "seconds": time.time() - t0}
+
+
+def _tempered(priors: dict[chess.Move, float], temperature: float) -> dict[chess.Move, float]:
+    """softmax(logit / T) from softmax(logit): p^(1/T), renormalised."""
+    if temperature == 1.0 or not priors:
+        return priors
+    w = {m: p ** (1.0 / temperature) for m, p in priors.items()}
+    s = sum(w.values()) or 1.0
+    return {m: v / s for m, v in w.items()}
 
 
 def _expand(

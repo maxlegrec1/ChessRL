@@ -20,14 +20,14 @@ def _config(tmp_path, policy_target: str) -> TrainingConfig:
     cfg.batch_size = 32
     cfg.learning_rate = 1e-3
     cfg.policy_target = policy_target
-    cfg.wandb.enabled = False
     cfg.data.dataset_path = run / "buffer" / "buffer.bin"
     cfg.data.min_samples_to_start = 1
     cfg.checkpoint.dir = run / "checkpoints"
     cfg.checkpoint.build_script = None
     cfg.checkpoint.engine_dir = run / "engines"
     cfg.checkpoint.iteration_file = run / "engines" / ".iteration"
-    cfg.growth.schedule = [[2, 5, 80]]
+    cfg.model.layers = 1
+    cfg.growth.schedule = [[2, 2]]  # grow to 2 layers at step 2
     cfg.lr_schedule.kind = "cosine"
     cfg.lr_schedule.total_steps = 10
     cfg.lr_schedule.warmup_steps = 2
@@ -41,12 +41,13 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     losses = []
     for _ in range(4):
         trainer._maybe_grow()
-        batch = trainer.buffer.sample_batch(cfg.batch_size, mirror_prob=0.5)
+        batch = trainer.buffer.sample_batch(cfg.batch_size)
         metrics = trainer._train_step(batch, expensive=True)
         losses.append(float(metrics["loss/total"]))
         trainer.step += 1
     assert all(torch.isfinite(torch.tensor(losses)))
-    assert trainer.model.spec() == {"arch": "resnet", "blocks": 5, "channels": 80}
+    assert trainer.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
+                                    "stm_plane": "constant", "int8": False}
     assert 0.0 <= metrics["legal_move_prob"] <= 1.0
     trainer._save_checkpoint()
     ckpt_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
@@ -54,12 +55,53 @@ def test_train_grow_checkpoint_resume(tmp_path, policy_target):
     cfg.resume_path = ckpt_path
     resumed = Trainer(cfg)
     assert resumed.step == 4
-    assert resumed.model.spec() == {"arch": "resnet", "blocks": 5, "channels": 80}
+    assert resumed.model.spec() == {"arch": "encoder", "d_model": 128, "layers": 2, "heads": 8, "d_ff": 256,
+                                    "stm_plane": "constant", "int8": False}
     for a, b in zip(
         trainer.model.state_dict().values(), resumed.model.state_dict().values(), strict=True
     ):
         torch.testing.assert_close(a, b)
     assert (cfg.checkpoint.dir.parent / "metrics" / "train.jsonl").exists()
+
+
+def test_colour_plane_trains_and_resumes(tmp_path):
+    # model.stm_plane colour: the trainer feeds plane 104 from the records' flags, and the setting is saved with
+    # the checkpoint; a resume keeps the checkpoint's setting whatever the config says.
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    cfg.model.stm_plane = "colour"
+    trainer = Trainer(cfg)
+    assert trainer.stm_colour
+    batch = trainer.buffer.sample_batch(cfg.batch_size)
+    assert float(trainer._train_step(batch, expensive=True)["loss/total"]) > 0
+    trainer._save_checkpoint()
+    cfg.resume_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
+    cfg.model.stm_plane = "constant"
+    resumed = Trainer(cfg)
+    assert resumed.stm_colour and resumed.model.spec()["stm_plane"] == "colour"
+
+
+def test_int8_training_fine_tunes_an_fp16_network(tmp_path):
+    # model.int8: the forward rounds as the INT8 kernel; on resume the config's setting wins, so an FP16 checkpoint
+    # is fine-tuned into INT8 and its checkpoints say so.
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    trainer = Trainer(cfg)
+    batch = trainer.buffer.sample_batch(cfg.batch_size)
+    trainer._train_step(batch, expensive=True)
+    trainer.step += 1
+    trainer._save_checkpoint()
+    cfg.resume_path = sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1]
+    cfg.model.int8 = True
+    resumed = Trainer(cfg)
+    assert resumed.model.int8 and resumed.model.spec()["int8"] is True
+    losses = [float(resumed._train_step(resumed.buffer.sample_batch(cfg.batch_size), expensive=True)["loss/total"])
+              for _ in range(3)]  # fmt: skip
+    assert all(torch.isfinite(torch.tensor(losses)))
+    resumed.step += 1
+    resumed._save_checkpoint()
+    ckpt = torch.load(sorted(cfg.checkpoint.dir.glob("step_*.pt"))[-1], weights_only=False)
+    assert ckpt["model_spec"]["int8"] is True
 
 
 def test_lr_schedule_counts_from_resume_step(tmp_path):
@@ -73,6 +115,19 @@ def test_lr_schedule_counts_from_resume_step(tmp_path):
     assert trainer.lr_at(100) == pytest.approx(cfg.learning_rate)
     assert trainer.lr_at(110) == pytest.approx(cfg.learning_rate * cfg.lr_schedule.final_ratio)
     assert trainer.lr_at(50) == pytest.approx(cfg.learning_rate)  # before the start: no decay yet
+
+
+def test_lr_schedule_step(tmp_path):
+    cfg = _config(tmp_path, "visits")
+    cfg.growth.schedule = []
+    cfg.lr_schedule.kind = "step"
+    cfg.lr_schedule.warmup_steps = 0
+    cfg.lr_schedule.milestones = [70, 90]
+    cfg.lr_schedule.gamma = 0.5
+    trainer = Trainer(cfg)
+    assert trainer.lr_at(69) == pytest.approx(cfg.learning_rate)
+    assert trainer.lr_at(70) == pytest.approx(cfg.learning_rate * 0.5)
+    assert trainer.lr_at(95) == pytest.approx(cfg.learning_rate * 0.25)
 
 
 def test_lr_schedule_cosine_and_growth_rewarmup(tmp_path):

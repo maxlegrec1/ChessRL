@@ -1,5 +1,5 @@
 """The first post's Stockfish test with the network searching on the CPU (src/analysis/engine.py),
-for machines without the TensorRT engine. One process per game, several games in parallel.
+for machines without a CUDA GPU. One process per game, several games in parallel.
 
 Stockfish 16 with UCI_LimitStrength + UCI_Elo, 100 ms per move, 1 thread, 16 MB hash (as in
 scripts/stockfish_match.py). The network searches 800 simulations per move, one at a time

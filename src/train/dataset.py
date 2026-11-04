@@ -1,7 +1,10 @@
-"""Replay buffer reader for v2 self-play records (see cpp/selfplay.cpp).
+"""Replay buffer reader for v3 self-play records (see cpp/selfplay.cpp).
 
 The buffer is a flat file of fixed 1280-byte records written by the C++
-self-play worker. The trainer memory-maps it, samples rows (optionally from a
+self-play worker. Records are canonical: a position with black to move is stored
+as white sees it (FEN, bitboards, castling, en passant, moves), so every record
+has white to move and its move indices are in the 1,858-move vocabulary;
+FLAG_BLACK_TO_MOVE keeps the side that actually moved. The trainer memory-maps it, samples rows (optionally from a
 window of the newest records when the buffer is a FIFO ring), and decodes
 input planes from the stored bitboards with tensor ops — no FEN parsing, no
 python-chess, and the decode can run on the GPU.
@@ -10,19 +13,19 @@ python-chess, and the decode can run on the GPU.
 from __future__ import annotations
 
 import json
-import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index, policy_to_idx
 
 RECORD_SIZE = 1280
-RECORD_VERSION = 2
+RECORD_VERSION = 3
 MAX_POLICY_ENTRIES = 84
 VOCAB_SIZE = len(policy_index)
 NO_MOVE = 0xFFFF  # played_idx sentinel in the record
@@ -34,6 +37,7 @@ FLAG_RESIGNED = 4
 FLAG_PLAYTHROUGH = 8
 FLAG_CURRICULUM = 16
 FLAG_MAX_PLIES = 32
+FLAG_BLACK_TO_MOVE = 64
 
 RECORD_DTYPE = np.dtype(
     [
@@ -64,19 +68,8 @@ RECORD_DTYPE = np.dtype(
 assert RECORD_DTYPE.itemsize == RECORD_SIZE
 
 
-def _mirror_move(move: str) -> str:
-    # Vertical flip: ranks 1<->8, files unchanged (python-chess Board.mirror()).
-    if len(move) < 4 or not move[1].isdigit() or not move[3].isdigit():
-        return move
-    return f"{move[0]}{9 - int(move[1])}{move[2]}{9 - int(move[3])}{move[4:]}"
-
-
-# MIRROR_INDEX[i] = vocab index of move i after a colour flip (an involution).
-MIRROR_INDEX = np.array(
-    [policy_to_idx.get(_mirror_move(m), i) for i, m in enumerate(policy_index)], dtype=np.int64
-)
-_CASTLE_MOVES = {"e1g1": 0, "e1c1": 0, "e8g8": 1, "e8c8": 1}  # move -> colour of the king
-CASTLE_INDEX = {policy_to_idx[m]: c for m, c in _CASTLE_MOVES.items()}
+# Castling, the king's move (the side to move castles as white).
+CASTLE_INDEX = [policy_to_idx["e1g1"], policy_to_idx["e1c1"]]
 
 
 def window_size(total_writes: int, c: int, alpha: float, beta: float) -> int:
@@ -97,7 +90,6 @@ class Batch:
     past_bb: torch.Tensor  # [B, 7, 12] int64
     cur_rep: torch.Tensor  # [B] uint8
     past_rep: torch.Tensor  # [B, 7] uint8
-    white_to_move: torch.Tensor  # [B] bool
     castling: torch.Tensor  # [B] uint8
     ep: torch.Tensor  # [B] int64, 255 = none
     halfmove: torch.Tensor  # [B] float32
@@ -109,7 +101,6 @@ class Batch:
     value_mcts: torch.Tensor  # [B, 3]
     plies_remaining: torch.Tensor  # [B]
     backed_plies: torch.Tensor  # [B]
-    mirror: torch.Tensor  # [B] bool, colour-flip augmentation applied at decode
     fens: list[str]
 
     def to(self, device: torch.device | str, non_blocking: bool = True) -> Batch:
@@ -121,12 +112,8 @@ class Batch:
         return Batch(**moved)
 
 
-def records_to_batch(
-    rows: np.ndarray, mirror_prob: float = 0.0, rng: random.Random | None = None
-) -> Batch:
+def records_to_batch(rows: np.ndarray) -> Batch:
     """Pack structured record rows into a Batch (no plane decoding yet)."""
-    rng = rng or random
-    b = len(rows)
     n_policy = np.minimum(rows["n_policy"].astype(np.int64), MAX_POLICY_ENTRIES)
     entry_ok = np.arange(MAX_POLICY_ENTRIES)[None, :] < n_policy[:, None]
     pol_idx = rows["policy"][:, :, 0].astype(np.int64)
@@ -134,13 +121,6 @@ def records_to_batch(
     pol_idx = np.where(entry_ok, pol_idx, 0)
     played = rows["played_idx"].astype(np.int64)
     played = np.where(played == NO_MOVE, IGNORE_INDEX, played)
-    mirror = np.array([rng.random() < mirror_prob for _ in range(b)], dtype=bool)
-
-    # Colour flip of the targets happens here (index remap); planes flip at decode.
-    if mirror.any():
-        pol_idx = np.where(mirror[:, None], MIRROR_INDEX[pol_idx], pol_idx)
-        ok = played >= 0
-        played = np.where(mirror & ok, MIRROR_INDEX[np.where(ok, played, 0)], played)
 
     def t(a, dtype=None):
         out = torch.from_numpy(np.ascontiguousarray(a))
@@ -151,7 +131,6 @@ def records_to_batch(
         past_bb=t(rows["past_bb"].view(np.int64)),
         cur_rep=t(rows["cur_rep"]),
         past_rep=t(rows["past_rep"]),
-        white_to_move=t(np.char.find(rows["fen"], b" w ") >= 0),
         castling=t(rows["castling"]),
         ep=t(rows["ep"].astype(np.int64)),
         halfmove=t(rows["halfmove"].astype(np.float32)),
@@ -163,66 +142,77 @@ def records_to_batch(
         value_mcts=t(rows["value_mcts"]),
         plies_remaining=t(rows["plies_remaining"]),
         backed_plies=t(rows["backed_plies"]),
-        mirror=t(mirror),
         fens=[f.decode("ascii", "replace") for f in rows["fen"]],
     )
 
 
 _SHIFTS = torch.arange(64, dtype=torch.int64)
-_SWAP_COLOURS = torch.tensor([6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5])
 
 
-def decode_planes(batch: Batch, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+def decode_planes(batch: Batch, dtype: torch.dtype = torch.float32, stm_colour: bool = False) -> torch.Tensor:
     """Build the [B, 8, 8, 111] input (same layout as fen_encoder.py) on batch's device."""
-    device = batch.cur_bb.device
-    bsz = batch.cur_bb.shape[0]
+    return decode_fields(
+        batch.cur_bb, batch.past_bb, batch.cur_rep, batch.past_rep, batch.castling, batch.ep, batch.halfmove,
+        dtype, flags=batch.flags, stm_colour=stm_colour,
+    )  # fmt: skip
+
+
+def decode_fields(cur_bb, past_bb, cur_rep, past_rep, castling, ep, halfmove,
+                  dtype: torch.dtype = torch.float32, flags=None, stm_colour: bool = False) -> torch.Tensor:  # fmt: skip
+    """decode_planes on the fields themselves. No host sync and no data-dependent shape, so the
+    trainer compiles it with the network. Records are canonical: white to move, no flipping.
+
+    stm_colour (model.stm_plane: colour): plane 104 is the real side to move, 1 for White and 0 for Black
+    (FLAG_BLACK_TO_MOVE in `flags`); otherwise it is 1 for every record."""
+    device = cur_bb.device
+    bsz = cur_bb.shape[0]
     shifts = _SHIFTS.to(device)
 
-    bb = torch.cat([batch.cur_bb[:, None, :], batch.past_bb], dim=1)  # [B, 8, 12]
+    bb = torch.cat([cur_bb[:, None, :], past_bb], dim=1)  # [B, 8, 12]
     # bit k of each bitboard = square k = rank * 8 + file. Arithmetic shifts are
     # fine: & 1 keeps only the shifted bit even when bit 63 sign-extends.
     bits = (bb[..., None] >> shifts) & 1  # [B, 8, 12, 64]
     bits = bits.view(bsz, 8, 12, 8, 8)  # [..., rank, file]
-
-    mirror = batch.mirror
-    if bool(mirror.any()):
-        flipped = bits[:, :, _SWAP_COLOURS.to(device)].flip(-2)  # swap colours + rank flip
-        bits = torch.where(mirror[:, None, None, None, None], flipped, bits)
     bits = bits.flip(-2)  # tensor row = 7 - rank (rank 1 at the bottom)
 
-    reps = torch.cat([batch.cur_rep[:, None], batch.past_rep], dim=1).to(bits.dtype)  # [B, 8]
+    reps = torch.cat([cur_rep[:, None], past_rep], dim=1).to(bits.dtype)  # [B, 8]
     hist = torch.cat(
         [bits, reps[:, :, None, None, None].expand(bsz, 8, 1, 8, 8)], dim=2
     )  # [B, 8 slots, 13, 8, 8]; channel = 13 * slot + k
     planes = torch.zeros(bsz, INPUT_PLANES, 8, 8, dtype=dtype, device=device)
     planes[:, :104] = hist.reshape(bsz, 104, 8, 8).to(dtype)
 
-    wtm = batch.white_to_move ^ mirror
-    planes[:, 104] = wtm.to(dtype)[:, None, None]
+    if stm_colour:
+        if flags is None:
+            raise ValueError("decode_fields: stm_colour needs the records' flags")
+        white = (flags.to(torch.int64) & FLAG_BLACK_TO_MOVE) == 0
+        planes[:, 104] = white.to(dtype)[:, None, None]  # the real side to move
+    else:
+        planes[:, 104] = 1.0  # side to move: white, always (the canonical view)
 
-    ep = batch.ep
     has_ep = ep < 64
     ep_sq = torch.where(has_ep, ep, torch.zeros_like(ep))
     ep_rank = ep_sq // 8
-    ep_rank = torch.where(mirror, 7 - ep_rank, ep_rank)
     ep_file = ep_sq % 8
-    rows_idx = torch.arange(bsz, device=device)[has_ep]
-    planes[rows_idx, 105, (7 - ep_rank)[has_ep], ep_file[has_ep]] = 1.0
+    ep_cell = F.one_hot((7 - ep_rank) * 8 + ep_file, 64).view(bsz, 8, 8)  # row 7 - rank, as the pieces
+    planes[:, 105] = (ep_cell * has_ep[:, None, None]).to(dtype)
 
-    cr = batch.castling.to(torch.int64)
+    cr = castling.to(torch.int64)
     wk, wq, bk, bq = (cr & 1) > 0, (cr & 2) > 0, (cr & 4) > 0, (cr & 8) > 0
-    wk, bk = torch.where(mirror, bk, wk), torch.where(mirror, wk, bk)
-    wq, bq = torch.where(mirror, bq, wq), torch.where(mirror, wq, bq)
     for ch, flag in ((106, wk), (107, wq), (108, bk), (109, bq)):
         planes[:, ch] = flag.to(dtype)[:, None, None]
-    planes[:, 110] = (batch.halfmove / 100.0).clamp(max=1.0).to(dtype)[:, None, None]
+    planes[:, 110] = (halfmove / 100.0).clamp(max=1.0).to(dtype)[:, None, None]
     return planes.permute(0, 2, 3, 1).contiguous()
 
 
 def dense_policy_target(batch: Batch, vocab_size: int = VOCAB_SIZE) -> torch.Tensor:
     """[B, vocab] visit distribution (renormalized; rows without entries are all zero)."""
-    target = torch.zeros(batch.policy_idx.shape[0], vocab_size, device=batch.policy_idx.device)
-    target.scatter_add_(1, batch.policy_idx, batch.policy_prob)
+    return dense_target(batch.policy_idx, batch.policy_prob, vocab_size)
+
+
+def dense_target(policy_idx, policy_prob, vocab_size: int = VOCAB_SIZE) -> torch.Tensor:
+    target = torch.zeros(policy_idx.shape[0], vocab_size, device=policy_idx.device)
+    target.scatter_add_(1, policy_idx, policy_prob)
     total = target.sum(dim=1, keepdim=True)
     return target / total.clamp_min(1e-9)
 
@@ -312,20 +302,19 @@ class ReplayBuffer:
             )
         return rows
 
-    def sample_batch(self, batch_size: int, mirror_prob: float = 0.5) -> Batch:
-        return records_to_batch(self.sample_rows(batch_size), mirror_prob=mirror_prob)
+    def sample_batch(self, batch_size: int) -> Batch:
+        return records_to_batch(self.sample_rows(batch_size))
 
 
 class Prefetcher:
     """Background thread that keeps a few pinned CPU batches ready."""
 
-    def __init__(self, buffer: ReplayBuffer, batch_size: int, mirror_prob: float, depth: int = 3):
+    def __init__(self, buffer: ReplayBuffer, batch_size: int, depth: int = 3):
         import queue
         import threading
 
         self.buffer = buffer
         self.batch_size = batch_size
-        self.mirror_prob = mirror_prob
         self._queue: queue.Queue = queue.Queue(maxsize=depth)
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -336,7 +325,7 @@ class Prefetcher:
         while not self._stop.is_set():
             try:
                 with self._lock:
-                    batch = self.buffer.sample_batch(self.batch_size, self.mirror_prob)
+                    batch = self.buffer.sample_batch(self.batch_size)
                 pinned = {
                     k: (v.pin_memory() if torch.is_tensor(v) and torch.cuda.is_available() else v)
                     for k, v in batch.__dict__.items()

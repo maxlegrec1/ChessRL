@@ -2,10 +2,10 @@
 
 By default each launch creates a fresh run directory at
     artifacts/runs/<run_id>/
-containing isolated subfolders for the buffer, engines, checkpoints, pgns and
-wandb logs, plus a snapshot of the resolved config used for the run. A
-random-initialized TRT engine is built up-front so self-play has something to
-play with from the very first second.
+containing isolated subfolders for the buffer, engines, checkpoints and pgns,
+plus a snapshot of the resolved config used for the run. A
+random-initialized network (.cnet) is built up-front so self-play has something
+to play with from the very first second.
 
 Usage:
     uv run python -m src.run                          # fresh run
@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -34,7 +35,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = ROOT / "artifacts" / "runs"
 DEFAULT_BASE_CONFIG = ROOT / "src" / "train" / "config.yaml"
-SUBDIRS = ("buffer", "engines", "checkpoints", "pgns", "wandb")
+SUBDIRS = ("buffer", "engines", "checkpoints", "pgns")
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,8 +89,8 @@ def _latest_step_checkpoint(run_dir: Path) -> Path | None:
 
 
 def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
-    """Save a random-init checkpoint of the configured model, build the TRT
-    engine via scripts/build_trt.sh, and seed the run's .iteration file."""
+    """Save a random-init checkpoint of the configured model, export it with
+    scripts/build_net.sh, and seed the run's .iteration file."""
     import torch  # local import; pulls torch only when launching a fresh run.
 
     from src.models.factory import build_model
@@ -102,7 +103,7 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
         {
             "model": model.state_dict(),
             "model_spec": model.spec(),
-            "config": {"search_heads": cfg.search_heads},
+            "config": cfg.to_dict(),  # the export reads search_heads and the blend weight
         },
         init_pt,
     )
@@ -110,11 +111,11 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
     engine_dir = run_dir / "engines"
     iter_file = engine_dir / ".iteration"
 
-    print(f"[launcher] building initial TRT engine ({init_pt} -> {engine_dir})", flush=True)
+    print(f"[launcher] building the initial network ({init_pt} -> {engine_dir})", flush=True)
     subprocess.run(
         [
             "bash",
-            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ROOT / "scripts" / "build_net.sh"),
             str(init_pt),
             "0",
             str(engine_dir),
@@ -123,31 +124,39 @@ def _build_initial_engine(run_dir: Path, base_config: Path) -> Path:
         cwd=ROOT,
         check=True,
     )
-    initial_trt = engine_dir / "model_dynamic_initial.trt"
-    if not initial_trt.exists():
-        raise RuntimeError(f"build_trt.sh did not produce {initial_trt}")
-    return initial_trt
+    initial = engine_dir / "model_dynamic_initial.cnet"
+    if not initial.exists():
+        raise RuntimeError(f"build_net.sh did not produce {initial}")
+    return initial
 
 
 def _has_engine(run_dir: Path) -> bool:
-    """Whether engines/.iteration names at least one engine."""
+    """Whether the last engine engines/.iteration names is an existing .cnet network
+    (runs from before the fused network list TensorRT engines, which no longer load)."""
     it = run_dir / "engines" / ".iteration"
     if not it.is_file():
         return False
-    return any(
-        line.strip() and not line.startswith("iteration") for line in it.read_text().splitlines()
-    )
+    rows = [
+        line
+        for line in it.read_text().splitlines()
+        if line.strip() and not line.startswith("iteration")
+    ]
+    if not rows:
+        return False
+    path = Path(rows[-1].split(",", 1)[1].strip())
+    return path.suffix == ".cnet" and path.is_file()
 
 
 def _build_resume_engine(run_dir: Path, ckpt: Path) -> None:
-    """A branch run (another run's checkpoint copied in) has no engine yet: self-play would wait
-    for one forever while the trainer waits for self-play's games. Build it from the checkpoint."""
+    """A branch run (another run's checkpoint copied in) has no engine yet, and a run from before
+    the fused network has only TensorRT ones: self-play would wait for one forever while the
+    trainer waits for self-play's games. Build it from the checkpoint."""
     step = ckpt.stem.split("_")[1]
     print(f"[launcher] no engine yet: building one from {ckpt.name}", flush=True)
     subprocess.run(
         [
             "bash",
-            str(ROOT / "scripts" / "build_trt.sh"),
+            str(ROOT / "scripts" / "build_net.sh"),
             str(ckpt),
             str(int(step)),
             str(run_dir / "engines"),
@@ -171,18 +180,10 @@ def _write_run_config(base_config: Path, run_dir: Path, resume_from: Path | None
     ckpt["iteration_file"] = str((run_dir / "engines" / ".iteration").resolve())
     sp = cfg.setdefault("selfplay", {})
     sp["pgn_dir"] = str((run_dir / "pgns").resolve())
-    wb = cfg.setdefault("wandb", {})
-    wb["dir"] = str((run_dir / "wandb").resolve())
+    for removed in ("wandb", "mps_trainer_priority"):  # settings older runs' snapshots still carry
+        cfg.pop(removed, None)
     if resume_from:
         cfg["resume_path"] = str(resume_from.resolve())
-        # Carry over wandb.resume_id from a previously written in-run config so
-        # repeated resumes keep appending to the same W&B run.
-        existing = run_dir / "config.yaml"
-        if existing.is_file():
-            prev = yaml.safe_load(existing.read_text()) or {}
-            prev_id = (prev.get("wandb") or {}).get("resume_id")
-            if prev_id and not wb.get("resume_id"):
-                wb["resume_id"] = prev_id
     out = run_dir / "config.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out
@@ -194,7 +195,7 @@ def _open_log(path: Path):
     return fh
 
 
-def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
+def _spawn(cmd: list[str], log_path: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
     log_fh = _open_log(log_path)
     return subprocess.Popen(
         cmd,
@@ -202,7 +203,59 @@ def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        env=env,
     )
+
+
+def mps_child_env(base: dict[str, str], pipe_dir: str, log_dir: str) -> dict[str, str]:
+    """Environment of a process under the run's MPS daemon, at normal priority: self-play and the
+    trainer share the GPU as equals and data.target_k paces the trainer (below self-play's
+    priority it starved whenever the searches saturated the GPU)."""
+    env = dict(base, CUDA_MPS_PIPE_DIRECTORY=pipe_dir, CUDA_MPS_LOG_DIRECTORY=log_dir)
+    env.pop("CUDA_MPS_CLIENT_PRIORITY", None)
+    return env
+
+
+def _start_mps() -> tuple[str, str] | None:
+    """Start an MPS daemon with its own pipe directory (other GPU processes on the box keep
+    their own contexts) and check that a client can connect. Returns (pipe_dir, log_dir), or
+    None after a warning when MPS is unavailable."""
+    control = shutil.which("nvidia-cuda-mps-control")
+    if control is None:
+        print("[launcher] mps: nvidia-cuda-mps-control not found; running without MPS", flush=True)
+        return None
+    base = Path(f"/tmp/chessrl-mps-{os.getpid()}")  # short: the pipe path has a length limit
+    pipe_dir, log_dir = str(base / "pipe"), str(base / "log")
+    Path(pipe_dir).mkdir(parents=True, exist_ok=True)
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    env = mps_child_env(dict(os.environ), pipe_dir, log_dir)
+    if subprocess.run([control, "-d"], env=env).returncode != 0:
+        print("[launcher] mps: the daemon did not start; running without MPS", flush=True)
+        return None
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import torch; torch.zeros(1, device='cuda'); torch.cuda.synchronize()",
+        ],
+        env=env,
+        capture_output=True,
+        timeout=120,
+    )
+    if probe.returncode != 0:
+        print("[launcher] mps: a test client failed; running without MPS", flush=True)
+        _stop_mps((pipe_dir, log_dir))
+        return None
+    print(f"[launcher] mps: daemon up ({pipe_dir})", flush=True)
+    return pipe_dir, log_dir
+
+
+def _stop_mps(mps: tuple[str, str]) -> None:
+    control = shutil.which("nvidia-cuda-mps-control")
+    if control is None:
+        return
+    env = mps_child_env(dict(os.environ), mps[0], mps[1])
+    subprocess.run([control], input=b"quit\n", env=env)
 
 
 def _terminate_group(proc: subprocess.Popen, sig: int) -> None:
@@ -240,7 +293,7 @@ def main() -> int:
             _build_initial_engine(run_dir, args.config or DEFAULT_BASE_CONFIG)
         else:
             # Trainer-only fresh run: still need an iteration file so the
-            # trainer's later build_trt invocations append cleanly.
+            # trainer's later build_net.sh invocations append cleanly.
             (run_dir / "engines" / ".iteration").write_text("iteration,engine_path\n")
         resume_path = None
 
@@ -270,9 +323,16 @@ def main() -> int:
         print(f"Foreground: {name} (Ctrl-C to stop)\n", flush=True)
         os.execvp(cmd[0], cmd)  # does not return
 
+    from src.train.config import load_config
+
+    run_cfg = load_config(cfg_path)
+    mps = _start_mps() if len(plan) == 2 and run_cfg.mps else None
     children: list[tuple[str, subprocess.Popen, Path]] = []
     for name, cmd, log in plan:
-        children.append((name, _spawn(cmd, log), log))
+        env = None
+        if mps is not None:
+            env = mps_child_env(dict(os.environ), mps[0], mps[1])
+        children.append((name, _spawn(cmd, log, env), log))
 
     print(f"\nRun directory: {run_dir}")
     print(f"Resolved config: {cfg_path}")
@@ -329,6 +389,8 @@ def main() -> int:
     finally:
         for name, proc, _ in children:
             print(f"[launcher] {name} final rc={proc.poll()}", flush=True)
+        if mps is not None:
+            _stop_mps(mps)
 
     return exit_code
 

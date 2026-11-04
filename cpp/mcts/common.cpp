@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -11,6 +12,45 @@
 
 namespace chessrl::mcts
 {
+
+std::string mirror_uci(const std::string& uci)
+{
+    std::string out = uci;
+    if (out.size() >= 4)
+    {
+        out[1] = static_cast<char>('1' + '8' - out[1]);
+        out[3] = static_cast<char>('1' + '8' - out[3]);
+    }
+    return out;
+}
+
+std::string mirror_fen(const std::string& fen)
+{
+    std::istringstream in(fen);
+    std::string placement, side, castling, ep, rest;
+    in >> placement >> side >> castling >> ep;
+    std::getline(in, rest);  // " halfmove fullmove", unchanged
+    std::vector<std::string> ranks;
+    std::stringstream rows(placement);
+    for (std::string row; std::getline(rows, row, '/');) ranks.push_back(row);
+    std::string mirrored;
+    for (auto it = ranks.rbegin(); it != ranks.rend(); ++it)
+    {
+        if (!mirrored.empty()) mirrored += '/';
+        for (const char c : *it)
+            mirrored += std::isupper(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(c))
+                                                                    : static_cast<char>(std::toupper(c));
+    }
+    std::string rights;
+    for (const char c : std::string("KQkq"))  // white's rights become black's and the reverse, in FEN order
+    {
+        const char from = std::isupper(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(c))
+                                                                     : static_cast<char>(std::toupper(c));
+        if (castling.find(from) != std::string::npos) rights += c;
+    }
+    if (ep.size() == 2) ep[1] = static_cast<char>('1' + '8' - ep[1]);
+    return mirrored + (side == "w" ? " b " : " w ") + (rights.empty() ? "-" : rights) + " " + ep + rest;
+}
 
 PiecePlanes snapshot_piece_planes(const chess::Board& board)
 {
@@ -99,29 +139,8 @@ HistoryStack build_root_history_stack(
     return stack;
 }
 
-struct HistoryEntry
-{
-    std::shared_ptr<const HistoryEntry> parent;
-    std::string move;
-    int length{0};
-};
-
 namespace
 {
-
-HistoryHandle build_history_chain(const std::vector<std::string>& history)
-{
-    HistoryHandle tail;
-    for (const auto& move : history)
-    {
-        auto entry = std::make_shared<HistoryEntry>();
-        entry->parent = tail;
-        entry->move = move;
-        entry->length = tail ? tail->length + 1 : 1;
-        tail = std::move(entry);
-    }
-    return tail;
-}
 
 bool starts_with_flag(const std::string& value)
 {
@@ -203,23 +222,18 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
     while (current >= 0 && current < static_cast<int>(tree.nodes.size()))
     {
         const TreeNode& node = tree.nodes[current];
-        if (node.children.empty())
+        if (node.num_children == 0)
         {
             break;
         }
 
-        size_t best_index = 0;
+        int best_index = 0;
         bool has_visits = false;
         float best_visits = -1.0F;
 
-        for (size_t i = 0; i < node.children.size(); ++i)
+        for (int i = 0; i < node.num_children; ++i)
         {
-            const int child_index = node.children[i];
-            if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
-            {
-                continue;
-            }
-            const TreeNode& child = tree.nodes[child_index];
+            const TreeNode& child = tree.nodes[static_cast<size_t>(node.first_child + i)];
             const float visits = static_cast<float>(child.visit_count);
             if (visits > best_visits)
             {
@@ -233,9 +247,9 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
         {
             float best_prior = -1.0F;
             bool found_prior = false;
-            for (size_t i = 0; i < node.children.size(); ++i)
+            for (int i = 0; i < node.num_children; ++i)
             {
-                const float prior = node.child_priors[i];
+                const float prior = tree.nodes[static_cast<size_t>(node.first_child + i)].prior;
                 if (prior > best_prior)
                 {
                     best_prior = prior;
@@ -249,30 +263,14 @@ std::vector<std::string> principal_variation(const SearchTree& tree, int node_in
             }
         }
 
-        const chess::Move move = node.child_moves[best_index];
+        current = node.first_child + best_index;
+        const chess::Move move = tree.nodes[static_cast<size_t>(current)].move_from_parent;
         // Phase B: Use current_board for chess960 flag
         line.push_back(chess::uci::moveToUci(move, current_board.chess960()));
         current_board.makeMove(move);
-        current = node.children[best_index];
     }
 
     return line;
-}
-
-std::vector<std::string> history_to_vector(const HistoryHandle& tail)
-{
-    if (!tail)
-    {
-        return {};
-    }
-    std::vector<std::string> moves(static_cast<size_t>(tail->length));
-    auto current = tail;
-    for (int index = tail->length - 1; index >= 0; --index)
-    {
-        moves[static_cast<size_t>(index)] = current->move;
-        current = current->parent;
-    }
-    return moves;
 }
 
 MctsOptions parse_cli(int argc, char** argv)
@@ -439,14 +437,12 @@ chess::Board apply_history(const SearchInput& input)
     return board;
 }
 
-int SearchTree::add_root(const chess::Board& board, const std::vector<std::string>& history)
+int SearchTree::add_root(const chess::Board& board)
 {
     nodes.clear();
     TreeNode root;
-    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
     root.terminal = board.isGameOver().second != chess::GameResult::NONE;
     root.prior = 1.0F;
-    root.history = build_history_chain(history);
     // Root has no parent, so move_from_parent remains NO_MOVE
 
     nodes.push_back(std::move(root));
@@ -458,11 +454,7 @@ void SearchTree::reserve(size_t count)
     nodes.reserve(count);
 }
 
-int SearchTree::add_child(
-    int parent_index,
-    chess::Move move,
-    float prior,
-    const chess::Board& child_board)
+int SearchTree::add_child(int parent_index, chess::Move move, float prior)
 {
     if (parent_index < 0 || parent_index >= static_cast<int>(nodes.size()))
     {
@@ -473,53 +465,67 @@ int SearchTree::add_child(
     node.parent = parent_index;
     node.move_from_parent = move;
     node.prior = prior;
-    // Phase B: Board is no longer stored in TreeNode - terminal state will be checked during traversal
-    node.terminal = child_board.isGameOver().second != chess::GameResult::NONE;
-    if (node.terminal)
-    {
-        // Initialize terminal node WDL from the perspective of side to move on this node
-        const auto result = child_board.isGameOver().second;
-        switch (result)
-        {
-        case chess::GameResult::WIN:
-            node.wdl = {1.0F, 0.0F, 0.0F};
-            break;
-        case chess::GameResult::LOSE:
-            node.wdl = {0.0F, 0.0F, 1.0F};
-            break;
-        case chess::GameResult::DRAW:
-            node.wdl = {0.0F, 1.0F, 0.0F};
-            break;
-        default:
-            break;
-        }
-    }
-    node.history = nodes[parent_index].history;
-
-    // Phase B: Need chess960 flag from parent board - will be passed separately or reconstructed
-    // For now, we'll need to reconstruct parent board to get chess960 flag
-    // This is a temporary solution - we may need to store chess960 flag separately
-    // But for now, we'll use the child_board which has the correct chess960 setting
-    const bool chess960 = child_board.chess960();
-    const std::string move_uci = chess::uci::moveToUci(move, chess960);
-    if (!move_uci.empty())
-    {
-        auto entry = std::make_shared<HistoryEntry>();
-        entry->parent = node.history;
-        entry->move = move_uci;
-        entry->length = node.history ? node.history->length + 1 : 1;
-        node.history = std::move(entry);
-    }
 
     nodes.push_back(std::move(node));
     const int child_index = static_cast<int>(nodes.size()) - 1;
 
     TreeNode& parent = nodes[parent_index];
-    parent.children.push_back(child_index);
-    parent.child_moves.push_back(move);
-    parent.child_priors.push_back(prior);
+    if (parent.num_children == 0)
+    {
+        parent.first_child = child_index;
+    }
+    else if (child_index != parent.first_child + parent.num_children)
+    {
+        throw std::logic_error("SearchTree::add_child: a node's children must be added together");
+    }
+    ++parent.num_children;
 
     return child_index;
+}
+
+SearchTree extract_subtree(const SearchTree& tree, int new_root, std::uint64_t root_hash)
+{
+    SearchTree out;
+    out.root_hash = root_hash;
+    if (new_root < 0 || new_root >= static_cast<int>(tree.nodes.size()))
+    {
+        return out;
+    }
+    // Breadth first: a node's new index is its discovery order, so parents precede children and
+    // each node's children stay consecutive.
+    std::vector<int> order{new_root};
+    std::vector<int> new_index(tree.nodes.size(), -1);
+    new_index[static_cast<size_t>(new_root)] = 0;
+    for (size_t k = 0; k < order.size(); ++k)
+    {
+        const TreeNode& node = tree.nodes[static_cast<size_t>(order[k])];
+        for (int i = 0; i < node.num_children; ++i)
+        {
+            const int child = node.first_child + i;
+            new_index[static_cast<size_t>(child)] = static_cast<int>(order.size());
+            order.push_back(child);
+        }
+    }
+    out.nodes.reserve(order.size());
+    for (const int old : order)
+    {
+        TreeNode node = tree.nodes[static_cast<size_t>(old)];
+        node.parent = old == new_root ? -1 : new_index[static_cast<size_t>(node.parent)];
+        if (node.num_children > 0)
+        {
+            node.first_child = new_index[static_cast<size_t>(node.first_child)];
+        }
+        node.virtual_loss = 0.0F;
+        if (node.visit_count > 0)
+        {
+            const float inv = 1.0F / static_cast<float>(node.visit_count);
+            node.wdl = {node.wdl_sum[0] * inv, node.wdl_sum[1] * inv, node.wdl_sum[2] * inv};
+        }
+        out.nodes.push_back(std::move(node));
+    }
+    out.nodes.front().move_from_parent = chess::Move::NO_MOVE;
+    out.nodes.front().prior = 1.0F;
+    return out;
 }
 
 std::optional<float> terminal_value(const chess::Board& board)
@@ -581,6 +587,9 @@ void backpropagate_full(
         node.wdl[0] = node.wdl_sum[0] * inv;
         node.wdl[1] = node.wdl_sum[1] * inv;
         node.wdl[2] = node.wdl_sum[2] * inv;
+        // The selection's moves-left term, as select_child computed it per child and step.
+        const float plies_avg = node.plies_sum * inv;
+        node.mlh_tanh = std::tanh(plies_avg * kMlhPliesScale);
         // Flip for parent's perspective: value sign-flips, WDL swaps W↔L,
         // plies stays as-is (moves-left is symmetric).
         current_v = -current_v;
@@ -599,19 +608,17 @@ std::array<float, 3> refine_wdl_node(SearchTree& tree, int node_index, std::vect
     }
     visited[static_cast<size_t>(node_index)] = true;
 
-    if (node.terminal || node.children.empty())
+    if (node.terminal || node.num_children == 0)
     {
         return node.wdl;
     }
 
     std::array<float, 3> wdl_sum{0.0F, 0.0F, 0.0F};
     int total_visits = 0;
-    for (const int child_index : node.children)
+    const int first_child = node.first_child;
+    const int num_children = node.num_children;
+    for (int child_index = first_child; child_index < first_child + num_children; ++child_index)
     {
-        if (child_index < 0 || child_index >= static_cast<int>(tree.nodes.size()))
-        {
-            continue;
-        }
         const TreeNode& child = tree.nodes[child_index];
         if (child.visit_count > 0)
         {

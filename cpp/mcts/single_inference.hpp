@@ -1,57 +1,146 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <exception>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__F16C__)
+#include <immintrin.h>
+#endif
 
 #include "chess-library/include/chess.hpp"
 
 #include "inference.hpp"
 #include "mcts/common.hpp"
 // SmallPackedPosition + plane-layout constants: standalone header (only
-// <cstdint>) shared with the CUDA expansion kernel so nvcc never parses
-// chess-library / TensorRT.
+// <cstdint>) shared with the fused CUDA kernel so nvcc never parses
+// chess-library.
 #include "mcts/packed_position.hpp"
 
 namespace chessrl::mcts::single
 {
 
-template <typename Result>
-class BatchTicket
+// The evaluations one search has in flight. The runner wakes the search once, when the last of
+// them is ready, instead of once per position (a wake-up per position cost the inference
+// workers 1.5 µs each). Every change to the count is made under the lock, so once wait() has
+// returned no worker touches the group again.
+class EvalGroup
 {
 public:
-    BatchTicket() = default;
-    explicit BatchTicket(std::shared_future<Result> future)
-        : future_(std::move(future))
+    EvalGroup() = default;
+    EvalGroup(const EvalGroup&) = delete;
+    EvalGroup& operator=(const EvalGroup&) = delete;
+    ~EvalGroup() { wait(); }
+
+    void add(int n = 1)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_ += n;
+    }
+
+    void done()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (--pending_ == 0) cv_.notify_one();
+    }
+
+    void wait()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return pending_ == 0; });
+    }
+
+    // True when nothing is pending, so wait() would return at once.
+    bool ready()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_ == 0;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int pending_{0};
+};
+
+// One network evaluation in flight. The runner points it at the position's record in its pinned
+// output buffer (FP16 policy logits, then WDL, mlh and mlh_q as floats) and the search reads that
+// record in place, so the worker writes nothing per position; the buffer's `readers` counts the
+// records still held (a record is released when its slot goes, with the last ticket). The CPU
+// benchmark's fake network and the by-value hand-back fill `value` instead.
+struct EvalSlot
+{
+    EvalGroup* group{nullptr};
+    const std::uint16_t* policy_fp16{nullptr};
+    const float* aux{nullptr};
+    int policy_size{0};
+    std::atomic<int>* readers{nullptr};
+    bool delivered{false};
+    bool taken{false};
+    SmallPolicyValue value;
+    std::exception_ptr error;
+
+    ~EvalSlot()
+    {
+        if (readers && !taken) readers->fetch_sub(1, std::memory_order_release);
+    }
+};
+
+inline void fp16_to_float(const std::uint16_t* src, float* dst, size_t n)
+{
+    size_t i = 0;
+#if defined(__F16C__)
+    for (; i + 8 <= n; i += 8)
+    {
+        _mm256_storeu_ps(dst + i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i))));
+    }
+#endif
+    for (; i < n; ++i) dst[i] = chessrl::half_to_float(src[i]);
+}
+
+// A pending evaluation of `group`. Call get() once, after the group's wait() has returned.
+class EvalTicket
+{
+public:
+    EvalTicket() = default;
+    explicit EvalTicket(std::shared_ptr<EvalSlot> slot)
+        : slot_(std::move(slot))
     {
     }
 
     bool valid() const noexcept
     {
-        return future_.valid();
+        return slot_ != nullptr;
     }
 
-    bool ready() const
+    // The result. From the output buffer its FP16 logits are left in place (policy_fp16), valid
+    // while this ticket is held; destroying the ticket releases the record.
+    SmallPolicyValue get() const
     {
-        if (!future_.valid())
-        {
-            return false;
-        }
-        return future_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-    }
-
-    Result get() const
-    {
-        return future_.get();
+        EvalSlot& s = *slot_;
+        if (s.error) std::rethrow_exception(s.error);
+        if (!s.policy_fp16) return std::move(s.value);
+        SmallPolicyValue v;
+        v.policy_fp16 = s.policy_fp16;
+        v.policy_fp16_size = s.policy_size;
+        v.wdl = {s.aux[0], s.aux[1], s.aux[2]};
+        v.mlh = s.aux[3];
+        v.mlh_q = s.aux[4];
+        return v;
     }
 
 private:
-    std::shared_future<Result> future_;
+    std::shared_ptr<EvalSlot> slot_;
 };
 
 struct SmallEncodedPosition
@@ -64,8 +153,9 @@ SmallPackedPosition pack_small_position(
     const chess::Board& board, const chessrl::mcts::HistoryStack& history);
 
 // CPU reference expansion — bit-identical to encode_small_position().features
-// for the same logical position. The GPU kernel must reproduce this exactly.
-std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed);
+// for the same logical position. The GPU kernel must reproduce this exactly. stm_colour: plane 104 is the
+// real side to move (networks with model.stm_plane colour), else 1.
+std::vector<float> expand_packed_to_dense(const SmallPackedPosition& packed, bool stm_colour = false);
 
 struct BatchStatistics
 {
@@ -98,7 +188,7 @@ SmallEncodedPosition encode_small_position(
 
 struct SmallBatchConfig
 {
-    std::string engine_path{"model.trt"};
+    std::string engine_path{"model.cnet"};  // a .cnet file (src/export/to_cnet.py)
     int max_batch_size{1024};
     bool enable_telemetry{false};
 };
@@ -106,14 +196,18 @@ struct SmallBatchConfig
 class SmallBatchRunner
 {
 public:
-    using Ticket = BatchTicket<SmallPolicyValue>;
+    using Ticket = EvalTicket;
 
     explicit SmallBatchRunner(SmallBatchConfig config = {});
 
     // Carries a POINTER to the compact packed snapshot (keeps the shared-
-    // queue critical section pointer-sized). Dense planes are produced on
-    // the GPU (launch_expand_planes) just before the TRT enqueue.
-    Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position);
+    // queue critical section pointer-sized). The fused kernel expands it to
+    // the input planes on the GPU. `group` is woken when all its positions are done.
+    Ticket enqueue(std::shared_ptr<const SmallPackedPosition> position, EvalGroup& group);
+    // A search round's positions at once (moved from `positions`): one lock on the shared queue
+    // and at most one wake-up instead of one of each per position. Appends a ticket per position.
+    void enqueue(std::vector<std::shared_ptr<const SmallPackedPosition>>& positions, EvalGroup& group,
+                 std::vector<Ticket>& tickets);
     void process_pending();
     size_t pending() const;
     BatchStatistics statistics() const;

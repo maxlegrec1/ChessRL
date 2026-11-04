@@ -1,16 +1,19 @@
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <cstring>
 
 #include "chess-library/include/chess.hpp"
 #include "inference.hpp"
+#include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
 #include "mcts/common.hpp"
 #include "mcts/single_inference.hpp"
-#include "mcts/expand_kernel.hpp"
 #include "mcts/small_runner.hpp"
 #include "mcts/summary.hpp"
+#include "net/encoder_net.hpp"
 #include "selfplay.hpp"
 
 namespace py = pybind11;
@@ -35,21 +38,48 @@ py::dict summary_to_python(const chessrl::mcts::MctsSummary& summary)
     return result;
 }
 
+// Fused-network output records as numpy arrays: policy logits [B, 1858], value WDL
+// [B, 3], mlh [B], mlh_q [B].
+py::dict records_to_python(const std::vector<unsigned char>& records, int batch)
+{
+    using chessrl::net::kAuxOffset;
+    using chessrl::net::kPolicySize;
+    using chessrl::net::kRecordBytes;
+    py::array_t<float> policy({batch, kPolicySize});
+    py::array_t<float> wdl({batch, 3});
+    py::array_t<float> mlh(batch);
+    py::array_t<float> mlh_q(batch);
+    auto p = policy.mutable_unchecked<2>();
+    auto v = wdl.mutable_unchecked<2>();
+    auto m = mlh.mutable_unchecked<1>();
+    auto q = mlh_q.mutable_unchecked<1>();
+    for (int b = 0; b < batch; ++b)
+    {
+        const unsigned char* rec = records.data() + static_cast<size_t>(b) * kRecordBytes;
+        for (int i = 0; i < kPolicySize; ++i)
+        {
+            __half h;
+            std::memcpy(&h, rec + 2 * i, sizeof(h));
+            p(b, i) = __half2float(h);
+        }
+        float aux[5];
+        std::memcpy(aux, rec + kAuxOffset, sizeof(aux));
+        for (int j = 0; j < 3; ++j) v(b, j) = aux[j];
+        m(b) = aux[3];
+        q(b) = aux[4];
+    }
+    py::dict out;
+    out["policy"] = policy;
+    out["value"] = wdl;
+    out["mlh"] = mlh;
+    out["mlh_q"] = mlh_q;
+    return out;
+}
+
 } // namespace
 
 PYBIND11_MODULE(_inference_cpp, m)
 {
-    py::class_<chessrl::InferenceTimings>(m, "InferenceTimings")
-        .def_readonly("encode_ms", &chessrl::InferenceTimings::encodeMs)
-        .def_readonly("inference_ms", &chessrl::InferenceTimings::inferMs)
-        .def_readonly("sampling_ms", &chessrl::InferenceTimings::sampleMs)
-        .def_readonly("total_ms", &chessrl::InferenceTimings::totalMs);
-
-    py::class_<chessrl::SmallInferenceResult>(m, "SmallInferenceResult")
-        .def_property_readonly("moves", [](const chessrl::SmallInferenceResult& self) { return self.moves; })
-        .def_property_readonly("wdl", [](const chessrl::SmallInferenceResult& self) { return self.wdl; })
-        .def_property_readonly("timings", [](const chessrl::SmallInferenceResult& self) { return self.timings; });
-
     // Encoder parity hook: returns the C++-side input plane vector for a
     // (FEN, history) pair so the Python parity test can bit-compare it
     // against fen_encoder.fen_to_tensor. Pure encoding; no NN call.
@@ -86,7 +116,7 @@ PYBIND11_MODULE(_inference_cpp, m)
     // encode_position_with_history (tests/test_packed_parity.py gates this).
     m.def(
         "encode_position_packed_roundtrip",
-        [](const std::string& fen, const std::vector<std::string>& moves) {
+        [](const std::string& fen, const std::vector<std::string>& moves, bool stm_colour) {
             const std::string starting_fen = fen.empty()
                 ? std::string(chess::constants::STARTPOS)
                 : fen;
@@ -104,72 +134,92 @@ PYBIND11_MODULE(_inference_cpp, m)
             chessrl::mcts::HistoryStack stack =
                 chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
             auto packed = chessrl::mcts::single::pack_small_position(board, stack);
-            return chessrl::mcts::single::expand_packed_to_dense(packed);
+            return chessrl::mcts::single::expand_packed_to_dense(packed, stm_colour);
         },
         py::arg("fen"),
         py::arg("moves"),
-        "Pack a FEN+history then CPU-expand it; must match encode_position_with_history.");
+        py::arg("stm_colour") = false,
+        "Pack a FEN+history then CPU-expand it; must match encode_position_with_history. stm_colour: plane 104 "
+        "is the real side to move (model.stm_plane colour), as fen_to_tensor(..., stm_colour=True) makes it.");
 
-    // GPU-path parity hook: pack on host, upload, run the CUDA expansion
-    // kernel (fp32 for an exact compare), download. Must equal the CPU
-    // reference (tests/test_packed_gpu_parity.py gates this).
     m.def(
-        "expand_packed_gpu",
-        [](const std::string& fen, const std::vector<std::string>& moves) {
-            const std::string starting_fen = fen.empty()
-                ? std::string(chess::constants::STARTPOS)
-                : fen;
-            chess::Board board(starting_fen);
-            for (const auto& mv_uci : moves)
-            {
-                chess::Move mv = chess::uci::uciToMove(board, mv_uci);
-                if (mv == chess::Move::NO_MOVE)
-                    throw std::runtime_error("expand_packed_gpu: bad move " + mv_uci);
-                board.makeMove(mv);
-            }
-            chessrl::mcts::HistoryStack stack =
-                chessrl::mcts::build_root_history_stack(starting_fen, moves, board);
-            auto packed = chessrl::mcts::single::pack_small_position(board, stack);
-
-            using chessrl::mcts::single::SmallPackedPosition;
+        "fused_forward_dense",
+        [](const std::string& path, py::array_t<float, py::array::c_style | py::array::forcecast> planes) {
             using chessrl::mcts::single::kPackElems;
-            SmallPackedPosition* dPacked = nullptr;
-            float* dOut = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&dPacked), sizeof(SmallPackedPosition)) != cudaSuccess
-                || cudaMalloc(reinterpret_cast<void**>(&dOut), sizeof(float) * kPackElems) != cudaSuccess)
+            if (planes.size() % kPackElems != 0)
+                throw std::runtime_error("fused_forward_dense: expected [B, 8, 8, 111] planes");
+            const int batch = static_cast<int>(planes.size() / kPackElems);
+            std::vector<unsigned char> records;
             {
-                if (dPacked) cudaFree(dPacked);
-                if (dOut) cudaFree(dOut);
-                throw std::runtime_error("expand_packed_gpu: cudaMalloc failed");
+                py::gil_scoped_release release;
+                records = chessrl::net::EncoderNet(path).run_dense(planes.data(), batch);
             }
-            cudaMemcpy(dPacked, &packed, sizeof(packed), cudaMemcpyHostToDevice);
-            auto err = chessrl::mcts::single::launch_expand_planes(
-                dPacked, dOut, 1, /*out_is_half=*/0, /*stream=*/0);
-            cudaDeviceSynchronize();
-            std::vector<float> host(static_cast<size_t>(kPackElems));
-            if (err == cudaSuccess)
-                cudaMemcpy(host.data(), dOut, sizeof(float) * kPackElems,
-                           cudaMemcpyDeviceToHost);
-            cudaFree(dPacked);
-            cudaFree(dOut);
-            if (err != cudaSuccess)
-                throw std::runtime_error("expand_packed_gpu: kernel launch failed");
-            return host;
+            return records_to_python(records, batch);
         },
-        py::arg("fen"),
-        py::arg("moves"),
-        "Pack + GPU-expand (fp32); must match encode_position_packed_roundtrip.");
+        py::arg("path"),
+        py::arg("planes"),
+        "Run a .cnet network on dense planes [B, 8, 8, 111]: policy, value, mlh, mlh_q.");
 
     m.def(
-        "small_generate_moves",
-        [](const std::vector<std::string>& fens, float temperature, int iterations, const std::string& engine_path) {
-            return chessrl::small_generate_moves(fens, temperature, iterations, engine_path);
+        "fused_forward_positions",
+        [](const std::string& path, const std::vector<std::string>& fens,
+           const std::vector<std::vector<std::string>>& moves) {
+            if (fens.size() != moves.size())
+                throw std::runtime_error("fused_forward_positions: one move list per FEN");
+            std::vector<chessrl::mcts::single::SmallPackedPosition> packed;
+            packed.reserve(fens.size());
+            for (size_t i = 0; i < fens.size(); ++i)
+            {
+                const std::string start = fens[i].empty() ? std::string(chess::constants::STARTPOS) : fens[i];
+                chess::Board board(start);
+                for (const auto& mv_uci : moves[i])
+                {
+                    chess::Move mv = chess::uci::uciToMove(board, mv_uci);
+                    if (mv == chess::Move::NO_MOVE)
+                        throw std::runtime_error("fused_forward_positions: bad move " + mv_uci);
+                    board.makeMove(mv);
+                }
+                const auto stack = chessrl::mcts::build_root_history_stack(start, moves[i], board);
+                packed.push_back(chessrl::mcts::single::pack_small_position(board, stack));
+            }
+            const int batch = static_cast<int>(packed.size());
+            std::vector<unsigned char> records;
+            {
+                py::gil_scoped_release release;
+                records = chessrl::net::EncoderNet(path).run_packed(packed.data(), batch);
+            }
+            return records_to_python(records, batch);
         },
+        py::arg("path"),
         py::arg("fens"),
-        py::arg("temperature"),
-        py::arg("iterations") = 1,
-        py::arg("engine_path") = std::string("model.trt"),
-        "Run the TensorRT policy head and return sampled moves with timing stats.");
+        py::arg("moves"),
+        "Run a .cnet network on packed positions (FEN + moves, as self-play packs them).");
+
+    m.def(
+        "fused_benchmark",
+        [](const std::string& path, int batch, int iterations, int streams) {
+            py::gil_scoped_release release;
+            const chessrl::net::EncoderNet net(path);
+            return chessrl::net::benchmark(net, batch, iterations, streams);
+        },
+        py::arg("path"),
+        py::arg("batch"),
+        py::arg("iterations") = 200,
+        py::arg("streams") = 1,
+        "Fused-network throughput (positions/s) on the start position.");
+
+    m.def(
+        "fused_phase_cycles",
+        [](bool reset) {
+            const auto cycles = chessrl::net::kernel_phase_cycles(reset);
+            const auto names = chessrl::net::kernel_phase_names();
+            py::dict out;
+            for (size_t i = 0; i < names.size(); ++i) out[py::str(names[i])] = cycles[i];
+            return out;
+        },
+        py::arg("reset") = true,
+        "Cycles per kernel phase summed over every block, from runs with CHESSRL_KERNEL_TIMING=1 (the "
+        "instrumented build); `reset` zeroes the counters.");
 
     m.def(
         "small_mcts_search_batch",
@@ -214,7 +264,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("simulations") = 800,
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("model.trt"),
+        py::arg("engine_path") = std::string("model.cnet"),
         py::arg("temperature_at_root") = 0.0F,
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,
@@ -271,7 +321,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("simulations") = 800,
         py::arg("cpuct") = 1.5F,
         py::arg("temperature") = 1.0F,
-        py::arg("engine_path") = std::string("model.trt"),
+        py::arg("engine_path") = std::string("model.cnet"),
         py::arg("temperature_at_root") = 0.0F,
         py::arg("use_dirichlet") = false,
         py::arg("dirichlet_alpha") = 0.3F,
@@ -298,6 +348,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readwrite("output_path", &chessrl::SelfPlayConfig::output_path)
         .def_readwrite("concurrency", &chessrl::SelfPlayConfig::concurrency)
         .def_readwrite("threads", &chessrl::SelfPlayConfig::threads)
+        .def_readwrite("async_play", &chessrl::SelfPlayConfig::async_play)
         .def_readwrite("hash_size", &chessrl::SelfPlayConfig::hash_size)
         .def_readwrite("simulations", &chessrl::SelfPlayConfig::simulations)
         .def_readwrite("cpuct", &chessrl::SelfPlayConfig::cpuct)
@@ -312,8 +363,10 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readwrite("save_pgn", &chessrl::SelfPlayConfig::save_pgn)
         .def_readwrite("pgn_dir", &chessrl::SelfPlayConfig::pgn_dir)
         .def_readwrite("random_opening_plies", &chessrl::SelfPlayConfig::random_opening_plies)
+        .def_readwrite("tree_reuse", &chessrl::SelfPlayConfig::tree_reuse)
         .def_readwrite("temperature_plies", &chessrl::SelfPlayConfig::temperature_plies)
         .def_readwrite("temperature_late", &chessrl::SelfPlayConfig::temperature_late)
+        .def_readwrite("fast_temperature_at_root", &chessrl::SelfPlayConfig::fast_temperature_at_root)
         .def_readwrite("resign_threshold", &chessrl::SelfPlayConfig::resign_threshold)
         .def_readwrite("resign_consecutive", &chessrl::SelfPlayConfig::resign_consecutive)
         .def_readwrite("resign_playthrough", &chessrl::SelfPlayConfig::resign_playthrough)
@@ -343,6 +396,8 @@ PYBIND11_MODULE(_inference_cpp, m)
         .def_readonly("playthrough_false_resign", &chessrl::SelfPlayStats::playthrough_false_resign)
         .def_readonly("curriculum_games", &chessrl::SelfPlayStats::curriculum_games)
         .def_readonly("full_searches", &chessrl::SelfPlayStats::full_searches)
+        .def_readonly("simulations_run", &chessrl::SelfPlayStats::simulations_run)
+        .def_readonly("reused_visits", &chessrl::SelfPlayStats::reused_visits)
         .def_readonly("fast_searches", &chessrl::SelfPlayStats::fast_searches)
         .def_readonly("policy_moves", &chessrl::SelfPlayStats::policy_moves)
         .def_readonly("records_written", &chessrl::SelfPlayStats::records_written)
@@ -366,7 +421,7 @@ PYBIND11_MODULE(_inference_cpp, m)
                          bool use_dirichlet,
                          float dirichlet_alpha,
                          float dirichlet_epsilon,
-                         int random_opening_plies,
+                         float random_opening_plies,
                          int virtual_loss_width) {
             chessrl::SelfPlayConfig config;
             config.engine_path = engine_path;
@@ -405,7 +460,7 @@ PYBIND11_MODULE(_inference_cpp, m)
         py::arg("use_dirichlet") = true,
         py::arg("dirichlet_alpha") = 0.12f,
         py::arg("dirichlet_epsilon") = 0.05f,
-        py::arg("random_opening_plies") = 0,
+        py::arg("random_opening_plies") = 0.0f,
         py::arg("virtual_loss_width") = 1)
         .def("step", &chessrl::SelfPlayWorker::step, py::call_guard<py::gil_scoped_release>())
         .def("inference_stats", &chessrl::SelfPlayWorker::inference_stats)

@@ -1,9 +1,10 @@
-"""Validate v2 records written by the C++ self-play against python-chess.
+"""Validate v3 (canonical) records written by the C++ self-play against python-chess.
 
   uv run python scripts/check_buffer.py artifacts/runs/<id>/buffer/buffer.bin [-n 2000]
 
-Checks per sampled record: version byte, current bitboards / castling / en
-passant vs the FEN, decoded planes vs fen_encoder.encode_record_planes,
+Checks per sampled record: version byte, white to move (records are stored as the
+side to move sees it), current bitboards / castling / en passant vs the FEN,
+decoded planes vs fen_encoder.encode_record_planes,
 legality of every visited move and of the played move, visit fractions
 summing to ~1, one-hot outcome. Exits non-zero on any failure.
 """
@@ -23,7 +24,14 @@ sys.path.insert(0, str(ROOT))
 
 from src.models.small.fen_encoder import encode_record_planes  # noqa: E402
 from src.models.small.vocab import policy_index, policy_to_idx  # noqa: E402
-from src.train.dataset import FLAG_FULL_SEARCH, RECORD_DTYPE, decode_planes, records_to_batch  # noqa: E402
+from src.train.dataset import (  # noqa: E402
+    FLAG_BLACK_TO_MOVE,
+    FLAG_FULL_SEARCH,
+    RECORD_DTYPE,
+    RECORD_VERSION,
+    decode_planes,
+    records_to_batch,
+)
 
 _TYPES = (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING)
 
@@ -48,14 +56,17 @@ def main() -> int:
     fails: Counter = Counter()
     stats: Counter = Counter()
 
-    batch = records_to_batch(rows, mirror_prob=0.0)
+    batch = records_to_batch(rows)
     planes = decode_planes(batch).numpy()
     for i, rec in enumerate(rows):
-        if rec["version"] != 2:
+        if rec["version"] != RECORD_VERSION:
             fails["version"] += 1
             continue
         fen = rec["fen"].decode()
         board = chess.Board(fen)
+        if board.turn != chess.WHITE:
+            fails["black_to_move"] += 1
+        stats["black_moved"] += bool(rec["flags"] & FLAG_BLACK_TO_MOVE)
         bb = [int(board.pieces_mask(t, c)) for c in (chess.WHITE, chess.BLACK) for t in _TYPES]
         if [int(x) for x in rec["cur_bb"]] != bb:
             fails["cur_bb"] += 1
@@ -109,7 +120,8 @@ def main() -> int:
     print(
         f"  mean visited moves {stats['entries'] / n:.1f}, mean sims {stats['sims'] / n:.0f}, "
         f"mean ply {stats['ply'] / n:.1f}, full-search {stats['full_search'] / n:.0%}, "
-        f"visit mass < 0.98 in {stats['visit_mass_lt_0.98'] / n:.1%} (top-20 truncation)"
+        f"visit mass < 0.98 in {stats['visit_mass_lt_0.98'] / n:.1%} (top-20 truncation), "
+        f"black moved in {stats['black_moved'] / n:.0%}"
     )
     if fails:
         print("  FAILURES:", dict(fails))

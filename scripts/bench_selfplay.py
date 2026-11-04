@@ -8,7 +8,7 @@ a scratch buffer under artifacts/bench/, so a run's buffer is never touched.
 
 Example:
   CUDA_VISIBLE_DEVICES=0 uv run python scripts/bench_selfplay.py \\
-      --engine artifacts/runs/<id>/engines/step_00010000.trt \\
+      --engine artifacts/runs/<id>/engines/step_00010000.cnet \\
       --duration-sec 90 --out artifacts/bench/baseline.json
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -35,6 +36,7 @@ from src.train.config import load_config  # noqa: E402
 OVERRIDES = {
     "concurrency": "boards",
     "threads": "threads",
+    "async_play": "async_play",
     "sims": "simulations",
     "virtual_loss_width": "virtual_loss_width",
     "hash_size": "hash_size",
@@ -61,7 +63,9 @@ def gpu_name() -> str:
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True, help="Path to .trt engine (must be 111-plane).")
+    ap.add_argument(
+        "--engine", required=True, help="Path to the network (.cnet, src/export/to_cnet.py)."
+    )
     ap.add_argument("--duration-sec", type=float, default=90.0)
     ap.add_argument(
         "--warmup-sec",
@@ -90,6 +94,13 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def host_busy_sec() -> float:
+    """Busy CPU seconds of the whole host since boot (/proc/stat is not per container)."""
+    with open("/proc/stat") as fh:
+        f = [float(x) for x in fh.readline().split()[1:9]]
+    return (sum(f) - f[3] - f[4]) / os.sysconf("SC_CLK_TCK")
+
+
 def main() -> int:
     args = parse_args()
     if not pathlib.Path(args.engine).exists():
@@ -105,7 +116,7 @@ def main() -> int:
     sp = load_config(args.config).selfplay
     for flag, name in OVERRIDES.items():
         if getattr(args, flag) is not None:
-            setattr(sp, name, getattr(args, flag))
+            setattr(sp, name, type(getattr(sp, name))(getattr(args, flag)))  # 0/1 for a bool key
     sp.save_pgn = False
     settings = {"boards": sp.boards, **{name: getattr(sp, name) for name in _CPP_FIELDS}}
 
@@ -132,6 +143,8 @@ def main() -> int:
     pre_nodes = 0
 
     t_start = time.monotonic()
+    cpu_start = time.process_time()  # every thread of this process: the search and the runner
+    host_start = host_busy_sec()
     samples: list[dict[str, Any]] = []
     last_sample = t_start
     step_count = 0
@@ -158,6 +171,9 @@ def main() -> int:
             break
 
     elapsed = time.monotonic() - t_start
+    cpu_sec = time.process_time() - cpu_start
+    host_load = os.getloadavg()[0]  # in a container: the whole host, neighbours included
+    others_sec = host_busy_sec() - host_start - cpu_sec  # CPU anything else on the host used
     post_stats = worker.inference_stats()
 
     delta_batches = post_stats.batches - pre_stats.batches
@@ -196,6 +212,11 @@ def main() -> int:
         f"[bench]   encoder:  {delta_encoder_calls} calls, {mean_encode_us_per_leaf:.2f} us/leaf, "
         f"thread-busy frac {encode_thread_busy_frac * 100:.1f}%"
     )
+    print(
+        f"[bench]   cpu: {cpu_sec / elapsed:.1f} cores, "
+        f"{cpu_sec * 1000 / max(1, pre_positions):.1f} ms per recorded position, "
+        f"host load {host_load:.0f}, rest of the host {others_sec / elapsed:.1f} cores"
+    )
 
     out = {
         "label": label,
@@ -206,6 +227,9 @@ def main() -> int:
         "config_file": str(args.config),
         "config": settings,
         "wall_clock_sec": elapsed,
+        "cpu_sec": cpu_sec,
+        "host_load": host_load,
+        "host_others_sec": others_sec,
         "warmup_sec": args.warmup_sec,
         "steps": step_count,
         "positions": pre_positions,

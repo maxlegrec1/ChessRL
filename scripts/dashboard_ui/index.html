@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChessRL dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css">
+<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+<style>
+  :root {
+    --surface: #fcfcfb; --page: #f4f3f0; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --grid: #ecebe5; --accent: #2a78d6; --good: #1baf7a; --warn: #c2410c; --row: #eef4fc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --page: #0d0d0d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --grid: #242422; --accent: #3987e5; --good: #199e70; --warn: #f97316; --row: #1f2a38;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface: #1a1a19; --page: #0d0d0d; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --line: #2c2c2a; --grid: #242422; --accent: #3987e5; --good: #199e70; --warn: #f97316; --row: #1f2a38;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; margin: 0 6px 0 0; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--ink2);
+          font-variant-numeric: tabular-nums; }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .meter { width: 90px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; display: inline-block;
+           vertical-align: middle; margin-left: 6px; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .spacer { flex: 1; }
+  .note { color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); text-decoration: none; }
+  button, input, select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 4px 9px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  .layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 16px; padding: 14px 16px; align-items: start; }
+  aside { position: sticky; top: 62px; max-height: calc(100vh - 76px); overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+  .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 0 0 6px; }
+  .btns { display: flex; gap: 6px; margin-bottom: 8px; }
+  .btns button { flex: 1; padding: 3px 0; font-size: 13px; }
+  #filter { width: 100%; margin-bottom: 6px; }
+  .run { display: flex; align-items: center; gap: 7px; padding: 3px 4px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .run:hover { background: var(--row); }
+  .run input { margin: 0; }
+  .run .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run .elo { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+  .live { width: 6px; height: 6px; border-radius: 50%; background: var(--good); flex: none; }
+  details > summary { cursor: pointer; color: var(--ink2); font-size: 13px; padding: 3px 0; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { flex: 1; border: 0; border-radius: 0; padding: 4px 0; font-size: 13px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.on { background: var(--accent); color: #fff; }
+  input[type=range] { width: 100%; padding: 0; }
+  main { min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+  .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chart h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; color: var(--ink); }
+  .chart .sub { font-size: 12px; color: var(--muted); margin: -2px 0 4px; }
+  .chart .empty { height: 220px; display: grid; place-items: center; color: var(--muted); font-size: 12px;
+                  border: 1px dashed var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+  th { text-align: right; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--line); color: var(--ink2); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  td:first-child { color: var(--ink); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  pre { margin: 6px 0 0; font: 12px/1.4 ui-monospace, monospace; color: var(--ink2); max-height: 420px; overflow: auto; }
+  #error { color: var(--warn); font-size: 12px; }
+  .warn { color: var(--ink2); font-size: 12px; border-left: 3px solid var(--warn); padding: 2px 8px; margin: 6px 0 0; }
+  /* uPlot: compact legend in the page's colours */
+  .uplot { font-family: inherit; }
+  .u-legend { font-size: 12px; color: var(--ink2); text-align: left; }
+  .u-legend .u-series > * { padding: 1px 3px; }
+  .u-legend .u-marker { width: 10px; height: 3px; border-radius: 1px; }
+  .u-legend th { font-weight: 500; color: var(--ink2); text-align: left; border: 0; padding: 0; font-size: 12px; }
+  .u-legend td { border: 0; padding: 0 4px 0 0; color: var(--ink); text-align: right; }
+  .u-select { background: rgba(57, 135, 229, .12); }
+  @media (max-width: 1250px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; max-height: none; }
+    .grid, .grid.two { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>♟ ChessRL</h1>
+  <div id="budget" class="chips"></div>
+  <span class="spacer"></span>
+  <span id="error"></span>
+  <span id="status" class="note">loading…</span>
+  <a id="analysis" class="note" target="_blank" rel="noopener" hidden>Analysis board →</a>
+</header>
+<div class="layout">
+  <aside>
+    <div class="card">
+      <div class="label">Runs</div>
+      <div class="btns"><button data-sel="running">Running</button><button data-sel="all">All</button><button data-sel="none">None</button></div>
+      <input id="filter" placeholder="Filter runs" autocomplete="off">
+      <div class="note" id="running-title"></div>
+      <div id="running-list"></div>
+      <details id="finished"><summary id="finished-title"></summary><div id="finished-list"></div></details>
+    </div>
+    <div class="card">
+      <div class="label">x axis</div>
+      <div class="seg" id="xkey">
+        <button data-v="hours">hours</button><button data-v="step">step</button><button data-v="positions">positions</button>
+      </div>
+      <div class="label" style="margin-top:12px">Smoothing · <span id="kval"></span> rows</div>
+      <input type="range" id="k" min="1" max="200" value="20">
+      <div class="label" style="margin-top:12px">Ladder openings</div>
+      <div class="seg" id="scale">
+        <button data-v="both">both</button><button data-v="random">random</button><button data-v="sf">Stockfish</button>
+      </div>
+      <p class="note" style="margin:10px 0 0">Drag on a chart to zoom it, double-click to reset. The cursor is shared by every chart.</p>
+    </div>
+  </aside>
+  <main>
+    <section class="card"><div class="scroll"><table id="kpis"></table></div></section>
+    <div id="sections"></div>
+    <section class="card" id="configs-card">
+      <h2>Configs</h2>
+      <div class="note">Settings that differ between the selected runs (paths left out).</div>
+      <div class="scroll"><table id="cfgdiff"></table></div>
+      <div id="configs"></div>
+    </section>
+  </main>
+</div>
+<script>
+"use strict";
+const PALETTE = ["#3b82f6", "#f97316", "#10b981", "#e11d48", "#8b5cf6", "#eab308", "#06b6d4", "#64748b", "#db2777", "#84cc16"];
+const DASH = [[], [6, 4], [2, 3], [10, 4]];
+const MOVE_COLORS = { e4: "#3b82f6", d4: "#f97316", Nf3: "#10b981", c4: "#e11d48" };
+const SPARE = ["#8b5cf6", "#eab308", "#06b6d4", "#db2777", "#84cc16"];
+const XLABEL = { hours: "hours of training", step: "trainer step", positions: "self-play positions" };
+// Percentages with enough decimals for small shares (0.02% is not "0%").
+const pct = (d) => (v) => {
+  if (v == null) return "–";
+  const a = Math.abs(v * 100);
+  const dec = a === 0 ? 0 : a < 0.01 ? 3 : a < 0.1 ? 2 : a < 1 ? Math.max(d, 1) : d;
+  return (v * 100).toFixed(dec) + "%";
+};
+const lastValue = (arr) => { for (let i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i]; return null; };
+const logTick = (v) => v == null ? "" : v >= 1000 ? fmtBig(v) : v >= 1 ? String(v) : v.toExponential(0);
+const num = (d) => (v) => v == null ? "–" : (Math.abs(v) >= 1e4 ? fmtBig(v) : v.toFixed(d));
+const fmtBig = (v) => Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(2) + "M" : Math.abs(v) >= 1e3 ? (v / 1e3).toFixed(1) + "k" : String(Math.round(v));
+
+// Charts: table (train | selfplay | ladder), columns, formatting.
+const SECTIONS = [
+  { title: "Strength", cls: "two", charts: [
+    { id: "elo", title: "Anchor-ladder Elo", sub: "random mover = 0; whiskers ± 1 standard error", kind: "elo" },
+    { id: "puzzles", title: "Puzzle accuracy", sub: "1k Lichess puzzles, strict line, MCTS-100", table: "ladder",
+      cols: ["puzzles.line", "puzzles.first_move"], names: ["line", "first move"], fmt: pct(1), points: true },
+  ]},
+  { title: "Openings: first move from the starting position", kind: "openings" },
+  { title: "Opening diversity of self-play", cls: "two", charts: [
+    { id: "diveff", title: "Distinct positions per ply (effective)", sub: "2^entropy over the newest 400k records; a collapse drives it down", kind: "div",
+      field: "effective", plies: ["4", "8", "16", "30"], log: true, fmt: num(0) },
+    { id: "divtop", title: "Share of the most common position", sub: "per ply, same window", kind: "div",
+      field: "top_share", plies: ["4", "8", "16", "30"], fmt: pct(1) },
+  ]},
+  { title: "Schedules", charts: [
+    { id: "ropen", title: "Random opening plies", sub: "uniformly random plies before the first search", table: "selfplay", cols: ["random_opening_plies"], fmt: num(2) },
+    { id: "qw", title: "Value the search reads", sub: "weight on the search-trained head (0 = game results)", table: "train", cols: ["search_q_weight"], fmt: num(2), range: [0, 1] },
+    { id: "lr", title: "Learning rate", table: "train", cols: ["lr"], log: true, fmt: (v) => v == null ? "–" : v.toExponential(2) },
+  ]},
+  { title: "Learning", charts: [
+    { id: "pol", title: "Policy loss", sub: "cross-entropy to the visit distribution", table: "train", cols: ["loss/policy_visits"], fmt: num(3) },
+    { id: "kl", title: "KL(search ‖ policy)", sub: "how much the search changes the network's move choice", table: "train", cols: ["policy/kl_to_visits"], fmt: num(3) },
+    { id: "val", title: "Value losses", sub: "outcome head · search head", table: "train", cols: ["loss/value", "loss/value_q"], names: ["outcome", "search"], fmt: num(3) },
+    { id: "top1", title: "Policy top-1 = search's top move", table: "train", cols: ["acc/policy_top_visit"], fmt: pct(1) },
+    { id: "ent", title: "Entropy", sub: "policy · visit target", table: "train", cols: ["entropy/policy", "entropy/visit_target"], names: ["policy", "target"], fmt: num(2) },
+    { id: "nearu", title: "Near-uniform search WDL targets", table: "train", cols: ["buffer/frac_near_uniform"], fmt: pct(1) },
+  ]},
+  { title: "Signal quality", charts: [
+    { id: "dec", title: "Decisive game outcomes in batches", table: "train", cols: ["buffer/decisive_outcome"], fmt: pct(1) },
+    { id: "agree", title: "Outcome vs search WDL agreement", table: "train", cols: ["buffer/wdl_agreement"], fmt: pct(1) },
+    { id: "castle", title: "Castle rate", sub: "rare-action canary", table: "train", cols: ["buffer/castle_rate"], fmt: pct(2) },
+    { id: "glen", title: "Game length (plies)", table: "selfplay", cols: ["game_length"], fmt: num(1) },
+    { id: "ends", title: "How games end", table: "selfplay", cols: ["frac_checkmate", "frac_resign", "frac_max_plies"], names: ["mate", "resign", "max plies"], fmt: pct(1) },
+    { id: "draws", title: "Draws · false resignations", sub: "false: among playthrough games that would have resigned", table: "selfplay",
+      cols: ["frac_draw", "frac_false_resign"], names: ["draws", "false resign"], fmt: pct(1) },
+  ]},
+  { title: "Throughput", charts: [
+    { id: "pos", title: "Self-play positions / s", table: "selfplay", cols: ["positions_per_sec"], fmt: num(0) },
+    { id: "games", title: "Self-play games / s", table: "selfplay", cols: ["games_per_sec"], fmt: num(1) },
+    { id: "nodes", title: "MCTS nodes / s", table: "selfplay", cols: ["nodes_per_sec"], fmt: num(0) },
+    { id: "k", title: "Samples per record (target_k)", table: "train", cols: ["pacing/k_actual"], fmt: num(2) },
+    { id: "steptime", title: "Trainer step time (s)", table: "train", cols: ["pacing/step_time_s"], fmt: num(4) },
+    { id: "window", title: "Sampling window (records)", table: "train", cols: ["buffer/window"], fmt: num(0) },
+  ]},
+];
+
+// ---------------------------------------------------------------- state
+const store = {
+  get() { try { return JSON.parse(localStorage.getItem("chessrl.dash.v1") || "{}"); } catch { return {}; } },
+  set(v) { try { localStorage.setItem("chessrl.dash.v1", JSON.stringify(v)); } catch { /* private window */ } },
+};
+const saved = store.get();
+const state = {
+  runs: [], selected: new Set(saved.selected || []), x: saved.x || "hours", k: saved.k || 20,
+  scale: saved.scale || "both", filter: "", data: null, initialised: Array.isArray(saved.selected),
+};
+const save = () => store.set({ selected: [...state.selected], x: state.x, k: state.k, scale: state.scale });
+const charts = new Map(); // id -> {u, sig, zoomed}
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+// Selected runs oldest first (run directories start with their start time), so colours stay put.
+const baseName = (id) => id.split("/").pop();
+const orderedSelection = () => [...state.selected].sort((a, b) => baseName(a) < baseName(b) ? -1 : baseName(a) > baseName(b) ? 1 : 0);
+const colorOf = (id) => { const i = orderedSelection().indexOf(id); return i < 0 ? PALETTE[7] : PALETTE[i % PALETTE.length]; };
+
+// ---------------------------------------------------------------- sidebar
+function renderRuns() {
+  const f = state.filter.toLowerCase();
+  const rows = state.runs.filter((r) => !f || r.label.toLowerCase().includes(f));
+  const run = rows.filter((r) => r.running), fin = rows.filter((r) => !r.running);
+  const item = (r) => {
+    const on = state.selected.has(r.id);
+    const elo = r.elo == null ? "" : Math.round(r.elo).toLocaleString("en-US");
+    return `<label class="run" title="${r.id}"><input type="checkbox" data-id="${r.id}" ${on ? "checked" : ""}>` +
+      (on ? `<span class="dot" style="background:${colorOf(r.id)}"></span>` : "") +
+      `<span class="name">${esc(r.label)}</span>${r.running ? '<span class="live" title="running"></span>' : ""}<span class="elo">${elo}</span></label>`;
+  };
+  document.getElementById("running-title").textContent = `Running now (${run.length})`;
+  document.getElementById("running-list").innerHTML = run.map(item).join("") || '<div class="note">none</div>';
+  document.getElementById("finished-title").textContent = `Finished (${fin.length})`;
+  document.getElementById("finished-list").innerHTML = fin.map(item).join("");
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+document.querySelector("aside").addEventListener("change", (e) => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (!id) return;
+  e.target.checked ? state.selected.add(id) : state.selected.delete(id);
+  save(); renderRuns(); loadData();
+});
+document.querySelectorAll("[data-sel]").forEach((b) => b.addEventListener("click", () => {
+  const v = b.dataset.sel;
+  state.selected = new Set(v === "none" ? [] : state.runs.filter((r) => v === "all" || r.running).map((r) => r.id));
+  save(); renderRuns(); loadData();
+}));
+document.getElementById("filter").addEventListener("input", (e) => { state.filter = e.target.value; renderRuns(); });
+function segmented(id, key) {
+  const el = document.getElementById(id);
+  const paint = () => el.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === state[key]));
+  el.addEventListener("click", (e) => {
+    const v = e.target.dataset && e.target.dataset.v;
+    if (!v || v === state[key]) return;
+    state[key] = v; paint(); save();
+    key === "x" ? loadData() : render();
+  });
+  paint();
+}
+segmented("xkey", "x");
+segmented("scale", "scale");
+const kInput = document.getElementById("k");
+kInput.value = state.k;
+document.getElementById("kval").textContent = state.k;
+let kTimer;
+kInput.addEventListener("input", () => {
+  state.k = +kInput.value; document.getElementById("kval").textContent = state.k;
+  clearTimeout(kTimer); kTimer = setTimeout(() => { save(); loadData(); }, 250);
+});
+
+// ---------------------------------------------------------------- fetching
+let lastOk = 0, inflight = null;
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+async function loadRuns() {
+  const body = await getJSON("/api/runs");
+  state.runs = body.runs;
+  if (body.analysis_url) { const a = document.getElementById("analysis"); a.href = body.analysis_url; a.hidden = false; }
+  const ids = new Set(state.runs.map((r) => r.id));
+  state.selected = new Set([...state.selected].filter((id) => ids.has(id)));
+  if (!state.initialised) { // first visit: what is running, else the three most recent runs
+    const running = state.runs.filter((r) => r.running);
+    state.selected = new Set((running.length ? running : state.runs.slice(0, 3)).map((r) => r.id));
+    state.initialised = true; save();
+  }
+  renderRuns();
+}
+async function loadData() {
+  const ids = orderedSelection();
+  const url = `/api/data?ids=${encodeURIComponent(ids.join(","))}&x=${state.x}&k=${state.k}&n=600`;
+  const mine = inflight = getJSON(url);
+  try {
+    const data = await mine;
+    if (mine !== inflight) return; // a newer request replaced this one
+    state.data = data; lastOk = Date.now();
+    document.getElementById("error").textContent = "";
+    render();
+  } catch (err) {
+    document.getElementById("error").textContent = "refresh failed: " + err.message;
+  }
+}
+async function refresh() {
+  try { await loadRuns(); await loadData(); }
+  catch (err) { document.getElementById("error").textContent = "refresh failed: " + err.message; }
+}
+setInterval(refresh, 60000);
+setInterval(() => {
+  if (lastOk) document.getElementById("status").textContent = `updated ${Math.round((Date.now() - lastOk) / 1000)} s ago`;
+}, 1000);
+
+// ---------------------------------------------------------------- header + tables
+function renderBudget(b) {
+  const el = document.getElementById("budget");
+  if (!b) { el.innerHTML = ""; return; }
+  const live = (b.instances || []).filter((i) => i.ended == null).length;
+  const mins = Math.round((Date.now() / 1000 - b.t) / 60);
+  el.innerHTML =
+    `<span class="chip">spent <b>$${b.spent.toFixed(2)}</b> of $${b.cap.toFixed(0)}<span class="meter"><i style="width:${Math.min(100, 100 * b.spent / b.cap)}%"></i></span></span>` +
+    `<span class="chip">burn <b>$${b.burn_per_hour.toFixed(2)}/h</b></span>` +
+    (b.hours_left ? `<span class="chip"><b>${Math.round(b.hours_left)} h</b> left at burn</span>` : "") +
+    `<span class="chip"><b>${live}</b> box${live === 1 ? "" : "es"} up</span>` +
+    `<span class="chip">budget ${mins} min ago</span>`;
+}
+function renderKpis(runs) {
+  const f0 = (v) => v == null ? "–" : Math.round(v).toLocaleString("en-US");
+  const head = ["run", "hours", "step", "model", "pos/s", "games", "positions", "avg plies", "ladder Elo", "Elo · last hour", "puzzles"];
+  const rows = runs.map((r) => {
+    const k = r.kpi;
+    return [
+      `<span class="dot" style="background:${colorOf(r.id)}"></span> ${esc(r.label)}`,
+      k.hours == null ? "–" : k.hours.toFixed(2), f0(k.step), k.model || "–", f0(k.pos_s), f0(k.games),
+      k.positions == null ? "–" : fmtBig(k.positions), k.avg_plies == null ? "–" : k.avg_plies.toFixed(1),
+      k.elo == null ? "–" : `${f0(k.elo)} ± ${f0(k.elo_se)}`,
+      k.elo_last_hour == null ? "–" : `${f0(k.elo_last_hour)} <span class="note">(${k.elo_last_hour_n})</span>`,
+      k.puzzles == null ? "–" : (100 * k.puzzles).toFixed(1) + "%",
+    ];
+  });
+  document.getElementById("kpis").innerHTML =
+    `<thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("") ||
+      '<tr><td colspan="11" class="note">No runs selected: tick some on the left.</td></tr>'}</tbody>`;
+}
+const PATHISH = /(^|\.)(dir|path|dataset_path|iteration_file|engine_dir|build_script|pgn_dir|resume_path|resume_id|run_name)$/;
+function flatten(obj, pre = "", out = {}) {
+  for (const [k, v] of Object.entries(obj || {})) {
+    const key = pre ? `${pre}.${k}` : k;
+    if (v && typeof v === "object" && !Array.isArray(v)) flatten(v, key, out); else out[key] = v;
+  }
+  return out;
+}
+function renderConfigs(runs) {
+  const flat = runs.map((r) => flatten(r.config));
+  const keys = [...new Set(flat.flatMap((f) => Object.keys(f)))].filter((k) => !PATHISH.test(k)).sort();
+  const show = (v) => v === undefined ? '<span class="note">–</span>' : esc(JSON.stringify(v));
+  const diff = runs.length > 1 ? keys.filter((k) => new Set(flat.map((f) => JSON.stringify(f[k]))).size > 1) : [];
+  document.getElementById("cfgdiff").innerHTML = diff.length
+    ? `<thead><tr><th>setting</th>${runs.map((r) => `<th>${esc(r.label)}</th>`).join("")}</tr></thead>` +
+      `<tbody>${diff.map((k) => `<tr><td>${esc(k)}</td>${flat.map((f) => `<td>${show(f[k])}</td>`).join("")}</tr>`).join("")}</tbody>`
+    : `<tbody><tr><td class="note">${runs.length > 1 ? "The selected runs share every setting." : "Select two runs or more to compare them."}</td></tr></tbody>`;
+  document.getElementById("configs").innerHTML = runs.map((r) =>
+    `<details><summary>${esc(r.label)}</summary><pre>${esc(JSON.stringify(r.config, null, 2))}</pre></details>`).join("");
+}
+
+// ---------------------------------------------------------------- charts
+const sync = uPlot.sync("x");
+function axes(fmt, log) {
+  const stroke = css("--muted"), grid = { stroke: css("--grid"), width: 1 }, ticks = { stroke: css("--line"), width: 1 };
+  const yvals = (u, vals) => vals.map((v) => fmt ? fmt(v).replace(/\.0+(%?)$/, "$1") : v);
+  return [
+    { stroke, grid, ticks, label: XLABEL[state.x], labelSize: 16, labelFont: "11px system-ui", font: "11px system-ui", size: 34,
+      values: (u, vals) => vals.map((v) => state.x === "hours" ? +v.toFixed(2) : fmtBig(v)) },
+    { stroke, grid, ticks, font: "11px system-ui", size: 52, values: log ? (u, vals) => vals.map(logTick) : yvals },
+  ];
+}
+// Whiskers (± se) and vertical event lines, drawn after the series.
+function overlayPlugin(extra) {
+  return { hooks: { draw: [(u) => {
+    const ctx = u.ctx;
+    ctx.save();
+    for (const w of extra.whiskers || []) {
+      ctx.strokeStyle = w.color; ctx.lineWidth = 1 * devicePixelRatio;
+      ctx.beginPath();
+      for (let i = 0; i < u.data[0].length; i++) {
+        const y = u.data[w.series][i], s = w.se[i];
+        if (y == null || s == null) continue;
+        const cx = u.valToPos(u.data[0][i], "x", true);
+        ctx.moveTo(cx, u.valToPos(y - s, "y", true)); ctx.lineTo(cx, u.valToPos(y + s, "y", true));
+      }
+      ctx.stroke();
+    }
+    for (const e of extra.events || []) {
+      ctx.strokeStyle = e.color; ctx.setLineDash([3, 3]); ctx.lineWidth = 1 * devicePixelRatio;
+      const cx = u.valToPos(e.x, "x", true);
+      ctx.beginPath(); ctx.moveTo(cx, u.bbox.top); ctx.lineTo(cx, u.bbox.top + u.bbox.height); ctx.stroke();
+    }
+    ctx.restore();
+  }] } };
+}
+function makeChart(spec, holder, series, data, extra = {}) {
+  const sig = JSON.stringify([state.x, spec.log, series.map((s) => s.label + s.stroke + (s.dash || []).join())]);
+  const known = charts.get(spec.id);
+  if (known && known.sig === sig && known.u.root.isConnected) {
+    known.extra.whiskers = extra.whiskers; known.extra.events = extra.events;
+    known.u.setData(data, !known.zoomed);
+    return;
+  }
+  if (known) known.u.destroy();
+  holder.innerHTML = "";
+  const box = { extra: { ...extra }, zoomed: false, sig };
+  const opts = {
+    width: Math.max(260, holder.clientWidth), height: spec.height || 210,
+    // Drag sideways to zoom x; drag a box to zoom both axes.
+    cursor: { sync: { key: sync.key, setSeries: false }, points: { size: 6 }, drag: { x: true, y: true, uni: 40 } },
+    legend: { live: true },
+    scales: { x: { time: false }, y: spec.log ? { distr: 3 } : spec.range ? { range: spec.range } : {} },
+    axes: axes(spec.fmt, spec.log),
+    series: [{ label: state.x, value: (u, v) => v == null ? "latest" : state.x === "hours" ? v.toFixed(2) + " h" : fmtBig(v) }, ...series],
+    plugins: [overlayPlugin(box.extra)],
+    hooks: { setSelect: [(u) => { if (u.select.width > 4) box.zoomed = true; }] },
+  };
+  if (spec.bands) opts.bands = spec.bands;
+  box.u = new uPlot(opts, data, holder);
+  box.u.over.addEventListener("dblclick", () => { box.zoomed = false; });
+  charts.set(spec.id, box);
+}
+function chartCard(parent, spec) {
+  const card = document.createElement("div");
+  card.className = "card chart";
+  card.innerHTML = `<h3>${esc(spec.title)}</h3>${spec.sub ? `<div class="sub">${esc(spec.sub)}</div>` : ""}<div class="plot"></div>`;
+  parent.appendChild(card);
+  return card.querySelector(".plot");
+}
+function emptyChart(holder, id, msg = "no data for the selected runs") {
+  const known = charts.get(id);
+  if (known) { known.u.destroy(); charts.delete(id); }
+  holder.innerHTML = `<div class="empty">${msg}</div>`;
+}
+// Legend values: at the cursor, or the series' latest value when the cursor is elsewhere.
+const lineSeries = (label, color, j, fmt, points) => ({
+  label, stroke: color, width: 1.6, dash: DASH[j % DASH.length], spanGaps: true,
+  points: { show: !!points, size: 4, fill: color },
+  value: (u, v, si, i) => { const x = i == null ? lastValue(u.data[si]) : v; return fmt ? fmt(x) : x == null ? "–" : x; },
+});
+
+function drawLine(spec, holder, runs) {
+  const tables = [], series = [], events = [];
+  for (const r of runs) {
+    const t = r[spec.table];
+    if (!t || !t.x || !t.x.length) continue;
+    const cols = spec.cols.filter((c) => t.cols ? t.cols[c] : t[c]);
+    if (!cols.length) continue;
+    tables.push([t.x, ...cols.map((c) => t.cols ? t.cols[c] : t[c])]);
+    cols.forEach((c) => {
+      const j = spec.cols.indexOf(c);
+      const label = spec.cols.length > 1 ? `${r.label} · ${(spec.names || spec.cols)[j]}` : r.label;
+      series.push(lineSeries(label, colorOf(r.id), j, spec.fmt, spec.points));
+    });
+    if (spec.table === "train") for (const x of r.events || []) events.push({ x, color: colorOf(r.id) });
+  }
+  if (!tables.length) return emptyChart(holder, spec.id);
+  makeChart(spec, holder, series, uPlot.join(tables), { events });
+}
+function drawElo(spec, holder, runs) {
+  const tables = [], series = [], colors = [];
+  for (const r of runs) {
+    const l = r.ladder;
+    for (const [set, j, suffix] of [["random", 0, ""], ["sf", 1, " · Stockfish openings"]]) {
+      if (state.scale !== "both" && state.scale !== set) continue;
+      const idx = l.x.map((_, i) => i).filter((i) => (l.set[i] || "random") === set);
+      if (!idx.length) continue;
+      tables.push([idx.map((i) => l.x[i]), idx.map((i) => l.elo[i]), idx.map((i) => l.elo_se[i])]);
+      series.push(lineSeries(r.label + suffix, colorOf(r.id), j, null, true));
+      colors.push(colorOf(r.id));
+    }
+  }
+  if (!tables.length) return emptyChart(holder, spec.id);
+  // Aligned as [x, elo1, se1, elo2, se2, ...]; the chart gets the Elo columns, the whiskers the errors.
+  const joined = uPlot.join(tables);
+  const data = [joined[0], ...colors.map((_, i) => joined[1 + 2 * i])];
+  const errs = colors.map((_, i) => joined[2 + 2 * i]);
+  series.forEach((s, i) => {
+    s.value = (u, v, si, di) => {
+      if (di == null) { // the latest rating
+        for (di = u.data[si].length - 1; di >= 0 && u.data[si][di] == null; di--);
+        if (di < 0) return "–";
+        v = u.data[si][di];
+      }
+      return v == null ? "–" : `${Math.round(v)}${errs[i][di] != null ? " ± " + Math.round(errs[i][di]) : ""}`;
+    };
+  });
+  const whiskers = colors.map((color, i) => ({ color, series: 1 + i, se: errs[i] }));
+  makeChart({ ...spec, height: 300 }, holder, series, data, { whiskers });
+}
+function drawDiversity(spec, holder, runs) {
+  const tables = [], series = [];
+  for (const r of runs) {
+    const d = r.diversity;
+    if (!d || !d.x) continue;
+    const plies = spec.plies.filter((p) => d.plies[p] && d.plies[p][spec.field].some((v) => v != null));
+    if (!plies.length) continue;
+    tables.push([d.x, ...plies.map((p) => d.plies[p][spec.field])]);
+    plies.forEach((p) => series.push(lineSeries(`${r.label} · ply ${p}`, colorOf(r.id), spec.plies.indexOf(p), spec.fmt, true)));
+  }
+  if (!tables.length) return emptyChart(holder, spec.id, "no diversity rows yet (scripts/opening_diversity.py --every-min 10)");
+  makeChart(spec, holder, series, uPlot.join(tables));
+}
+const firstMove = (uci) => (uci.slice(0, 2) === "b1" || uci.slice(0, 2) === "g1" ? "N" : "") + uci.slice(2, 4);
+function drawOpening(spec, holder, run, kind) {
+  const o = run.opening && run.opening[kind];
+  if (!o) return emptyChart(holder, spec.id, "no opening probe in this run's ladder");
+  const moves = Object.keys(o.moves);
+  let spare = 0;
+  const colors = moves.map((m) => MOVE_COLORS[firstMove(m)] || SPARE[spare++ % SPARE.length]);
+  const raw = [...moves.map((m) => o.moves[m]), o.other];
+  const cum = [];
+  raw.forEach((col, j) => cum.push(col.map((v, i) => (v || 0) + (j ? cum[j - 1][i] : 0))));
+  const labels = [...moves.map(firstMove), "other"], fills = [...colors, "#94a3b8"];
+  // uPlot's stacking: every series fills down, and a band [upper, lower] stops the upper one's fill at the
+  // series under it.
+  const series = labels.map((label, j) => ({
+    label, stroke: fills[j], width: 1, fill: fills[j] + "cc", points: { show: false },
+    value: (u, v, si, i) => { const x = i == null ? lastValue(raw[j]) : raw[j][i]; return x == null ? "–" : (100 * x).toFixed(0) + "%"; },
+  }));
+  const bands = labels.slice(1).map((_, j) => ({ series: [j + 2, j + 1] }));
+  makeChart({ ...spec, range: [0, 1], fmt: pct(0), bands, height: 200 }, holder, series, [o.x, ...cum]);
+}
+
+function render() {
+  const data = state.data;
+  if (!data) return;
+  renderBudget(data.budget);
+  const byId = new Map(data.runs.map((r) => [r.id, r]));
+  const runs = orderedSelection().map((id) => byId.get(id)).filter(Boolean);
+  renderKpis(runs);
+  renderConfigs(runs);
+  const root = document.getElementById("sections");
+  const want = SECTIONS.map((s) => s.title + (s.kind === "openings" ? runs.map((r) => r.id).join() : "")).join("|");
+  if (root.dataset.layout !== want) { // build the cards once per layout
+    for (const c of charts.values()) c.u.destroy();
+    charts.clear();
+    root.innerHTML = "";
+    root.dataset.layout = want;
+    for (const s of SECTIONS) {
+      const sec = document.createElement("section");
+      sec.innerHTML = `<h2>${esc(s.title)}</h2>`;
+      if (s.kind === "openings") {
+        sec.innerHTML += '<div class="sub note" style="margin:-4px 0 8px">At each rating: the raw policy, and a 400-simulation search without noise. The four main moves, the rest as "other".</div>';
+        for (const r of runs) {
+          const g = document.createElement("div"); g.className = "grid two"; g.style.marginBottom = "12px";
+          sec.appendChild(g);
+          for (const [kind, label] of [["policy", "network alone"], ["search", "after 400 simulations"]]) {
+            const spec = { id: `open:${r.id}:${kind}`, title: `${r.label} · ${label}` };
+            spec.holder = chartCard(g, spec); s[spec.id] = spec;
+          }
+        }
+      } else {
+        const g = document.createElement("div"); g.className = "grid " + (s.cls || "");
+        sec.appendChild(g);
+        for (const spec of s.charts) spec.holder = chartCard(g, spec);
+      }
+      root.appendChild(sec);
+    }
+  }
+  for (const s of SECTIONS) {
+    if (s.kind === "openings") {
+      for (const r of runs) for (const kind of ["policy", "search"]) {
+        const spec = s[`open:${r.id}:${kind}`];
+        if (spec) drawOpening(spec, spec.holder, r, kind);
+      }
+      continue;
+    }
+    for (const spec of s.charts) {
+      if (spec.kind === "elo") drawElo(spec, spec.holder, runs);
+      else if (spec.kind === "div") drawDiversity(spec, spec.holder, runs);
+      else drawLine(spec, spec.holder, runs);
+    }
+  }
+}
+// Charts follow their card's width.
+let resizeTimer;
+new ResizeObserver(() => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    for (const c of charts.values()) {
+      const w = c.u.root.parentElement.clientWidth;
+      if (w && Math.abs(w - c.u.width) > 2) c.u.setSize({ width: w, height: c.u.height });
+    }
+  }, 100);
+}).observe(document.querySelector("main"));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  for (const c of charts.values()) c.u.destroy();
+  charts.clear(); document.getElementById("sections").dataset.layout = ""; render();
+});
+refresh();
+</script>
+</body>
+</html>

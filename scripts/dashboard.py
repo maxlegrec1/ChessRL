@@ -1,232 +1,239 @@
-"""ChessRL training dashboard (read-only).
+"""ChessRL training dashboard: a small HTTP server and one page (scripts/dashboard_ui/index.html).
 
-Reads every run under artifacts/runs/ (or $CHESSRL_RUNS_ROOT):
-  metrics/train.jsonl     trainer losses, signal stats, pacing, growth events
-  metrics/selfplay.jsonl  self-play throughput + cumulative game statistics
-  ladder/ladder.jsonl     anchor-ladder Elo + puzzle accuracy (scripts/ladder_daemon.py)
-and the campaign budget from /workspace/budget.json (pushed by chessrl-vast guard).
+    .venv/bin/python scripts/dashboard.py --port 8500        # http://localhost:8500
 
-  uv run streamlit run scripts/dashboard.py --server.port 8501 --server.headless true
+Reads every run under $CHESSRL_RUNS_ROOT (colon-separated; default artifacts/runs), on a box
+<root>/<run>/ and in the synced copy at home <root>/<box>/<run>/:
+  metrics/train.jsonl      trainer losses, signal statistics, pacing, growth events
+  metrics/selfplay.jsonl   self-play throughput and cumulative game counters
+  metrics/diversity.jsonl  opening diversity of the newest records (scripts/opening_diversity.py)
+  ladder/ladder.jsonl      ladder Elo, puzzles and the first-move probe (scripts/ladder_daemon.py)
+  config.yaml              the run's resolved config
+and the campaign budget ($CHESSRL_BUDGET, default /workspace/budget.json, pushed by chessrl-vast guard).
+
+Files are read incrementally: each request parses only the bytes added since the last one (the home sync
+replaces files whole, so a file whose old bytes are unchanged is continued, not re-read). The page gets each
+curve smoothed on the server and reduced to at most `n` points per run, so a refresh costs milliseconds and
+the browser draws a few thousand points per chart whatever the length of the runs.
 """
 
 from __future__ import annotations
 
+import argparse
+import gzip
 import json
+import math
 import os
+import threading
 import time
+from array import array
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-# One or more run roots, colon-separated (e.g. the next-round and main checkouts).
-RUNS_ROOTS = [
-    Path(p)
-    for p in os.environ.get("CHESSRL_RUNS_ROOT", str(ROOT / "artifacts" / "runs")).split(":")
-]
-BUDGET = Path(os.environ.get("CHESSRL_BUDGET", "/workspace/budget.json"))
-PALETTE = ["#3b82f6", "#f97316", "#10b981", "#e11d48", "#8b5cf6", "#eab308", "#06b6d4", "#64748b"]
+PAGE = Path(__file__).resolve().parent / "dashboard_ui" / "index.html"
+RUNNING_WITHIN_S = 15 * 60  # self-play logs every 30 s; the home sync runs every 5 min
+XKEYS = ("hours", "step", "positions")
 
-st.set_page_config(page_title="ChessRL dashboard", page_icon="♟", layout="wide")
+# Trainer columns the page draws, and the smoothing each gets: None = the page's smoothing slider.
+TRAIN_SMOOTH = {
+    "loss/policy_visits": None,
+    "policy/kl_to_visits": None,
+    "loss/value": None,
+    "loss/value_q": None,
+    "acc/policy_top_visit": None,
+    "entropy/policy": None,
+    "entropy/visit_target": None,
+    "buffer/decisive_outcome": None,
+    "buffer/wdl_agreement": None,
+    "buffer/castle_rate": None,
+    "buffer/frac_near_uniform": None,
+    "pacing/k_actual": None,
+    "pacing/step_time_s": None,
+    "lr": 1,
+    "buffer/window": 1,
+    "search_q_weight": 1,
+}
+TRAIN_KPI = ("params", "model_d_model", "model_layers")
+# Self-play rows every 30 s: rates from the counters' differences, a little smoothing.
+SELFPLAY_RAW = (
+    "engine_step",
+    "positions_per_sec",
+    "games_per_sec",
+    "nodes_per_sec",
+    "random_opening_plies",
+    "resign_threshold",
+)
+COUNTERS = (
+    "games",
+    "game_plies",
+    "white_wins",
+    "black_wins",
+    "draws",
+    "end_checkmate",
+    "end_resign",
+    "end_max_plies",
+    "records_written",
+    "playthrough_would_resign",
+    "playthrough_false_resign",
+)
+SELFPLAY_SMOOTH = {
+    "positions_per_sec": 3,
+    "games_per_sec": 3,
+    "nodes_per_sec": 3,
+    "random_opening_plies": 1,
+    "resign_threshold": 1,
+    "game_length": 5,
+    "frac_checkmate": 5,
+    "frac_resign": 5,
+    "frac_max_plies": 5,
+    "frac_draw": 5,
+    "frac_false_resign": 10,
+}
+# The first-move probe: the four main moves of each run, the rest as "other".
+OPENING_TOP = 4
 
 
-def read_jsonl(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    rows = []
-    with path.open() as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
+def _num(v) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else math.nan
+
+
+class Table:
+    """A JSONL file read incrementally. With `cols`, rows become float columns (NaN where a row lacks
+    the key); rows carrying an "event" key are kept apart. Without, whole rows are kept (small files)."""
+
+    def __init__(self, path: Path, cols: tuple[str, ...] | None = None) -> None:
+        self.path, self.cols = path, cols
+        self._reset()
+
+    def _reset(self) -> None:
+        self.ino: int | None = None
+        self.offset = 0
+        self.tail = b""  # the last bytes read, to recognise the same file after a sync replaced it
+        self.partial = b""  # an unfinished last line
+        self.t = array("d")
+        self.data = {c: array("d") for c in self.cols or ()}
+        self.rows: list[dict] = []
+        self.events: list[dict] = []
+        self.version = 0
+
+    def update(self) -> None:
+        try:
+            st = self.path.stat()
+        except FileNotFoundError:
+            if self.offset:
+                version = self.version
+                self._reset()
+                self.version = version + 1
+            return
+        if st.st_ino != self.ino:
+            same = False
+            if self.ino is not None and st.st_size >= self.offset and self.tail:
+                with self.path.open("rb") as fh:
+                    fh.seek(self.offset - len(self.tail))
+                    same = fh.read(len(self.tail)) == self.tail
+            if not same:
+                version = self.version
+                self._reset()
+                self.version = version + 1
+            self.ino = st.st_ino
+        if st.st_size < self.offset:
+            version = self.version
+            self._reset()
+            self.version, self.ino = version + 1, st.st_ino
+        if st.st_size == self.offset:
+            return
+        with self.path.open("rb") as fh:
+            fh.seek(self.offset)
+            chunk = fh.read(st.st_size - self.offset)
+        self.offset += len(chunk)
+        self.tail = (self.tail + chunk)[-64:]
+        lines = (self.partial + chunk).split(b"\n")
+        self.partial = lines.pop()
+        for line in lines:
+            if line.strip():
                 try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass  # partially written last line
-    return pd.json_normalize(rows) if rows else pd.DataFrame()
+                    self._add(json.loads(line))
+                except ValueError:
+                    pass
+        self.version += 1
+
+    def _add(self, row) -> None:
+        if not isinstance(row, dict):
+            return
+        if self.cols is None:
+            self.rows.append(row)
+            return
+        if "event" in row:
+            self.events.append({k: row.get(k) for k in ("event", "t", "step")})
+            return
+        t = _num(row.get("t"))
+        if t != t:
+            return
+        self.t.append(t)
+        for c, col in self.data.items():
+            col.append(_num(row.get(c)))
+
+    # Copies: a view would keep the array exporting its buffer, and the next append would fail.
+    def array(self, col: str) -> np.ndarray:
+        return np.array(self.data[col], dtype=np.float64) if col in self.data else np.array([])
+
+    @property
+    def times(self) -> np.ndarray:
+        return np.array(self.t, dtype=np.float64)
 
 
-@st.cache_data(ttl=55)
-def load_run(run_dir: str) -> dict:
-    d = Path(run_dir)
-    train = read_jsonl(d / "metrics" / "train.jsonl")
-    events = train[train["event"].notna()] if "event" in train else pd.DataFrame()
-    if "event" in train:
-        train = train[train["event"].isna()]
-    selfplay = read_jsonl(d / "metrics" / "selfplay.jsonl")
-    lad = read_jsonl(d / "ladder" / "ladder.jsonl")
-    # A branch (another run's checkpoint + ladder history, continued here) carries
-    # metrics/branch.json {"parent_t0", "parent_positions"}: its curves continue the
-    # parent's hours / positions axes. The copied ladder rows are the parent's own
-    # curve: drop them here (they plotted at negative hours).
-    try:
-        branch = json.loads((d / "metrics" / "branch.json").read_text())
-    except (FileNotFoundError, ValueError):
-        branch = {}
-    starts = [df["t"].min() for df in (train, selfplay, events) if not df.empty and "t" in df]
-    own_t0 = min(starts) if starts else d.stat().st_mtime
-    if not lad.empty and "t" in lad:
-        lad = lad[
-            lad["t"] >= own_t0 - 1800
-        ].copy()  # a run's first rating may precede its metrics a little
-    t0 = float(branch.get("parent_t0", own_t0))
-    # Hours of training, not of wall clock: a run stopped and resumed later (or down
-    # after a crash) would otherwise jump right by its downtime. Self-play logs every
-    # 30 s; any longer silence counts as downtime.
-    ts = (
-        np.sort(selfplay["t"].to_numpy(dtype=float))
-        if not selfplay.empty and "t" in selfplay
-        else np.array([])
-    )
-    gaps = np.diff(ts)
-    big = np.append(
-        gaps > 600, True
-    )  # the open interval after the last row counts once it is > 600 s
-    down_s = np.concatenate([[0.0], np.cumsum(np.where(gaps > 600, gaps - 30, 0.0))])
-    for df in (train, selfplay, events, lad):
-        if not df.empty and "t" in df:
-            t = df["t"].to_numpy(dtype=float)
-            down = np.zeros_like(t)
-            if len(ts):
-                i = np.clip(np.searchsorted(ts, t, side="right") - 1, 0, None)
-                since = t - ts[i]
-                # Inside a gap (or past the last row by > 600 s) the extra time is downtime.
-                inside = big[i] & (since > np.where(i == len(ts) - 1, 600, 0))
-                down = down_s[i] + np.where(inside, np.maximum(0.0, since - 30), 0.0)
-            df["hours"] = (t - t0 - down) / 3600.0
-    # Self-play positions written so far, for every table (interpolated on time).
-    if not selfplay.empty and "total_records_written" in selfplay:
-        xs = selfplay["t"].to_numpy(dtype=float)
-        ys = selfplay["total_records_written"].to_numpy(dtype=float)
-        # The counter restarts at 0 with each self-play process: keep it cumulative.
-        resets = np.where(ys[1:] < ys[:-1], ys[:-1], 0.0)
-        ys = (
-            ys
-            + np.concatenate([[0.0], np.cumsum(resets)])
-            + float(branch.get("parent_positions", 0))
-        )
-        for df in (train, events, lad):
-            if not df.empty and "t" in df:
-                df["positions"] = np.interp(df["t"].to_numpy(dtype=float), xs, ys)
-        selfplay["positions"] = ys
-    cfg = {}
-    if (d / "config.yaml").exists():
-        cfg = yaml.safe_load((d / "config.yaml").read_text()) or {}
-    return {
-        "train": train,
-        "selfplay": selfplay,
-        "events": events,
-        "ladder": lad,
-        "config": cfg,
-        "t0": t0,
-        "name": d.name,
-    }
+def rolling_mean(y: np.ndarray, k: int) -> np.ndarray:
+    """The mean of the last k rows' values that are not NaN (pandas rolling(k, min_periods=1))."""
+    if k <= 1 or len(y) == 0:
+        return y
+    ok = np.isfinite(y)
+    cs = np.concatenate([[0.0], np.cumsum(np.where(ok, y, 0.0))])
+    cn = np.concatenate([[0], np.cumsum(ok)])
+    i = np.arange(1, len(y) + 1)
+    j = np.maximum(0, i - k)
+    n = cn[i] - cn[j]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(n > 0, (cs[i] - cs[j]) / n, np.nan)
 
 
-@st.cache_data(ttl=55)
-def gather(name: str) -> pd.DataFrame:
-    """Rows of every run's metrics/<name>: <root>/<run>/metrics on a box,
-    <root>/<box>/<run>/metrics in the synced copy at home."""
-    files = [
-        p
-        for root in RUNS_ROOTS
-        for pat in (f"*/metrics/{name}", f"*/*/metrics/{name}")
-        for p in root.glob(pat)
-    ]
-    return pd.concat([read_jsonl(p) for p in files] or [pd.DataFrame()], ignore_index=True)
+def reduce_points(x: np.ndarray, ys: dict[str, np.ndarray], n: int) -> tuple[np.ndarray, dict]:
+    """Bucket means of consecutive rows: at most n points, the last row kept as the last point."""
+    if len(x) <= n:
+        return x, ys
+    edges = np.unique(np.linspace(0, len(x) - 1, n).astype(np.int64))
+    starts = edges[:-1]
+
+    def bucket(v):
+        ok = np.isfinite(v)
+        s = np.add.reduceat(np.where(ok, v, 0.0), starts)
+        c = np.add.reduceat(ok.astype(np.int64), starts)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = np.where(c > 0, s / c, np.nan)
+        return np.append(out, v[-1])
+
+    return bucket(x), {k: bucket(v) for k, v in ys.items()}
 
 
-def rerated_points(data: dict, rerate: pd.DataFrame, xkey: str) -> pd.DataFrame:
-    """A run's checkpoints re-rated on the Stockfish openings (scripts/rerate.py, which may have
-    run on another box), placed on the run's x axis through its trainer rows (step -> hours, positions)."""
-    tr = data["train"]
-    if rerate.empty or "run" not in rerate or tr.empty or "step" not in tr or xkey not in tr:
-        return pd.DataFrame()
-    rr = (
-        rerate[rerate["run"] == data["name"]]
-        .drop_duplicates("step", keep="last")
-        .sort_values("step")
-    )
-    tr = tr.sort_values("step").drop_duplicates("step", keep="last")  # a resume repeats a few steps
-    steps = tr["step"].to_numpy(dtype=float)
-    # A branch's own rows start at its branch point; the last checkpoint may follow the last log row.
-    rr = rr[(rr["step"] >= steps.min() - 100) & (rr["step"] <= steps.max() + 1000)].copy()
-    if xkey != "step":
-        rr[xkey] = np.interp(
-            rr["step"].to_numpy(dtype=float), steps, tr[xkey].to_numpy(dtype=float)
-        )
-    return rr
-
-
-def list_runs() -> list[Path]:
-    runs = [p for root in RUNS_ROOTS if root.exists() for p in root.rglob("metrics") if p.is_dir()]
-    return sorted({p.parent for p in runs}, key=lambda p: p.name)  # names start with the start time
-
-
-def smooth(s: pd.Series, k: int) -> pd.Series:
-    return s.rolling(k, min_periods=1).mean() if k > 1 else s
-
-
-def line_chart(
-    title: str,
-    runs: dict,
-    table: str,
-    cols: list[str],
-    xkey: str,
-    k: int,
-    yfmt: str | None = None,
-    height: int = 300,
-    log_y: bool = False,
-) -> None:
-    fig = go.Figure()
-    dashes = ["solid", "dot", "dash", "longdash"]
-    for i, (name, data) in enumerate(runs.items()):
-        df = data[table]
-        if df.empty or xkey not in df:
-            continue
-        for j, col in enumerate(cols):
-            if col not in df:
-                continue
-            y = smooth(pd.to_numeric(df[col], errors="coerce"), k)
-            label = name if len(cols) == 1 else f"{name} · {col.split('/')[-1]}"
-            fig.add_trace(
-                go.Scatter(
-                    x=df[xkey],
-                    y=y,
-                    mode="lines",
-                    name=label,
-                    line=dict(color=PALETTE[i % len(PALETTE)], dash=dashes[j % 4], width=2),
-                )
-            )
-        ev = data["events"]
-        if not ev.empty and xkey in ev:
-            for _, e in ev[ev["event"] == "grow"].iterrows():
-                fig.add_vline(
-                    x=e[xkey], line=dict(color=PALETTE[i % len(PALETTE)], dash="dot", width=1)
-                )
-    fig.update_layout(
-        title=title,
-        height=height,
-        margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(orientation="h", y=-0.25),
-        xaxis_title=XLABEL[xkey],
-    )
-    if yfmt:
-        fig.update_yaxes(tickformat=yfmt)
-    if log_y:
-        fig.update_yaxes(type="log")
-    st.plotly_chart(fig, width="stretch")
-
-
-XLABEL = {"hours": "hours of training", "step": "trainer step", "positions": "self-play positions"}
+def rounded(a) -> list:
+    """Four significant digits, NaN as null: a fifth of the JSON."""
+    a = np.asarray(a, dtype=np.float64)
+    ok = np.isfinite(a) & (a != 0)
+    e = 3 - np.floor(np.log10(np.abs(np.where(ok, a, 1.0))))
+    p = 10.0 ** np.minimum(np.abs(e), 22)  # exact powers of ten, so the results print short
+    with np.errstate(invalid="ignore"):
+        r = np.where(e >= 0, np.round(a * p) / p, np.round(a / p) * p)
+    r = np.where(ok, r, a)
+    return [v if v == v and v not in (math.inf, -math.inf) else None for v in r.tolist()]
 
 
 def run_label(path: Path) -> str:
-    # Run dirs are <date>_<time>_<hex>[_<name>]; show "name (box)" when synced
-    # home under ~/chessrl-runs/<box>/, else "name · hex".
+    # Run dirs are <date>_<time>_<hex>[_<name>]: "name (box)" when synced home under <root>/<box>/,
+    # else "name · hex".
     parts = path.name.split("_")
     name = "_".join(parts[3:]) if len(parts) > 3 else path.name
     box = path.parent.name
@@ -235,540 +242,492 @@ def run_label(path: Path) -> str:
     return f"{name} · {parts[2]}" if len(parts) > 3 else name
 
 
-# Runs shown by default: everything still running, plus the run names in $CHESSRL_PINNED
-# (comma-separated, e.g. "base-wd,my-run").
-PINNED = {n.strip() for n in os.environ.get("CHESSRL_PINNED", "").split(",") if n.strip()}
-RUNNING_WITHIN_S = 15 * 60  # self-play logs every 30 s; the home sync runs every 5 min
-
-
-def last_activity(run_dir: Path) -> float:
+def tail_json(path: Path) -> dict | None:
+    """The last complete row of a JSONL file, read from its end."""
     try:
-        return (run_dir / "metrics" / "selfplay.jsonl").stat().st_mtime
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 16384))
+            lines = fh.read().split(b"\n")
     except FileNotFoundError:
-        return 0.0
-
-
-@st.cache_data(ttl=55)
-def last_elo(run_dir: str) -> float | None:
-    try:
-        lines = (Path(run_dir) / "ladder" / "ladder.jsonl").read_text().strip().splitlines()
-        return json.loads(lines[-1])["elo"] if lines else None
-    except (FileNotFoundError, ValueError, KeyError):
         return None
+    for line in reversed(lines):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return None
 
 
-def select_runs(labels: dict[str, Path]) -> list[str]:
-    """Sidebar run toggles. Defaults: running runs + PINNED; the choice survives refreshes."""
-    now = time.time()
-    running = {n for n, p in labels.items() if now - last_activity(p) < RUNNING_WITHIN_S}
-    default = running | {n for n in labels if n.split(" ")[0] in PINNED}
-    if not default:  # nothing running: the three most recent runs
-        default = set(sorted(labels, key=lambda n: last_activity(labels[n]))[-3:])
-    for n in labels:
-        st.session_state.setdefault(f"show::{n}", n in default)
-
-    def set_all(names, value):
-        for n in labels:
-            st.session_state[f"show::{n}"] = value if names is None else n in names
-
-    c = st.sidebar.columns(3)
-    c[0].button("Running", on_click=set_all, args=(running, True), width="stretch")
-    c[1].button("All", on_click=set_all, args=(None, True), width="stretch")
-    c[2].button("None", on_click=set_all, args=(None, False), width="stretch")
-
-    def toggle(n):
-        elo = last_elo(str(labels[n]))
-        st.checkbox(f"{n} · {elo:,.0f}" if elo is not None else n, key=f"show::{n}")
-
-    newest_first = sorted(labels, key=lambda n: last_activity(labels[n]), reverse=True)
-    st.sidebar.caption(f"Running now ({len(running)})")
-    with st.sidebar:
-        for n in newest_first:
-            if n in running:
-                toggle(n)
-        finished = [n for n in newest_first if n not in running]
-        with st.expander(f"Finished ({len(finished)})", expanded=False):
-            for n in finished:
-                toggle(n)
-    return [n for n in labels if st.session_state[f"show::{n}"]]
+def q_weight_at(cfg: dict, steps: np.ndarray) -> np.ndarray:
+    """The weight of the search-trained value head in the WDL the search reads (src/export/heads.py)."""
+    heads = cfg.get("search_heads", "search")
+    if heads == "outcome":
+        return np.zeros_like(steps)
+    if heads != "blend":
+        return np.ones_like(steps)
+    ramp = cfg.get("search_q_ramp") or {}
+    if int(ramp.get("end_step", 0) or 0) <= 0:
+        return np.full_like(steps, float(cfg.get("search_q_weight", 0.5)))
+    a, b = float(ramp.get("start_step", 0)), float(ramp["end_step"])
+    frac = np.clip((steps - a) / max(1.0, b - a), 0.0, 1.0)
+    return (
+        float(ramp.get("start", 0.0))
+        + (float(ramp.get("end", 0.0)) - float(ramp.get("start", 0.0))) * frac
+    )
 
 
-def kpi_table(runs: dict) -> None:
-    rows = []
-    rerate = gather("rerate_sf.jsonl")
-    for name, data in runs.items():
-        tr, sp, lad = data["train"], data["selfplay"], data["ladder"]
-        rr = rerated_points(data, rerate, "step")
-        last_tr = tr.iloc[-1] if not tr.empty else {}
-        last_sp = sp.iloc[-1] if not sp.empty else {}
-        last_lad = lad.iloc[-1] if not lad.empty else {}
-        games = last_sp.get("total_games", 0) or 0
-        rows.append(
-            {
-                "run": name,
-                "hours": round(float(last_sp.get("hours", last_tr.get("hours", 0)) or 0), 2),
-                "step": int(last_tr.get("step", 0) or 0),
-                "model": (
-                    f"enc {int(last_tr.get('model_d_model') or 0)}x{int(last_tr.get('model_layers') or 0)}"
-                    if last_tr.get("model_d_model") == last_tr.get("model_d_model")
-                    and "model_d_model" in last_tr
-                    and last_tr.get("model_d_model")
-                    else f"{int(last_tr.get('model_blocks', 0) or 0)}x{int(last_tr.get('model_channels', 0) or 0)}"
-                ),
-                "params": f"{(last_tr.get('params', 0) or 0) / 1e6:.2f}M",
-                "pos/s": round(float(last_sp.get("positions_per_sec", 0) or 0), 1),
-                "games/s": round(float(last_sp.get("games_per_sec", 0) or 0), 2),
-                "positions": f"{int(last_sp.get('total_records_written', 0) or 0):,}",
-                "games": f"{int(games):,}",
-                "avg plies": round((last_sp.get("total_game_plies", 0) or 0) / games, 1)
-                if games
-                else None,
-                "ladder Elo": f"{last_lad.get('elo', float('nan')):.0f} ± {last_lad.get('elo_se', float('nan')):.0f}"
-                if len(lad)
-                else "–",
-                "Elo · SF openings": f"{rr['elo'].iloc[-1]:.0f} @ {rr['step'].iloc[-1] / 1000:g}k"
-                if len(rr)
-                else "–",
-                "puzzles": f"{last_lad.get('puzzles.line', float('nan')):.3f}" if len(lad) else "–",
-            }
+class Run:
+    """One run directory. A branch (another run's checkpoint continued here) names its parent in
+    metrics/branch.json, {"parent_run": "<sibling run dir>"}: its hours and positions then continue from
+    where the parent's ended (its steps already do). The older form {"parent_t0", "parent_positions"} gives
+    the offsets directly."""
+
+    def __init__(self, run_id: str, path: Path, resolve=None) -> None:
+        self.id, self.path, self.label = run_id, path, run_label(path)
+        self.resolve = resolve or (lambda path: None)  # a sibling run directory -> its Run
+        m = path / "metrics"
+        self.train = Table(m / "train.jsonl", ("step", *TRAIN_SMOOTH, *TRAIN_KPI))
+        self.selfplay = Table(
+            m / "selfplay.jsonl", (*SELFPLAY_RAW, *(f"total_{c}" for c in COUNTERS))
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        self.ladder = Table(path / "ladder" / "ladder.jsonl")
+        self.diversity = Table(m / "diversity.jsonl")
+        self.config: dict = {}
+        self._config_mtime = 0.0
+        self._cache: dict = {}
 
+    def update(self) -> tuple:
+        for t in (self.train, self.selfplay, self.ladder, self.diversity):
+            t.update()
+        try:
+            mtime = (self.path / "config.yaml").stat().st_mtime
+            if mtime != self._config_mtime:
+                self.config = yaml.safe_load((self.path / "config.yaml").read_text()) or {}
+                self._config_mtime = mtime
+        except (FileNotFoundError, yaml.YAMLError):
+            pass
+        return (
+            self.train.version,
+            self.selfplay.version,
+            self.ladder.version,
+            self.diversity.version,
+            self._config_mtime,
+        )
 
-def budget_panel() -> None:
-    if not BUDGET.exists():
-        st.caption("budget.json not found (chessrl-vast guard pushes it every 5 min)")
-        return
-    b = json.loads(BUDGET.read_text())
-    c = st.columns(5)
-    c[0].metric("Spent", f"${b['spent']:.2f}", f"of ${b['cap']:.0f}")
-    c[1].metric("Burn", f"${b['burn_per_hour']:.2f}/h")
-    c[2].metric("Hours left at burn", f"{b['hours_left']:.0f}" if b.get("hours_left") else "–")
-    live = [i for i in b["instances"] if i["ended"] is None]
-    c[3].metric("Boxes up", len(live))
-    c[4].metric("Updated", f"{(time.time() - b['t']) / 60:.0f} min ago")
-    st.progress(min(1.0, b["spent"] / b["cap"]))
+    # ------------------------------------------------------------------ axes
+    def _branch(self) -> dict:
+        try:
+            return json.loads((self.path / "metrics" / "branch.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
 
+    def offsets(self, depth: int = 0) -> tuple[float, float]:
+        """(hours, positions) the parent run had reached when this branch started: 0 without a parent."""
+        parent_name = self._branch().get("parent_run")
+        parent = self.resolve(self.path.parent / parent_name) if parent_name and depth < 8 else None
+        if parent is None:
+            return 0.0, 0.0
+        parent.update()
+        axes, _ = parent._axes(depth + 1)
+        t = parent.selfplay.times
+        if not len(t):
+            return 0.0, 0.0
+        end = np.array([t[-1]])
+        return float(axes["hours"](end)[0]), float(np.nan_to_num(axes["positions"](end)[0]))
 
-# The first post's best automatic match: 55% against Stockfish-1400 (800 simulations, 50 games).
-FIRST_POST_BEST = 1400 + 400 * np.log10(0.55 / 0.45)
+    def _axes(self, depth: int = 0):
+        """Functions t -> hours (training time: downtime > 10 min removed), positions, step."""
+        branch = self._branch()
+        off_h, off_p = self.offsets(depth)
+        sp_t = self.selfplay.times
+        tr_t = self.train.times
+        starts = [a[0] for a in (tr_t, sp_t) if len(a)]
+        starts += [e["t"] for e in self.train.events[:1] if isinstance(e.get("t"), (int, float))]
+        own_t0 = min(starts) if starts else self.path.stat().st_mtime
+        t0 = float(branch.get("parent_t0", own_t0)) - off_h * 3600.0
+        ts = np.sort(sp_t)
+        gaps = np.diff(ts)
+        big = np.append(
+            gaps > 600, True
+        )  # the open interval after the last row counts once > 600 s
+        down_s = np.concatenate([[0.0], np.cumsum(np.where(gaps > 600, gaps - 30, 0.0))])
 
+        def hours(t):
+            t = np.asarray(t, dtype=np.float64)
+            down = np.zeros_like(t)
+            if len(ts):
+                i = np.clip(np.searchsorted(ts, t, side="right") - 1, 0, None)
+                since = t - ts[i]
+                inside = big[i] & (since > np.where(i == len(ts) - 1, 600, 0))
+                down = down_s[i] + np.where(inside, np.maximum(0.0, since - 30), 0.0)
+            return (t - t0 - down) / 3600.0
 
-def network_label(engine: str) -> str:
-    # <date>_<time>_<hex>_<run name>_step_<NNNNNNNN> -> "<run name> @ <k steps>k"
-    parts = engine.split("_")
-    if len(parts) > 5 and parts[-2] == "step":
-        return f"{'_'.join(parts[3:-2])} @ {int(parts[-1]) / 1000:g}k"
-    return engine
-
-
-def stockfish_rating(rows: pd.DataFrame) -> tuple[float, float] | None:
-    """One rating on Stockfish's UCI_Elo scale from the scores against every level (maximum
-    likelihood, draws as half points, as in the ladder fit), with its standard error. None when
-    the scores do not pin it down (all won or all lost)."""
-    grid = np.arange(0.0, 4000.0)
-    ll, info = np.zeros_like(grid), np.zeros_like(grid)
-    for _, r in rows.iterrows():
-        p = np.clip(1 / (1 + 10 ** ((r["sf_elo"] - grid) / 400)), 1e-12, 1 - 1e-12)
-        s = r["w"] + 0.5 * r["d"]
-        ll += s * np.log(p) + (r["games"] - s) * np.log(1 - p)
-        info += r["games"] * p * (1 - p) * (np.log(10) / 400) ** 2
-    i = int(np.argmax(ll))
-    if i in (0, len(grid) - 1):
-        return None
-    return float(grid[i]), float(1 / np.sqrt(info[i]))
-
-
-def benchmarks_panel() -> None:
-    """Re-ratings on the Stockfish openings and the first post's Stockfish benchmark, wherever
-    they were written (any run's metrics/rerate_sf.jsonl and metrics/sf_benchmark.jsonl)."""
-    rerate, bench = gather("rerate_sf.jsonl"), gather("sf_benchmark.jsonl")
-    if rerate.empty and bench.empty:
-        return
-    with st.expander(
-        "Re-ratings on Stockfish openings · first-post Stockfish benchmark", expanded=True
-    ):
-        if not rerate.empty:
-            st.caption(
-                "Checkpoints re-rated on the balanced Stockfish openings (anchors recalibrated on them). "
-                "'old Elo' is the run's rating on random openings: a different scale."
+        recs = self.selfplay.array("total_records_written")
+        if len(recs):
+            ok = np.isfinite(recs)
+            xs, ys = sp_t[ok], recs[ok]
+            resets = np.where(ys[1:] < ys[:-1], ys[:-1], 0.0)  # the counter restarts with self-play
+            ys = (
+                ys
+                + np.concatenate([[0.0], np.cumsum(resets)])
+                + float(branch.get("parent_positions", off_p))
             )
-            cols = [c for c in ("run", "step", "elo", "elo_se", "old_elo") if c in rerate]
-            st.dataframe(
-                rerate[cols]
-                .drop_duplicates(["run", "step"], keep="last")
-                .sort_values(["run", "step"]),
-                hide_index=True,
-                width="stretch",
+        else:
+            xs = ys = np.array([])
+
+        def positions(t):
+            return np.interp(t, xs, ys) if len(xs) else np.full(len(np.atleast_1d(t)), np.nan)
+
+        steps = self.train.array("step")
+        ok = np.isfinite(steps)
+        st_t, st_v = tr_t[ok], steps[ok]
+
+        def step(t):
+            return np.interp(t, st_t, st_v) if len(st_t) else np.full(len(np.atleast_1d(t)), np.nan)
+
+        return {"hours": hours, "positions": positions, "step": step}, own_t0
+
+    # ------------------------------------------------------------------ payload
+    def payload(self, xkey: str, k: int, n: int) -> dict:
+        key = (self.update(), self.offsets(), xkey, k, n)
+        if key in self._cache:
+            return self._cache[key]
+        axes, own_t0 = self._axes()
+        out = {"id": self.id, "label": self.label, "config": self.config}
+        out["train"] = self._train(axes, xkey, k, n)
+        out["selfplay"] = self._selfplay(axes, xkey, n)
+        lad = [
+            r
+            for r in self.ladder.rows
+            if isinstance(r.get("t"), (int, float))
+            and isinstance(r.get("elo"), (int, float))
+            and r["t"] >= own_t0 - 1800  # a branch's copied rows are its parent's curve
+        ]
+        out["ladder"] = self._ladder(lad, axes, xkey)
+        out["opening"] = self._opening(lad, axes, xkey)
+        out["diversity"] = self._diversity(axes, xkey)
+        out["events"] = [
+            rounded(axes[xkey](np.array([e["t"]])) if xkey != "step" else [e.get("step") or 0])[0]
+            for e in self.train.events
+            if e.get("event") == "grow" and isinstance(e.get("t"), (int, float))
+        ]
+        out["kpi"] = self._kpi(lad, axes)
+        self._cache = {key: out}
+        return out
+
+    def _train(self, axes, xkey, k, n) -> dict:
+        tr = self.train
+        t = tr.times
+        if not len(t):
+            return {"x": [], "cols": {}}
+        steps = tr.array("step")
+        x = steps if xkey == "step" else axes[xkey](t)
+        cols = {}
+        for c, fixed in TRAIN_SMOOTH.items():
+            v = q_weight_at(self.config, steps) if c == "search_q_weight" else tr.array(c)
+            if np.isfinite(v).any():
+                cols[c] = rolling_mean(v, fixed or k)
+        order = np.argsort(x, kind="stable")
+        keep = np.isfinite(x[order])
+        order = order[keep]
+        x, cols = reduce_points(x[order], {c: v[order] for c, v in cols.items()}, n)
+        return {"x": rounded(x), "cols": {c: rounded(v) for c, v in cols.items()}}
+
+    def _selfplay(self, axes, xkey, n) -> dict:
+        sp = self.selfplay
+        t = sp.times
+        if len(t) < 2:
+            return {"x": [], "cols": {}}
+        d = {c: np.diff(sp.array(f"total_{c}")) for c in COUNTERS}
+        # A counter going down is a self-play restart; a counter older runs lack stays NaN.
+        ok = np.all([np.nan_to_num(v, nan=0.0) >= 0 for v in d.values()], axis=0) & (d["games"] > 0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            g = np.where(ok, d["games"], np.nan)
+            would = np.where(
+                ok & (d["playthrough_would_resign"] > 0), d["playthrough_would_resign"], np.nan
             )
-        ok = bench[bench["score"].notna()] if "score" in bench else pd.DataFrame()
-        if not ok.empty:
-            st.caption(
-                "The first post's protocol: Stockfish 16 with UCI_Elo, 100 ms per move; the network "
-                "searches 800 simulations per move; games from the initial position. 'Stockfish scale' "
-                "is one rating fitted to the scores against every level, on Stockfish's UCI_Elo "
-                "scale (not the ladder's)."
-            )
-            ok = ok.drop_duplicates(["engine", "sf_elo"], keep="last").assign(
-                network=ok["engine"].map(network_label)
-            )
-            rows = []
-            for net, g in ok.groupby("network"):
-                row = {"network": net}
-                for _, r in g.sort_values("sf_elo").iterrows():
-                    row[f"vs SF-{int(r['sf_elo'])}"] = (
-                        f"{r['score']:.0%}  ({int(r['w'])}W {int(r['d'])}D {int(r['l'])}L)"
-                    )
-                fit = stockfish_rating(g)
-                row["rating"], row["se"] = fit if fit else (None, None)
-                rows.append(row)
-            table = pd.DataFrame(rows).sort_values("rating", na_position="first")
-            fitted = table[table["rating"].notna()]
-            if not fitted.empty:
-                fig = go.Figure(
-                    go.Scatter(
-                        x=fitted["rating"],
-                        y=fitted["network"],
-                        mode="markers",
-                        marker=dict(size=10, color=PALETTE[0]),
-                        error_x=dict(type="data", array=fitted["se"], visible=True, thickness=1.5),
-                        customdata=fitted["se"],
-                        hovertemplate="%{y}: %{x:,.0f} ± %{customdata:.0f}<extra></extra>",
-                    )
+            derived = {
+                "game_length": d["game_plies"] / g,
+                "frac_checkmate": d["end_checkmate"] / g,
+                "frac_resign": d["end_resign"] / g,
+                "frac_max_plies": d["end_max_plies"] / g,
+                "frac_draw": d["draws"] / g,
+                "frac_false_resign": d["playthrough_false_resign"] / would,
+            }
+        cols = {c: sp.array(c)[1:] for c in SELFPLAY_RAW}
+        cols.update(derived)
+        if not np.isfinite(cols["random_opening_plies"]).any():  # runs from before the column
+            plies = (self.config.get("selfplay") or {}).get("random_opening_plies")
+            if isinstance(plies, (int, float)):
+                cols["random_opening_plies"] = np.full(len(t) - 1, float(plies))
+        x = axes[xkey](t[1:])
+        cols = {
+            c: rolling_mean(v, SELFPLAY_SMOOTH.get(c, 1))
+            for c, v in cols.items()
+            if np.isfinite(v).any()
+        }
+        keep = np.isfinite(x)
+        x, cols = reduce_points(x[keep], {c: v[keep] for c, v in cols.items()}, n)
+        return {"x": rounded(x), "cols": {c: rounded(v) for c, v in cols.items()}}
+
+    @staticmethod
+    def _xs(rows, axes, xkey) -> np.ndarray:
+        if xkey == "step":
+            return np.array([_num(r.get("step")) for r in rows])
+        return axes[xkey](np.array([r["t"] for r in rows], dtype=np.float64))
+
+    def _ladder(self, lad, axes, xkey) -> dict:
+        if not lad:
+            return {
+                "x": [],
+                "elo": [],
+                "elo_se": [],
+                "set": [],
+                "puzzles.line": [],
+                "puzzles.first_move": [],
+            }
+        x = self._xs(lad, axes, xkey)
+        order = np.argsort(x, kind="stable")
+        rows = [lad[i] for i in order]
+
+        def col(f):
+            return rounded([f(r) for r in rows])
+
+        return {
+            "x": rounded(x[order]),
+            "elo": col(lambda r: _num(r.get("elo"))),
+            "elo_se": col(lambda r: _num(r.get("elo_se"))),
+            # Rows without the field predate the Stockfish openings: random openings.
+            "set": [r.get("openings") or "random" for r in rows],
+            "puzzles.line": col(lambda r: _num((r.get("puzzles") or {}).get("line"))),
+            "puzzles.first_move": col(lambda r: _num((r.get("puzzles") or {}).get("first_move"))),
+        }
+
+    def _opening(self, lad, axes, xkey) -> dict:
+        out = {}
+        rows = [r for r in lad if isinstance(r.get("opening"), dict)]
+        if not rows:
+            return out
+        x = self._xs(rows, axes, xkey)
+        order = np.argsort(x, kind="stable")
+        rows = [rows[i] for i in order]
+        for kind in ("policy", "search"):
+            shares = [(r["opening"].get(kind) or {}) for r in rows]
+            best: dict[str, float] = {}
+            for s in shares:
+                for move, p in s.items():
+                    best[move] = max(best.get(move, 0.0), _num(p))
+            top = sorted(best, key=best.get, reverse=True)[:OPENING_TOP]
+            if not top:
+                continue
+            moves = {m: rounded([_num(s.get(m, 0.0)) for s in shares]) for m in top}
+            other = [max(0.0, 1.0 - sum(_num(s.get(m, 0.0)) for m in top)) for s in shares]
+            out[kind] = {"x": rounded(x[order]), "moves": moves, "other": rounded(other)}
+        return out
+
+    def _diversity(self, axes, xkey) -> dict:
+        rows = [
+            r
+            for r in self.diversity.rows
+            if isinstance(r.get("t"), (int, float)) and r.get("plies")
+        ]
+        if not rows:
+            return {}
+        x = (
+            self._xs(rows, axes, xkey)
+            if xkey != "step"
+            else axes["step"](np.array([r["t"] for r in rows], dtype=np.float64))
+        )
+        plies = sorted({p for r in rows for p in r["plies"]}, key=int)
+        out = {"x": rounded(x), "plies": {}}
+        for p in plies:
+            out["plies"][p] = {
+                f: rounded([_num((r["plies"].get(p) or {}).get(f)) for r in rows])
+                for f in ("effective", "top_share", "singletons")
+            }
+        return out
+
+    def _kpi(self, lad, axes) -> dict:
+        tr, sp = self.train, self.selfplay
+
+        def last(table, col):
+            a = table.array(col)
+            a = a[np.isfinite(a)]
+            return float(a[-1]) if len(a) else None
+
+        games = last(sp, "total_games") or 0
+        plies = last(sp, "total_game_plies") or 0
+        hours_now = float(axes["hours"](np.array([sp.times[-1]]))[0]) if len(sp.times) else None
+        d_model, layers = last(tr, "model_d_model"), last(tr, "model_layers")
+        model = f"enc {int(d_model)}x{int(layers or 0)}" if d_model else None
+        elos = [
+            r for r in lad if r.get("openings", "random") == (lad[-1].get("openings") or "random")
+        ]
+        last_hour = []
+        if lad and hours_now is not None:
+            h = self._xs(elos, axes, "hours")
+            last_hour = [r["elo"] for r, hh in zip(elos, h, strict=True) if hh >= hours_now - 1.0]
+        return {
+            "hours": hours_now,
+            "step": last(tr, "step"),
+            "model": model,
+            "params": last(tr, "params"),
+            "pos_s": last(sp, "positions_per_sec"),
+            "games": games,
+            "positions": last(sp, "total_records_written"),
+            "avg_plies": plies / games if games else None,
+            "elo": lad[-1]["elo"] if lad else None,
+            "elo_se": _num(lad[-1].get("elo_se")) if lad else None,
+            "elo_last_hour": sum(last_hour) / len(last_hour) if last_hour else None,
+            "elo_last_hour_n": len(last_hour),
+            "puzzles": _num((lad[-1].get("puzzles") or {}).get("line")) if lad else None,
+        }
+
+
+class Dashboard:
+    def __init__(self, roots: list[Path], budget: Path) -> None:
+        self.roots, self.budget = roots, budget
+        self.runs: dict[str, Run] = {}
+        self.lock = threading.Lock()
+        self._listed = (0.0, [])
+
+    def discover(self) -> list[dict]:
+        """Every run directory with metrics/: <root>/<run> on a box, <root>/<box>/<run> at home."""
+        now = time.time()
+        if now - self._listed[0] < 15:
+            return self._listed[1]
+        found = []
+        for i, root in enumerate(self.roots):
+            for metrics in sorted([*root.glob("*/metrics"), *root.glob("*/*/metrics")]):
+                path = metrics.parent
+                rid = (
+                    str(path.relative_to(root))
+                    if len(self.roots) == 1
+                    else f"{i}/{path.relative_to(root)}"
                 )
-                fig.add_vline(
-                    x=FIRST_POST_BEST,
-                    line=dict(color="#64748b", dash="dash", width=1.5),
-                    annotation_text=f"first post, best match (55% vs SF-1400): {FIRST_POST_BEST:,.0f}",
-                    annotation_position="top left",
+                sp = metrics / "selfplay.jsonl"
+                activity = sp.stat().st_mtime if sp.exists() else metrics.stat().st_mtime
+                lad = tail_json(path / "ladder" / "ladder.jsonl") or {}
+                found.append(
+                    {
+                        "id": rid,
+                        "path": path,
+                        "label": run_label(path),
+                        "activity": activity,
+                        "running": now - activity < RUNNING_WITHIN_S,
+                        "elo": lad.get("elo") if isinstance(lad.get("elo"), (int, float)) else None,
+                    }
                 )
-                fig.update_layout(
-                    title="Stockfish-scale Elo (first post's benchmark)",
-                    height=120 + 36 * len(fitted),
-                    margin=dict(l=10, r=10, t=60, b=10),
-                    xaxis_title="Elo on Stockfish's UCI_Elo scale",
-                    showlegend=False,
-                )
-                st.plotly_chart(fig, width="stretch")
-            table["Stockfish scale"] = [
-                f"{r:,.0f} ± {s:.0f}" if r == r and r is not None else "–"
-                for r, s in zip(table["rating"], table["se"], strict=True)
-            ]
-            st.dataframe(
-                table.drop(columns=["rating", "se"]).iloc[::-1], hide_index=True, width="stretch"
+        found.sort(key=lambda r: r["activity"], reverse=True)
+        self._listed = (now, found)
+        return found
+
+    def list_payload(self) -> dict:
+        return {"runs": [{k: v for k, v in r.items() if k != "path"} for r in self.discover()]}
+
+    def data_payload(self, ids: list[str], xkey: str, k: int, n: int) -> dict:
+        known = {r["id"]: r["path"] for r in self.discover()}
+        by_path = {p: rid for rid, p in known.items()}
+        by_name = {p.name: rid for rid, p in known.items()}  # a parent synced from another box
+
+        def resolve(path: Path) -> Run | None:
+            rid = by_path.get(path) or by_name.get(path.name)
+            return run(rid) if rid else None
+
+        def run(rid: str) -> Run:
+            if rid not in self.runs:
+                self.runs[rid] = Run(rid, known[rid], resolve)
+            return self.runs[rid]
+
+        out = []
+        with self.lock:
+            for rid in ids:
+                if rid in known:
+                    out.append(run(rid).payload(xkey, k, n))
+        return {"runs": out, "budget": self.budget_payload(), "t": time.time()}
+
+    def budget_payload(self) -> dict | None:
+        try:
+            return json.loads(self.budget.read_text())
+        except (FileNotFoundError, ValueError):
+            return None
+
+
+def make_handler(dash: Dashboard, analysis_url: str):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # quiet: the page polls every minute
+            pass
+
+        def _send(self, body: bytes, ctype: str) -> None:
+            gz = "gzip" in (self.headers.get("Accept-Encoding") or "") and len(body) > 1024
+            if gz:
+                body = gzip.compress(body, compresslevel=5)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, obj) -> None:
+            self._send(
+                json.dumps(obj, separators=(",", ":"), default=str).encode(), "application/json"
             )
-        if "error" in bench and bench["error"].notna().any():
-            st.caption(
-                f"{int(bench['error'].notna().sum())} benchmark match(es) failed (see sf_benchmark.jsonl)."
-            )
+
+        def do_GET(self):  # noqa: N802
+            url = urlparse(self.path)
+            q = parse_qs(url.query)
+            try:
+                if url.path in ("/", "/index.html"):
+                    self._send(PAGE.read_bytes(), "text/html; charset=utf-8")
+                elif url.path == "/api/runs":
+                    self._json({**dash.list_payload(), "analysis_url": analysis_url})
+                elif url.path == "/api/data":
+                    ids = [i for i in (q.get("ids", [""])[0]).split(",") if i]
+                    xkey = q.get("x", ["hours"])[0]
+                    xkey = xkey if xkey in XKEYS else "hours"
+                    k = max(1, min(500, int(q.get("k", ["20"])[0])))
+                    n = max(50, min(5000, int(q.get("n", ["600"])[0])))
+                    self._json(dash.data_payload(ids, xkey, k, n))
+                else:
+                    self.send_error(404)
+            except BrokenPipeError:
+                pass
+            except Exception as exc:  # report it to the page instead of dropping the connection
+                body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+    return Handler
 
 
-FIRST_MOVE_COLORS = {"e4": PALETTE[0], "d4": PALETTE[1], "Nf3": PALETTE[2], "c4": PALETTE[3]}
-OTHER_COLORS = PALETTE[4:7]
-
-
-def first_move_san(uci: str) -> str:
-    # From the starting position the knights stand on b1 / g1; every other first move is a pawn's.
-    return ("N" if uci[:2] in ("b1", "g1") else "") + uci[2:]
-
-
-def opening_panel(runs: dict, xkey: str) -> None:
-    """First-move preferences at the starting position (ladder_daemon's opening probe): the raw
-    policy and a 400-sim search without noise, as stacked shares of the four main moves + the rest."""
-    shown = [
-        (n, d["ladder"])
-        for n, d in runs.items()
-        if not d["ladder"].empty
-        and xkey in d["ladder"]
-        and any(c.startswith("opening.policy.") for c in d["ladder"])
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--port", type=int, default=8501)
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument(
+        "--analysis-url",
+        default=os.environ.get("CHESSRL_ANALYSIS_URL", ""),
+        help="link to the analysis board in the header (empty: none)",
+    )
+    a = p.parse_args()
+    roots = [
+        Path(x)
+        for x in os.environ.get("CHESSRL_RUNS_ROOT", str(ROOT / "artifacts" / "runs")).split(":")
     ]
-    if not shown:
-        return
-    st.subheader("Opening: first move from the starting position")
-    st.caption(
-        "Measured at each rating: the network's raw policy, and a 400-simulation search without noise. "
-        "The four main moves of each chart, the rest grouped as 'other'."
-    )
-    for name, lad in shown:
-        cols = st.columns(2)
-        for col, kind, label in (
-            (cols[0], "policy", "network alone"),
-            (cols[1], "search", "after 400 simulations"),
-        ):
-            keys = [c for c in lad if c.startswith(f"opening.{kind}.")]
-            part = lad.dropna(subset=keys[:1]).sort_values(xkey)
-            shares = part[keys].fillna(0.0)
-            top = list(shares.max().sort_values(ascending=False).index[:4])
-            fig = go.Figure()
-            spare = iter(OTHER_COLORS)
-            for k in top:
-                san = first_move_san(k.split(".")[-1])
-                fig.add_trace(
-                    go.Scatter(
-                        x=part[xkey],
-                        y=shares[k],
-                        name=san,
-                        stackgroup="one",
-                        mode="lines",
-                        line=dict(width=0.5, color=FIRST_MOVE_COLORS.get(san) or next(spare)),
-                        hovertemplate=f"{san}: %{{y:.0%}}<extra></extra>",
-                    )
-                )
-            fig.add_trace(
-                go.Scatter(
-                    x=part[xkey],
-                    y=(1 - shares[top].sum(axis=1)).clip(lower=0),
-                    name="other",
-                    stackgroup="one",
-                    mode="lines",
-                    line=dict(width=0.5, color="#94a3b8"),
-                    hovertemplate="other: %{y:.0%}<extra></extra>",
-                )
-            )
-            fig.update_layout(
-                title=f"{name} · {label}",
-                height=280,
-                margin=dict(l=10, r=10, t=40, b=10),
-                xaxis_title=XLABEL[xkey],
-                yaxis=dict(range=[0, 1], tickformat=".0%"),
-                legend=dict(orientation="h", y=-0.3),
-            )
-            col.plotly_chart(fig, width="stretch")
+    budget = Path(os.environ.get("CHESSRL_BUDGET", "/workspace/budget.json"))
+    dash = Dashboard(roots, budget)
+    server = ThreadingHTTPServer((a.host, a.port), make_handler(dash, a.analysis_url))
+    print(f"[dashboard] http://localhost:{a.port}  runs: {', '.join(map(str, roots))}", flush=True)
+    server.serve_forever()
 
 
-def selfplay_derived(runs: dict) -> None:
-    """Per-window rates from the cumulative self-play counters."""
-    for data in runs.values():
-        sp = data["selfplay"]
-        if sp.empty:
-            continue
-        d = sp.filter(like="total_").diff()
-        games = d.get("total_games")
-        if games is None:
-            continue
-        g = games.where(games > 0)
-        sp["game_length"] = d["total_game_plies"] / g
-        sp["frac_decisive"] = (d["total_white_wins"] + d["total_black_wins"]) / g
-        sp["frac_checkmate"] = d["total_end_checkmate"] / g
-        sp["frac_resign"] = d["total_end_resign"] / g
-        sp["frac_max_plies"] = d["total_end_max_plies"] / g
-
-
-@st.fragment(run_every=60)
-def body() -> None:
-    all_runs = list_runs()
-    st.sidebar.header("Runs")
-    if not all_runs:
-        st.info(f"No runs with metrics under {', '.join(map(str, RUNS_ROOTS))}")
-        return
-    labels = {run_label(p): p for p in all_runs}
-    chosen = select_runs(labels)
-    if not chosen:
-        st.info("No runs selected: tick some in the sidebar.")
-    xkey = st.sidebar.radio("x axis", list(XLABEL), format_func=XLABEL.get)
-    scale = st.sidebar.radio(
-        "ladder scale",
-        ("both", "random", "sf"),
-        format_func={
-            "both": "both",
-            "random": "random openings (original)",
-            "sf": "Stockfish openings",
-        }.get,
-    )
-    k = st.sidebar.slider("smoothing (points)", 1, 200, 20)
-    runs = {n: load_run(str(labels[n])) for n in chosen}
-    selfplay_derived(runs)
-
-    st.title("♟ ChessRL")
-    budget_panel()
-    kpi_table(runs)
-
-    st.subheader("Strength")
-    c = st.columns(2)
-    with c[0]:
-        fig = go.Figure()
-        any_sf = False
-        rerate = gather("rerate_sf.jsonl")
-        for i, (name, data) in enumerate(runs.items()):
-            lad = data["ladder"]
-            lad = lad if not lad.empty and xkey in lad else pd.DataFrame()
-            # Two opening sets, two scales: rows without the field predate the switch (random).
-            sets = (
-                lad["openings"].fillna("random")
-                if "openings" in lad
-                else pd.Series("random", index=lad.index)
-            )
-            # The Stockfish-openings scale: live ladder rows plus checkpoints re-rated afterwards.
-            sf = pd.concat([lad[sets == "sf"], rerated_points(data, rerate, xkey)])
-            by_set = {
-                "random": lad[sets == "random"],
-                "sf": sf.sort_values(xkey) if not sf.empty else sf,
-            }
-            for oset, dash, suffix in (
-                ("random", "solid", ""),
-                ("sf", "dash", " · Stockfish openings"),
-            ):
-                part = by_set[oset]
-                if part.empty or scale not in ("both", oset):
-                    continue
-                any_sf |= oset == "sf"
-                fig.add_trace(
-                    go.Scatter(
-                        x=part[xkey],
-                        y=part["elo"],
-                        mode="lines+markers",
-                        name=name + suffix,
-                        error_y=dict(type="data", array=part["elo_se"], visible=True, thickness=1),
-                        line=dict(color=PALETTE[i % len(PALETTE)], width=2, dash=dash),
-                    )
-                )
-        fig.update_layout(
-            title="Anchor-ladder Elo (random mover = 0)",
-            height=340,
-            margin=dict(l=10, r=10, t=40, b=10),
-            xaxis_title=XLABEL[xkey],
-            legend=dict(orientation="h", y=-0.25),
-        )
-        st.plotly_chart(fig, width="stretch")
-        if any_sf:
-            st.warning(
-                "Two rating scales. Solid: games from 8 random plies (the original ladder). Dashed: "
-                "Stockfish's balanced openings, with anchors recalibrated on them (from 2026-10-26; "
-                "earlier runs re-rated every 10k steps). "
-                "They are not comparable: the balanced-opening scale is stretched at the top "
-                "(Stockfish skill 20 at 1k nodes: 2,068 on random openings, 2,517 on balanced ones)."
-            )
-    with c[1]:
-        line_chart(
-            "Puzzle accuracy (1k Lichess, strict line, MCTS-100)",
-            runs,
-            "ladder",
-            ["puzzles.line", "puzzles.first_move"],
-            xkey,
-            1,
-            yfmt=".0%",
-            height=340,
-        )
-
-    benchmarks_panel()
-    opening_panel(runs, xkey)
-
-    st.subheader("Learning")
-    c = st.columns(3)
-    with c[0]:
-        line_chart(
-            "Policy loss (CE vs visit distribution)", runs, "train", ["loss/policy_visits"], xkey, k
-        )
-    with c[1]:
-        line_chart("KL(search ‖ policy)", runs, "train", ["policy/kl_to_visits"], xkey, k)
-    with c[2]:
-        line_chart(
-            "Value losses (outcome · search)",
-            runs,
-            "train",
-            ["loss/value", "loss/value_q"],
-            xkey,
-            k,
-        )
-    c = st.columns(3)
-    with c[0]:
-        line_chart(
-            "Policy top-1 = search's top move",
-            runs,
-            "train",
-            ["acc/policy_top_visit"],
-            xkey,
-            k,
-            yfmt=".0%",
-        )
-    with c[1]:
-        line_chart(
-            "Entropy (policy · visit target)",
-            runs,
-            "train",
-            ["entropy/policy", "entropy/visit_target"],
-            xkey,
-            k,
-        )
-    with c[2]:
-        line_chart("Learning rate", runs, "train", ["lr"], xkey, 1, log_y=True)
-
-    st.subheader("Signal quality")
-    c = st.columns(3)
-    with c[0]:
-        line_chart(
-            "Decisive game outcomes in batches",
-            runs,
-            "train",
-            ["buffer/decisive_outcome"],
-            xkey,
-            k,
-            yfmt=".0%",
-        )
-    with c[1]:
-        line_chart(
-            "Outcome vs search WDL agreement",
-            runs,
-            "train",
-            ["buffer/wdl_agreement"],
-            xkey,
-            k,
-            yfmt=".0%",
-        )
-    with c[2]:
-        line_chart(
-            "Castle rate (rare-action canary)",
-            runs,
-            "train",
-            ["buffer/castle_rate"],
-            xkey,
-            k,
-            yfmt=".2%",
-        )
-    c = st.columns(3)
-    with c[0]:
-        line_chart("Game length (plies)", runs, "selfplay", ["game_length"], xkey, 5)
-    with c[1]:
-        line_chart(
-            "How games end",
-            runs,
-            "selfplay",
-            ["frac_checkmate", "frac_resign", "frac_max_plies"],
-            xkey,
-            5,
-            yfmt=".0%",
-        )
-    with c[2]:
-        line_chart(
-            "Near-uniform search WDL targets",
-            runs,
-            "train",
-            ["buffer/frac_near_uniform"],
-            xkey,
-            k,
-            yfmt=".0%",
-        )
-
-    st.subheader("Throughput")
-    c = st.columns(3)
-    with c[0]:
-        line_chart("Self-play positions / s", runs, "selfplay", ["positions_per_sec"], xkey, 3)
-    with c[1]:
-        line_chart("Self-play games / s", runs, "selfplay", ["games_per_sec"], xkey, 3)
-    with c[2]:
-        line_chart("Samples per record (target_k)", runs, "train", ["pacing/k_actual"], xkey, k)
-    c = st.columns(3)
-    with c[0]:
-        line_chart("Trainer step time (s)", runs, "train", ["pacing/step_time_s"], xkey, k)
-    with c[1]:
-        line_chart("Sampling window (records)", runs, "train", ["buffer/window"], xkey, 1)
-    with c[2]:
-        line_chart("MCTS nodes / s", runs, "selfplay", ["nodes_per_sec"], xkey, 3)
-
-    with st.expander("Configs"):
-        for name, data in runs.items():
-            st.markdown(f"**{name}**")
-            st.json(data["config"], expanded=False)
-
-
-body()
+if __name__ == "__main__":
+    main()

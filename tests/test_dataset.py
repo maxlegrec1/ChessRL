@@ -1,25 +1,28 @@
-"""v2 replay buffer: record layout, vectorized plane decode, colour flip, window sampling.
+"""v3 replay buffer: canonical record layout, vectorized plane decode, window sampling.
 
 Records are synthesized in Python from random python-chess games with the same
-byte layout cpp/selfplay.cpp writes; decoded planes must match the reference
-per-record encoder (fen_encoder.encode_record_planes) exactly.
+byte layout cpp/selfplay.cpp writes, canonical as it writes them: a position with
+black to move is stored as white sees it (python-chess Board.mirror()). Decoded
+planes must match the reference per-record encoder (fen_encoder.encode_record_planes)
+and fen_to_tensor of the game's own position exactly.
 """
 
 import random
 
+import bulletchess
 import chess
 import numpy as np
 import pytest
 import torch
 
-from src.models.small.fen_encoder import encode_record_planes
-from src.models.small.vocab import policy_to_idx
+from src.models.small.fen_encoder import encode_record_planes, fen_to_tensor
+from src.models.small.vocab import canonical_key, policy_to_idx
 from src.train.dataset import (
+    FLAG_BLACK_TO_MOVE,
     FLAG_FULL_SEARCH,
-    IGNORE_INDEX,
-    MIRROR_INDEX,
     RECORD_DTYPE,
     RECORD_SIZE,
+    RECORD_VERSION,
     ReplayBuffer,
     decode_planes,
     dense_policy_target,
@@ -38,38 +41,42 @@ def bitboards(board: chess.Board) -> np.ndarray:
     return out
 
 
-def vocab_key(move: chess.Move) -> str:
-    uci = move.uci()
-    return uci[:-1] if uci.endswith("n") else uci
-
-
-def synth_records(n_games: int = 12, seed: int = 0) -> np.ndarray:
+def synth_records(n_games: int = 12, seed: int = 0, games: list | None = None) -> np.ndarray:
+    """Canonical records of random games. `games`, when given, receives per record the game's own position
+    (FEN, the 7 previous positions' FENs newest first, their repetition flags, the current one's)."""
     rng = random.Random(seed)
     rows = []
     for _ in range(n_games):
         board = chess.Board()
-        past: list[np.ndarray] = []
+        past: list[chess.Board] = []
         for ply in range(rng.randint(20, 90)):
             legal = list(board.legal_moves)
             if not legal or board.is_game_over():
                 break
+            white = board.turn == chess.WHITE
+            view = board if white else board.mirror()  # the record's view: white to move
+
+            def key(m, white=white):
+                return canonical_key(m.uci(), white)
+
             rec = np.zeros((), dtype=RECORD_DTYPE)
-            fen = board.fen()
+            fen = view.fen()
             rec["fen"] = fen.encode()
             move = rng.choice(legal)
-            rec["played"] = move.uci().encode()
+            rec["played"] = key(move).encode()
             rec["value_outcome"] = [0, 1, 0]
             rec["value_mcts"] = [0.2, 0.5, 0.3]
             rec["plies_remaining"] = 10
             rec["backed_plies"] = 12
-            for k, bb in enumerate(past[:7]):
-                rec["past_bb"][k] = bb
-                rec["past_rep"][k] = rng.random() < 0.1
+            past_reps = [rng.random() < 0.1 for _ in past[:7]]
+            for k, b in enumerate(past[:7]):
+                rec["past_bb"][k] = bitboards(b if white else b.mirror())
+                rec["past_rep"][k] = past_reps[k]
             rec["cur_rep"] = rng.random() < 0.1
-            rec["cur_bb"] = bitboards(board)
-            rec["version"] = 2
-            rec["flags"] = FLAG_FULL_SEARCH
-            cr = board.castling_rights
+            rec["cur_bb"] = bitboards(view)
+            rec["version"] = RECORD_VERSION
+            rec["flags"] = FLAG_FULL_SEARCH | (0 if white else FLAG_BLACK_TO_MOVE)
+            cr = view.castling_rights
             rec["castling"] = (
                 bool(cr & chess.BB_H1) * 1
                 | bool(cr & chess.BB_A1) * 2
@@ -88,62 +95,72 @@ def synth_records(n_games: int = 12, seed: int = 0) -> np.ndarray:
             probs /= probs.sum()
             rec["n_policy"] = len(entries)
             for k, (m, p) in enumerate(zip(entries, probs, strict=True)):
-                rec["policy"][k] = (policy_to_idx[vocab_key(m)], int(round(p * 65535)))
-            rec["played_idx"] = policy_to_idx[vocab_key(move)]
+                rec["policy"][k] = (policy_to_idx[key(m)], int(round(p * 65535)))
+            rec["played_idx"] = policy_to_idx[key(move)]
             rows.append(rec)
-            past.insert(0, bitboards(board))
+            if games is not None:
+                games.append((board.fen(), [b.fen() for b in past[:7]], past_reps, bool(rec["cur_rep"])))
+            past.insert(0, board.copy(stack=False))
             board.push(move)
     return np.array(rows, dtype=RECORD_DTYPE)
-
-
-def reference_planes(rec: np.void, mirror: bool) -> np.ndarray:
-    fen = rec["fen"].decode()
-    past = rec["past_bb"].copy()
-    if mirror:
-        fen = chess.Board(fen).mirror().fen()
-        flipped = (
-            past.view(np.uint8).reshape(7, 12, 8)[:, :, ::-1].copy().view(np.uint64).reshape(7, 12)
-        )
-        past = np.concatenate([flipped[:, 6:], flipped[:, :6]], axis=1)
-    return encode_record_planes(
-        fen,
-        past_bitboards=past,
-        past_repetitions=rec["past_rep"],
-        current_repetition=bool(rec["cur_rep"]),
-    )
 
 
 def test_record_dtype_is_1280_bytes():
     assert RECORD_DTYPE.itemsize == RECORD_SIZE == 1280
 
 
-@pytest.mark.parametrize("mirror_prob", [0.0, 1.0, 0.5])
-def test_decode_matches_reference_encoder(mirror_prob):
+def test_decode_matches_reference_encoder():
     rows = synth_records()
-    batch = records_to_batch(rows, mirror_prob=mirror_prob, rng=random.Random(1))
-    planes = decode_planes(batch).numpy()
+    planes = decode_planes(records_to_batch(rows)).numpy()
     for i, rec in enumerate(rows):
-        ref = reference_planes(rec, bool(batch.mirror[i]))
+        ref = encode_record_planes(
+            rec["fen"].decode(),
+            past_bitboards=rec["past_bb"],
+            past_repetitions=rec["past_rep"],
+            current_repetition=bool(rec["cur_rep"]),
+        )
         np.testing.assert_array_equal(planes[i], ref, err_msg=f"row {i} fen={rec['fen']}")
 
 
-def test_mirror_remaps_policy_targets():
-    rows = synth_records(n_games=4, seed=3)
-    plain = records_to_batch(rows, mirror_prob=0.0)
-    flipped = records_to_batch(rows, mirror_prob=1.0)
-    k = plain.policy_prob > 0
-    assert torch.equal(flipped.policy_idx[k], torch.from_numpy(MIRROR_INDEX)[plain.policy_idx[k]])
-    ok = plain.played_idx != IGNORE_INDEX
-    assert torch.equal(flipped.played_idx[ok], torch.from_numpy(MIRROR_INDEX)[plain.played_idx[ok]])
-    # Mirrored targets are legal in the mirrored position.
-    for i, rec in enumerate(rows):
-        board = chess.Board(rec["fen"].decode()).mirror()
-        legal = {policy_to_idx[vocab_key(m)] for m in board.legal_moves}
-        assert int(flipped.played_idx[i]) in legal
+def test_records_are_what_the_encoder_makes_of_the_game():
+    # Two independent canonical views: the record's (python-chess Board.mirror()) and fen_to_tensor's (planes
+    # mirrored), from the game's own position and history.
+    games: list = []
+    rows = synth_records(n_games=6, seed=2, games=games)
+    planes = decode_planes(records_to_batch(rows)).numpy()
+    assert any(rec["flags"] & FLAG_BLACK_TO_MOVE for rec in rows)
+    for i, (fen, past, past_reps, cur_rep) in enumerate(games):
+        ref = fen_to_tensor(fen, [bulletchess.Board.from_fen(f) for f in past], past_reps, cur_rep)
+        np.testing.assert_array_equal(planes[i], ref, err_msg=f"row {i} fen={fen}")
+
+
+def test_colour_plane_matches_the_encoder():
+    # model.stm_plane colour: plane 104 is the real side to move, from the records' FLAG_BLACK_TO_MOVE on one side
+    # and the game's own position on the other; every other plane is the canonical one.
+    games: list = []
+    rows = synth_records(n_games=6, seed=4, games=games)
+    batch = records_to_batch(rows)
+    planes = decode_planes(batch, stm_colour=True).numpy()
+    constant = decode_planes(batch).numpy()
+    for i, (fen, past, past_reps, cur_rep) in enumerate(games):
+        ref = fen_to_tensor(fen, [bulletchess.Board.from_fen(f) for f in past], past_reps, cur_rep, stm_colour=True)
+        np.testing.assert_array_equal(planes[i], ref, err_msg=f"row {i} fen={fen}")
+        white = " w " in fen
+        assert (planes[i][..., 104] == (1.0 if white else 0.0)).all()
+        np.testing.assert_array_equal(np.delete(planes[i], 104, -1), np.delete(constant[i], 104, -1))
+
+
+def test_targets_are_legal_in_the_record_position():
+    for rec in synth_records(n_games=4, seed=3):
+        board = chess.Board(rec["fen"].decode())
+        assert board.turn == chess.WHITE
+        legal = {policy_to_idx[canonical_key(m.uci(), True)] for m in board.legal_moves}
+        assert int(rec["played_idx"]) in legal
+        assert {int(e[0]) for e in rec["policy"][: int(rec["n_policy"])]} <= legal
 
 
 def test_dense_policy_target_sums_to_one():
-    batch = records_to_batch(synth_records(n_games=3), mirror_prob=0.5)
+    batch = records_to_batch(synth_records(n_games=3))
     target = dense_policy_target(batch)
     np.testing.assert_allclose(target.sum(dim=1).numpy(), 1.0, rtol=1e-5)
     # The synthesized played move is always one of the visited moves.

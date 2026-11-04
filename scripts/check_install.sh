@@ -57,22 +57,6 @@ if [ -x "$CUDA_ROOT/bin/nvcc" ]; then
   ok "nvcc $CUDA_VER  (CUDA_ROOT=$CUDA_ROOT)"
 fi
 
-# --- TensorRT ---------------------------------------------------------------
-TENSORRT_ROOT=${TENSORRT_ROOT:-/usr/local/TensorRT-10.14.1.48}
-if [ -f "$TENSORRT_ROOT/include/NvInfer.h" ]; then
-  ok "TensorRT at $TENSORRT_ROOT"
-elif [ -f /usr/include/NvInfer.h ] || [ -f /usr/include/x86_64-linux-gnu/NvInfer.h ]; then
-  note "TensorRT found via apt (system) — fine, but tarball install (10.14+) recommended"
-else
-  fail "no TensorRT headers (NvInfer.h) found" \
-       "install TensorRT 10.14+ from https://developer.nvidia.com/tensorrt, then export TENSORRT_ROOT=/path/to/TensorRT-X.Y.Z"
-fi
-
-# --- trtexec on PATH (tarball ships one in $TENSORRT_ROOT/bin) --------------
-if ! command -v trtexec >/dev/null 2>&1 && [ ! -x "$TENSORRT_ROOT/bin/trtexec" ]; then
-  note "trtexec not on PATH; engine builds will need 'export PATH=\$TENSORRT_ROOT/bin:\$PATH'"
-fi
-
 # --- Stockfish (the rating ladder's reference opponents; training runs without it) ---
 SF=$(command -v stockfish || { [ -x /usr/games/stockfish ] && echo /usr/games/stockfish; } || true)
 if [ -n "$SF" ]; then

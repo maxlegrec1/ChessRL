@@ -13,6 +13,10 @@ struct SelfPlayConfig
     std::string output_path;
     int concurrency = 256;
     int threads = 0;       // 0 = auto (256 MCTS worker threads)
+    // Persistent search threads each play their own boards in turn, with no step barrier;
+    // step() returns after one move per board's worth of moves. false: each step searches every
+    // board once, all at once.
+    bool async_play = false;
     int hash_size = 4096;  // MB; transposition-table size shared across slots
     int simulations = 800;
     float cpuct = 0.65f;
@@ -28,7 +32,9 @@ struct SelfPlayConfig
     size_t max_buffer_size = 1000000; // Max number of positions in buffer
     bool save_pgn = false;
     std::string pgn_dir = "pgns";
-    int random_opening_plies = 0; // 0 = always start from the standard startpos
+    // Uniformly random plies before the first search; 0 = always the standard start position. A
+    // fraction adds one more ply to that share of games (2.25: 3 plies in a quarter of them).
+    float random_opening_plies = 0.0f;
 
     // ---- Game and record options. The defaults here switch them off; src/train/config.yaml
     // sets the values the training recipe uses (self-play copies every field). ----
@@ -36,6 +42,10 @@ struct SelfPlayConfig
     // of a game; afterwards `temperature_late` (0 = argmax). -1 = whole game.
     int temperature_plies = -1;
     float temperature_late = 0.0f;
+    // Root temperature of the fast (playout-cap) searches during those plies; below 0 they use
+    // temperature_at_root like the full ones. 0.7 samples their flat 50-simulation visit counts
+    // more sharply while the full searches keep temperature_at_root.
+    float fast_temperature_at_root = -1.0f;
     // Resign when the side to move's root expected score (W + D/2) stays below
     // `resign_threshold` for `resign_consecutive` of its own moves. 0 disables.
     // A `resign_playthrough` fraction of games never resigns; they measure the
@@ -49,6 +59,9 @@ struct SelfPlayConfig
     // root noise whose position is not written to the buffer. 1.0 = off.
     float pcr_full_prob = 1.0f;
     int pcr_fast_simulations = 100;
+    // Keep the played move's subtree for the game's next search, which then runs only the
+    // simulations its root is missing (MctsOptions::reuse_tree).
+    bool tree_reuse = false;
     // > 0: while the played move is sampled (the first `temperature_plies`), a cheap
     // move skips its search and samples the raw policy at this temperature (one
     // network evaluation). Sampling the visit counts of a 50-sim search played far
@@ -86,6 +99,8 @@ struct SelfPlayStats
     int64_t policy_moves = 0;  // cheap moves sampled from the raw policy (no search)
     int64_t records_written = 0;
     int64_t engine_swaps = 0;
+    int64_t simulations_run = 0;  // simulations searches actually ran
+    int64_t reused_visits = 0;    // visits inherited from reused trees (tree_reuse)
 };
 
 struct SelfPlayMetrics
@@ -124,7 +139,7 @@ public:
     // Get approximate number of positions in buffer
     size_t get_buffer_size() const;
 
-    // Swap the TensorRT engine between steps. Games in progress keep going
+    // Swap the network (.cnet) between steps. Games in progress keep going
     // (rebuilding the worker would discard them and their pending records).
     void set_engine(const std::string& engine_path);
 
