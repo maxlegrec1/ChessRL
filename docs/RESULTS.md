@@ -41,13 +41,19 @@ Written up in [the second post](https://mvdbk.fr/blog/alphazero-from-scratch-rtx
 
 **Speed.** A fused CUDA kernel runs the whole network in one launch per batch and replaced TensorRT.
 With tree reuse, asynchronous play and other changes, self-play records **8.6 times** as many
-positions per second as the round-2 recipe on the same box. The trainer step went from 26.8 ms to
+positions per second as the round-2 recipe on the same box. The network then went to 8-bit
+integers (`model.int8`: the kernel's projections in INT8, 2.9M positions/s against 2.24M in FP16,
+and training with the same rounding), and the search lost its per-search allocations and system
+calls, with one thread watching the GPU's batches: **11 times** the round-2 recipe self-playing
+alone (about 5,650 recorded positions/s), 4,800 against 3,980 in the 8-hour runs, for the same
+rating at 8 hours. The trainer step went from 26.8 ms to
 11.2 ms (Triton fused kernels and an FP16 residual stream). Positions are now
 canonical end to end: the network always plays white, with one 1,858-move vocabulary.
 
 **Muon against AdamW.** In this setting Elo followed how much the policy moved between checkpoints.
 Muon needed two to four times its usual learning rate to move the policy as much as AdamW, and then
-only matched it. Set aside, still available as `optimizer: muon`.
+only matched it. Set aside, still available as `optimizer: muon`. With INT8 it did worse: about 50
+Elo below AdamW per trainer step at 250,000 steps (2,000 games head to head), more than in FP16.
 
 **Resuming into an empty buffer costs about an hour.** A run restarted from its last checkpoint with
 a new buffer trained on a window of only 170k to 800k records. The value head memorised those games,
