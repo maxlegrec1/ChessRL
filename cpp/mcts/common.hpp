@@ -116,8 +116,6 @@ struct TreeNode
 {
     int parent{-1};
     chess::Move move_from_parent{chess::Move::NO_MOVE}; // The move that led to this node
-    bool terminal{false};
-    bool expanded{false};
     float prior{0.0F};
     float value_sum{0.0F};
     float virtual_loss{0.0F};
@@ -148,8 +146,14 @@ struct TreeNode
     // expanded); each holds its own move (move_from_parent) and prior. No per-node allocation, so
     // copying a subtree for reuse and freeing a tree move only the node array.
     int first_child{-1};
-    int num_children{0};
+    // At most 218 legal moves: 16 bits, packed with the two flags, keep the node at 72 bytes (a multiple of 8).
+    // At 76 bytes every other node was only 4-byte aligned, and the wide stores and copies of nodes split across
+    // cache lines: expansion's add_child took 37% longer (perf5 profile).
+    std::uint16_t num_children{0};
+    bool terminal{false};
+    bool expanded{false};
 };
+static_assert(sizeof(TreeNode) == 72, "TreeNode: keep it 72 bytes (expansion and tree reuse write and copy them)");
 
 // The moves-left term's scale: plies are squashed by tanh(plies / 25).
 constexpr float kMlhPliesScale = 1.0F / 25.0F;
