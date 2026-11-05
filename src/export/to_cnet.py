@@ -121,11 +121,12 @@ def entries_for(
         raise ValueError(f"an int8 network keeps only {FP16_IN_INT8} in FP16, not {fp16}")
     cfg = model.cfg
     d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
-    if any(cfg[k] != v for k, v in KERNEL_DIMS.items()) or not 1 <= layers <= MAX_LAYERS:
-        raise ValueError(
-            f"the fused kernel runs d_model 128, 8 heads, d_ff 256 and 1 to {MAX_LAYERS} layers; "
-            f"this network has {cfg}"
-        )
+    if any(cfg[k] != v for k, v in KERNEL_DIMS.items()):
+        if int8:
+            raise ValueError(f"INT8 networks run the fused kernel's sizes {KERNEL_DIMS} only; this one has {cfg}")
+        return entries_for_wide(model, search_heads, q_weight)
+    if not 1 <= layers <= MAX_LAYERS:
+        raise ValueError(f"the fused kernel runs 1 to {MAX_LAYERS} layers; this network has {cfg}")
     hd = d // heads
     sd = {k: v.detach().float().cpu().numpy() for k, v in model.state_dict().items()}
     wdl_mlps, mlhq_from_q = HEADS[search_heads]
@@ -188,6 +189,73 @@ def entries_for(
         out.append(("stm_colour", np.array([1], np.int32)))
     if int8:
         out.append(("int8", np.array([1], np.int32)))
+    return out
+
+
+# The sizes cpp/net/encoder_wide.cu runs: d_model and d_ff in multiples of 64, heads of 16 to 64 columns.
+WIDE_HEAD_DIMS = (16, 32, 64)
+
+
+def entries_for_wide(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[str, np.ndarray]]:
+    """The .cnet entries of a network the fused kernel cannot hold, for cpp/net/encoder_wide.cu: the same names and
+    folded scales as entries_for (attention softmax in exp2, the policy scale in pol_q and the promotion vectors), but
+    the matrices row-major [out][in] in FP16 for cuBLAS instead of mma fragments, the pair bias [heads][64][64], the
+    value MLPs' first layers [mlp][out][in]; the "wide" entry selects that path."""
+    cfg = model.cfg
+    d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
+    hd = d // heads
+    if d % 64 or d_ff % 64 or hd * heads != d or hd not in WIDE_HEAD_DIMS or not 1 <= layers <= MAX_LAYERS:
+        raise ValueError(
+            f"the wide path runs d_model and d_ff in multiples of 64, head sizes {WIDE_HEAD_DIMS} and 1 to "
+            f"{MAX_LAYERS} layers; this network has {cfg}"
+        )
+    sd = {k: v.detach().float().cpu().numpy() for k, v in model.state_dict().items()}
+    wdl_mlps, mlhq_from_q = HEADS[search_heads]
+    wdl_w = [1.0 - q_weight, q_weight] if search_heads == "blend" else [1.0]
+    mlps = [*wdl_mlps, "mlh"] + (["mlh_q"] if mlhq_from_q else [])
+    planes = sd["embed.weight"].shape[1]
+    embed = np.zeros((d, 128), np.float32)  # input planes padded to 128, as the fused kernel's
+    embed[:, :planes] = sd["embed.weight"]
+    pol_scale = 1.0 / math.sqrt(d)
+
+    def f16(w: np.ndarray) -> np.ndarray:
+        return np.ascontiguousarray(w, dtype=np.float16)
+
+    out: list[tuple[str, np.ndarray]] = [
+        ("config", np.array([d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32)),
+        ("wide", np.array([1], np.int32)),
+        ("embed.w", f16(embed)),
+        ("embed.b", sd["embed.bias"]),
+        ("pos", sd["pos"]),
+        ("pair_bias", f16(sd["pair_bias"] * LOG2E)),
+    ]
+    for i in range(layers):
+        b = f"blocks.{i}."
+        out += [
+            (f"l{i}.norm1", sd[b + "norm1.weight"]),
+            (f"l{i}.qkv", f16(sd[b + "qkv.weight"])),
+            (f"l{i}.qnorm", sd[b + "q_norm.weight"] * (LOG2E / math.sqrt(hd))),
+            (f"l{i}.knorm", sd[b + "k_norm.weight"]),
+            (f"l{i}.out", f16(sd[b + "out.weight"])),
+            (f"l{i}.norm2", sd[b + "norm2.weight"]),
+            (f"l{i}.up", f16(sd[b + "up.weight"])),
+            (f"l{i}.down", f16(sd[b + "down.weight"])),
+            (f"l{i}.gain", sd[b + "x0_gain"].reshape(1)),
+        ]
+    out += [
+        ("norm", sd["norm.weight"]),
+        ("pol.w", f16(np.concatenate([sd["pol_q.weight"] * pol_scale, sd["pol_k.weight"]]))),
+        ("pol.b", np.concatenate([sd["pol_q.bias"] * pol_scale, sd["pol_k.bias"]])),
+        ("promo", f16(sd["promo"] * pol_scale)),
+        ("vocab", vocab_codes()),
+        ("wdl_w", np.array(wdl_w, np.float32)),
+        ("mlp1.w", f16(np.stack([sd[f"{m}.0.weight"] for m in mlps]))),
+        ("mlp1.b", np.concatenate([sd[f"{m}.0.bias"] for m in mlps])),
+        ("mlp2.w", np.concatenate([sd[f"{m}.2.weight"] for m in mlps])),
+        ("mlp2.b", np.concatenate([sd[f"{m}.2.bias"] for m in mlps])),
+    ]
+    if cfg.get("stm_plane", "constant") == "colour":
+        out.append(("stm_colour", np.array([1], np.int32)))
     return out
 
 

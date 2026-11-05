@@ -11,10 +11,15 @@ CUDA_VISIBLE_DEVICES=0 uv run python ...
 The C++ build compiles for `CHESSRL_CUDA_ARCH` (default `sm_90`, H100/H200). Set it for the
 card in use: `sm_89` RTX 4090, `sm_86` RTX 3090, `sm_80` A100 (see the README).
 
-The home box (maxime-mega) has an RTX 4090 but no CUDA toolkit (`nvcc`), so the extension
-does not build there. Training runs on rented Vast.ai boxes (`scripts/vast/`); their run
-directories sync to `~/chessrl-runs/`, which the home dashboard and analysis board read. Ask
-before starting anything that costs money.
+The home box (maxime-mega) has an RTX 4090 and, since 2026-11-05, Ubuntu's CUDA 12.4 toolkit (`/usr`) with GCC 13
+for nvcc (the system GCC 15 is too new for it). Build there with
+`CUDA_ROOT=/usr CHESSRL_CUDA_ARCH=sm_89 NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++-13" uv sync --reinstall-package
+chessrl-inference-cpp`; the extension then loads PyTorch's CUDA 12.8 runtime and cuBLAS (its run path,
+`cpp/setup.py`). Rented Vast.ai boxes (`scripts/vast/`) also run training; their run directories sync to
+`~/chessrl-runs/`, which the home dashboard and analysis board read. Ask before starting anything that costs money.
+
+Networks wider than the fused kernel holds (d_model 128 / 8 heads / d_ff 256) run on the wide path
+(`cpp/net/encoder_wide.cu`, cuBLAS; to_cnet writes them row-major with a `wide` entry), FP16 only.
 
 ## Runs
 

@@ -82,8 +82,25 @@ EncoderNet::EncoderNet(std::string path)
     std::int32_t cfg[7];
     std::memcpy(cfg, data.data() + get("config", kI32, 7).offset, sizeof(cfg));
     const int d = cfg[0], layers = cfg[1], heads = cfg[2], d_ff = cfg[3], planes = cfg[4];
-    if (d != 128 || heads != 8 || d_ff != 256 || planes != kPackPlanes || layers < 1 || layers > kMaxLayers
-        || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0 || cfg[6] > 1)
+    // Networks the fused kernel cannot hold (to_cnet entries_for_wide) carry a "wide" entry: row-major FP16 matrices
+    // for encoder_wide.cu.
+    wide_ = entries.count("wide") != 0;
+    if (wide_)
+    {
+        const int hd = heads > 0 ? d / heads : 0;
+        if (d % 64 != 0 || d > kWideMaxD || d_ff % 64 != 0 || hd * heads != d || (hd != 16 && hd != 32 && hd != 64)
+            || planes != kPackPlanes || layers < 1 || layers > kMaxLayers || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0
+            || cfg[6] > 1)
+        {
+            throw std::runtime_error("EncoderNet: " + path_ + ": the wide path runs d_model and d_ff in multiples of "
+                                     "64 (d_model up to 1024), heads of 16, 32 or 64 columns and up to 16 layers; "
+                                     "it has d_model " + std::to_string(d) + ", " + std::to_string(heads)
+                                     + " heads, d_ff " + std::to_string(d_ff) + ", " + std::to_string(layers)
+                                     + " layers");
+        }
+    }
+    else if (d != 128 || heads != 8 || d_ff != 256 || planes != kPackPlanes || layers < 1 || layers > kMaxLayers
+             || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0 || cfg[6] > 1)
     {
         throw std::runtime_error("EncoderNet: the fused kernel runs d_model 128, 8 heads, d_ff 256 and up to 16 "
                                  "layers; " + path_ + " has d_model " + std::to_string(d) + ", "
@@ -127,6 +144,49 @@ EncoderNet::EncoderNet(std::string path)
         const auto f32 = [&](const std::string& name, std::uint64_t n) {
             return static_cast<const float*>(dev(name, kF32, n));
         };
+        if (wide_)
+        {
+            WideParams& W = wide_params_;
+            const std::uint64_t dd = static_cast<std::uint64_t>(d), ff = static_cast<std::uint64_t>(d_ff);
+            const std::uint64_t hd = dd / static_cast<std::uint64_t>(heads);
+            W.d = d;
+            W.layers = layers;
+            W.heads = heads;
+            W.d_ff = d_ff;
+            W.n_wdl = params_.n_wdl;
+            W.wdl_weight[0] = params_.wdl_weight[0];
+            W.wdl_weight[1] = params_.wdl_weight[1];
+            W.mlhq_from_q = params_.mlhq_from_q;
+            W.stm_colour = params_.stm_colour;
+            W.embed_w = dev("embed.w", kF16, dd * 128);
+            W.embed_b = f32("embed.b", dd);
+            W.pos = f32("pos", 64 * dd);
+            W.pair_bias = dev("pair_bias", kF16, static_cast<std::uint64_t>(heads) * 64 * 64);
+            for (int l = 0; l < layers; ++l)
+            {
+                const std::string p = "l" + std::to_string(l) + ".";
+                WideLayer& L = W.layer[l];
+                L.norm1 = f32(p + "norm1", dd);
+                L.qkv = dev(p + "qkv", kF16, 3 * dd * dd);
+                L.qnorm = f32(p + "qnorm", hd);
+                L.knorm = f32(p + "knorm", hd);
+                L.out = dev(p + "out", kF16, dd * dd);
+                L.norm2 = f32(p + "norm2", dd);
+                L.up = dev(p + "up", kF16, 2 * ff * dd);
+                L.down = dev(p + "down", kF16, dd * ff);
+                L.gain = host_f32(p + "gain");
+            }
+            W.norm = f32("norm", dd);
+            W.pol_w = dev("pol.w", kF16, 2 * dd * dd);
+            W.pol_b = f32("pol.b", 2 * dd);
+            W.promo = dev("promo", kF16, 4 * dd);
+            W.vocab = static_cast<const std::uint16_t*>(dev("vocab", kU16, kPolicySize));
+            W.mlp1_w = dev("mlp1.w", kF16, n_mlp * dd * dd);
+            W.mlp1_b = f32("mlp1.b", n_mlp * dd);
+            W.mlp2_w = f32("mlp2.w", n_out * dd);
+            W.mlp2_b = f32("mlp2.b", n_out);
+            return;
+        }
         // A projection [n_out][k]: its fragments, and its scales for an int8 network. In an int8 network the
         // embedding, out and down may stay FP16 (no <name>.s; to_cnet --fp16).
         const auto mat = [&](const std::string& name, std::uint64_t n_out, std::uint64_t k, const float** scale,
@@ -176,6 +236,7 @@ EncoderNet::EncoderNet(std::string path)
 
 EncoderNet::~EncoderNet()
 {
+    for (auto& entry : handles_) wide_destroy_handle(entry.second);
     if (blob_) cudaFree(blob_);
     for (auto& entry : scratch_)
         if (entry.second.first) cudaFree(entry.second.first);
@@ -185,6 +246,34 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
                                 void* d_out, cudaStream_t stream) const
 {
     if (batch <= 0) return cudaSuccess;
+    if (wide_)
+    {
+        void* handle = nullptr;
+        void* scratch = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(scratch_mu_);
+            void*& h = handles_[stream];
+            if (!h)
+            {
+                const cudaError_t err = wide_create_handle(&h, stream);
+                if (err != cudaSuccess) return err;
+            }
+            handle = h;
+            auto& [ptr, bytes] = scratch_[stream];
+            const std::size_t need = wide_scratch_bytes(wide_params_, batch);
+            if (bytes < need)
+            {
+                if (ptr) cudaFree(ptr);  // waits for the device: the stream's earlier launches are done with it
+                ptr = nullptr;
+                bytes = 0;
+                const cudaError_t err = cudaMalloc(&ptr, need);
+                if (err != cudaSuccess) return err;
+                bytes = need;
+            }
+            scratch = ptr;
+        }
+        return launch_wide_forward(wide_params_, handle, scratch, d_packed, d_dense, batch, d_out, stream);
+    }
     EncoderParams p = params_;
     {
         std::lock_guard<std::mutex> lock(scratch_mu_);

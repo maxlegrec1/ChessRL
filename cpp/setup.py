@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext as _pybind_build_ext
@@ -23,6 +24,15 @@ if not CUDA_ARCH.startswith("sm_") or not CUDA_ARCH[3:].isdigit():
     )
 _CUDA_COMPUTE = "compute_" + CUDA_ARCH[3:]
 
+# The run-time search path for the CUDA runtime and cuBLAS of PyTorch's wheels (see extra_link_args): next to the
+# extension in site-packages (a wheel install), or the project's .venv from cpp/ (the editable install uv makes).
+_PY = f"python{sys.version_info.major}.{sys.version_info.minor}"
+_TORCH_CUDA_RPATH = ":".join(
+    f"$ORIGIN/{base}nvidia/{lib}/lib"
+    for base in ("", f"../.venv/lib/{_PY}/site-packages/")
+    for lib in ("cuda_runtime", "cublas")
+)
+
 ext_modules = [
     Pybind11Extension(
         "_inference_cpp",
@@ -45,7 +55,11 @@ ext_modules = [
         library_dirs=[
             str(CUDA_ROOT / "lib64"),
         ],
-        libraries=["cudart"],
+        libraries=["cudart", "cublas"],  # cuBLAS: the wide networks' projections (net/encoder_wide.cu)
+        # At run time, the CUDA runtime and cuBLAS PyTorch's wheels install next to the extension in site-packages,
+        # so that both use the same libraries whichever is imported first (a system toolkit older than PyTorch's, as
+        # CUDA 12.4 under PyTorch's 12.8, otherwise loads first under the same soname and breaks PyTorch's import).
+        extra_link_args=[f"-Wl,-rpath,{_TORCH_CUDA_RPATH}"],
         extra_compile_args=[
             "-O3",
             "-march=native",
@@ -56,15 +70,15 @@ ext_modules = [
     )
 ]
 
-CU_SOURCES = ["net/encoder_kernel.cu"]
+CU_SOURCES = ["net/encoder_kernel.cu", "net/encoder_wide.cu"]
 
 
 class build_ext(_pybind_build_ext):
     """pybind11 build_ext + an nvcc pre-pass for the fused network kernel.
 
-    The project is otherwise pure g++; nvcc only ever sees net/encoder_kernel.cu and
-    the plain headers it includes (deliberately free of chess-library). The compiled
-    object is linked into the extension via extra_objects.
+    The project is otherwise pure g++; nvcc only ever sees the CU_SOURCES (the fused kernel and the wide
+    networks' path) and the plain headers they include (deliberately free of chess-library). The compiled
+    objects are linked into the extension via extra_objects.
     """
 
     def build_extensions(self):

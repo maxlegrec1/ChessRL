@@ -1,7 +1,8 @@
 #pragma once
 
-// The fused network: a .cnet file (src/export/to_cnet.py) loaded onto the GPU, run by
-// encoder_kernel.cu on a caller's stream.
+// The network: a .cnet file (src/export/to_cnet.py) loaded onto the GPU, run on a caller's stream by the fused
+// kernel (encoder_kernel.cu), or for networks wider than it holds by the wide path (encoder_wide.cu: cuBLAS
+// multiplies and small kernels, a "wide" entry in the file).
 
 #include <cuda_runtime_api.h>
 
@@ -13,6 +14,7 @@
 
 #include "mcts/packed_position.hpp"
 #include "net/encoder_params.hpp"
+#include "net/encoder_wide.hpp"
 
 namespace chessrl::net
 {
@@ -35,7 +37,8 @@ public:
     std::vector<unsigned char> run_packed(const mcts::single::SmallPackedPosition* positions, int batch) const;
 
     const std::string& path() const { return path_; }
-    int layers() const { return params_.layers; }
+    int layers() const { return wide_ ? wide_params_.layers : params_.layers; }
+    bool wide() const { return wide_; }
 
 private:
     std::vector<unsigned char> run_host(const void* input, size_t bytes, bool packed, int batch) const;
@@ -43,10 +46,14 @@ private:
     std::string path_;
     void* blob_{nullptr};
     EncoderParams params_{};
+    bool wide_{false};
+    WideParams wide_params_{};
     // The kernel's x0 scratch, one buffer per stream (concurrent launches on different streams), grown as batches
     // grow.
     mutable std::mutex scratch_mu_;
     mutable std::unordered_map<cudaStream_t, std::pair<void*, std::size_t>> scratch_;
+    // The wide path's cuBLAS handles, one per stream (each bound to its stream).
+    mutable std::unordered_map<cudaStream_t, void*> handles_;
 };
 
 // True for paths the fused network loads (the .cnet extension).
