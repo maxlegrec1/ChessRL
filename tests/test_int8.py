@@ -114,3 +114,38 @@ def test_reference_close_to_fp32():
     kl = (lp.exp() * (lp - lq)).sum(-1)
     assert kl.max() < 1e-2, kl
     assert (ref[1] - q[1]).abs().max() < 2e-2
+
+
+def test_fused512_file_weights_are_the_reference_weights(tmp_path):
+    """INT8 networks of d_model 512 export for cpp/net/encoder_fused512.cu: the reference's integers and scales (up
+    rows interleaved per 8 gate / up columns), the QK-norm weights folded into kfold, and the reference rounding the
+    attention output per head and the SwiGLU output per 128 columns."""
+    import math
+
+    from src.export.to_cnet import LOG2E, up_interleave
+
+    torch.manual_seed(0)
+    model = EncoderModel(d_model=512, layers=1, heads=8, d_ff=768, int8=True).eval()
+    path = tmp_path / "f512.cnet"
+    write_cnet(path, entries_for(model, "search", int8=True))
+    f = read_cnet(path)
+    assert int(f["fused512"][0]) == 1 and int(f["int8"][0]) == 1 and "wide" not in f
+    ref = int8_reference(model)
+    b = ref.blocks[0]
+    assert (b.out.groups, b.down.groups) == (8, 6)
+    assert np.array_equal(unpack_b8(f["l0.qkv"], 1536, 512).astype(np.float32), b.qkv.qw.numpy())
+    assert np.array_equal(unpack_b8(f["l0.out"], 512, 512).astype(np.float32), b.out.qw.numpy())
+    assert np.array_equal(unpack_b8(f["l0.down"], 512, 768).astype(np.float32), b.down.qw.numpy())
+    perm = up_interleave(768)
+    assert np.array_equal(unpack_b8(f["l0.up"], 1536, 512).astype(np.float32), b.up.qw.numpy()[perm])
+    assert np.array_equal(f["l0.up.s"], b.up.sw.numpy()[perm])
+    blk = model.blocks[0]
+    kfold = (blk.q_norm.weight * blk.k_norm.weight).detach().numpy() * (LOG2E / math.sqrt(64))
+    np.testing.assert_allclose(f["l0.kfold"], kfold, rtol=1e-6)
+
+
+def test_int8_groups_of_the_small_kernel_unchanged():
+    from src.models.quant import int8_groups
+
+    assert int8_groups(128, 8, 256) == (1, 2)
+    assert int8_groups(512, 8, 768) == (8, 6)

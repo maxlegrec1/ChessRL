@@ -1,8 +1,9 @@
 #pragma once
 
 // The network: a .cnet file (src/export/to_cnet.py) loaded onto the GPU, run on a caller's stream by the fused
-// kernel (encoder_kernel.cu), or for networks wider than it holds by the wide path (encoder_wide.cu: cuBLAS
-// multiplies and small kernels, a "wide" entry in the file).
+// kernel (encoder_kernel.cu, d_model 128), the d_model-512 INT8 kernel (encoder_fused512.cu, a "fused512" entry in the
+// file), or for other networks wider than the fused kernel holds by the wide path (encoder_wide.cu: cuBLAS
+// multiplies and small kernels, a "wide" entry).
 
 #include <cuda_runtime_api.h>
 
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "mcts/packed_position.hpp"
+#include "net/encoder_fused512.hpp"
 #include "net/encoder_params.hpp"
 #include "net/encoder_wide.hpp"
 
@@ -37,8 +39,9 @@ public:
     std::vector<unsigned char> run_packed(const mcts::single::SmallPackedPosition* positions, int batch) const;
 
     const std::string& path() const { return path_; }
-    int layers() const { return wide_ ? wide_params_.layers : params_.layers; }
+    int layers() const { return fused512_ ? f512_.layers : wide_ ? wide_params_.layers : params_.layers; }
     bool wide() const { return wide_; }
+    bool fused512() const { return fused512_; }
 
 private:
     std::vector<unsigned char> run_host(const void* input, size_t bytes, bool packed, int batch) const;
@@ -48,6 +51,8 @@ private:
     EncoderParams params_{};
     bool wide_{false};
     WideParams wide_params_{};
+    bool fused512_{false};
+    F512Params f512_{};
     // The kernel's x0 scratch, one buffer per stream (concurrent launches on different streams), grown as batches
     // grow.
     mutable std::mutex scratch_mu_;

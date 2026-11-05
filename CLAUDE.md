@@ -19,7 +19,9 @@ chessrl-inference-cpp`; the extension then loads PyTorch's CUDA 12.8 runtime and
 `~/chessrl-runs/`, which the home dashboard and analysis board read. Ask before starting anything that costs money.
 
 Networks wider than the fused kernel holds (d_model 128 / 8 heads / d_ff 256) run on the wide path
-(`cpp/net/encoder_wide.cu`, cuBLAS; to_cnet writes them row-major with a `wide` entry), FP16 only.
+(`cpp/net/encoder_wide.cu`, cuBLAS; to_cnet writes them row-major with a `wide` entry), FP16 only. INT8 networks of
+d_model 512 / 8 heads / d_ff 768 run their own fused kernel (`cpp/net/encoder_fused512.cu`, a `fused512` entry,
+~2.3x the wide path); their INT8 rounds the attention output per head (`src/models/quant.py` int8_groups).
 
 ## Runs
 

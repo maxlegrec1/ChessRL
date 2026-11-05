@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.quant import fq_tokens, fq_weight
+from src.models.quant import fq_tokens, fq_weight, int8_groups
 from src.models.small.fen_encoder import INPUT_PLANES
 from src.models.small.vocab import policy_index
 
@@ -94,6 +94,8 @@ class Block(nn.Module):
         self.up = nn.Linear(d, 2 * d_ff, bias=False)
         self.down = nn.Linear(d_ff, d, bias=False)
         self.d_ff = d_ff
+        # INT8 networks: the attention and SwiGLU outputs' rounding groups (src/models/quant.py int8_groups).
+        self.o_groups, self.g_groups = int8_groups(d, heads, d_ff)
         self.x0_gain = nn.Parameter(torch.zeros(()))
 
     def _w(self, lin: nn.Linear) -> torch.Tensor:
@@ -157,7 +159,7 @@ class Block(nn.Module):
                 )
             h = h.transpose(1, 2).reshape(b, n, d)
         if self.int8:  # the attention output's FP16 rows, per token over all heads
-            h = fq_tokens(h, fp16=True)
+            h = fq_tokens(h, fp16=True, groups=self.o_groups)
         return self._feed_forward((xp + self._proj(self.out, h)).to(x.dtype))
 
     def _feed_forward(self, x):
@@ -180,7 +182,7 @@ class Block(nn.Module):
         gate, up = self._proj(self.up, h).chunk(2, dim=-1)
         g = F.silu(gate) * up
         if self.int8:  # the SwiGLU output's FP16 rows, per token and hidden half
-            g = fq_tokens(g, fp16=True, groups=2)
+            g = fq_tokens(g, fp16=True, groups=self.g_groups)
         return x + self._proj(self.down, g)
 
 

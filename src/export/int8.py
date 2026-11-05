@@ -4,8 +4,9 @@ kernel's INT8 arithmetic.
 Weights: symmetric, one scale per output row (max |w| / 127). Activations: symmetric, one scale per token
 (max |a| / 127, q = round-to-nearest-even of a · 127 / max |a|): from the FP32 values for the projections that read
 a norm's output (qkv, up, the policy's q and k; the kernel quantizes inside the norm), from the FP16-rounded values
-for out and down (the kernel quantizes the attention output and the SwiGLU output rows in shared memory), and per
-128-column half for down (the kernel multiplies one hidden half at a time). The input planes are 0/1 except the
+for out and down (the kernel quantizes the attention output and the SwiGLU output rows in shared memory), per
+128-column group for down (the kernels multiply one 128-column chunk at a time) and, in the d_model-512 kernel, per
+head for out (src/models/quant.py int8_groups). The input planes are 0/1 except the
 halfmove plane (the clock / 100), so the embedding multiplies them as 100 · plane, exactly, at scale 1/100. Integer
 products sum exactly in 32 bits; the sum times both scales is the output. Attention scores, softmax, norms, the
 residual stream and the value heads keep the FP16/FP32 arithmetic of the FP16 kernel.
@@ -162,11 +163,11 @@ def int8_reference(model: nn.Module, which=PROJECTIONS, weights: bool = True, ac
         if "qkv" in which:
             b.qkv = Int8Linear(b.qkv, **kw)
         if "out" in which:
-            b.out = Int8Linear(b.out, fp16=True, **kw)
+            b.out = Int8Linear(b.out, groups=b.o_groups, fp16=True, **kw)
         if "up" in which:
             b.up = Int8Linear(b.up, **kw)
         if "down" in which:
-            b.down = Int8Linear(b.down, groups=2, fp16=True, **kw)
+            b.down = Int8Linear(b.down, groups=b.g_groups, fp16=True, **kw)
     if "pol" in which:
         m.pol_q = Int8Linear(m.pol_q, **kw)
         m.pol_k = Int8Linear(m.pol_k, **kw)

@@ -70,7 +70,7 @@ ext_modules = [
     )
 ]
 
-CU_SOURCES = ["net/encoder_kernel.cu", "net/encoder_wide.cu"]
+CU_SOURCES = ["net/encoder_kernel.cu", "net/encoder_wide.cu", "net/encoder_fused512.cu"]
 
 
 class build_ext(_pybind_build_ext):

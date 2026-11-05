@@ -10,7 +10,9 @@ one (1/sqrt(d_model), into pol_q and the promotion vectors).
 
 With --int8 the projections (embedding, qkv, out, up, down, policy q/k) are INT8 with one FP32 scale per output
 row (src/export/int8.py): <name> holds pack_b8 fragments as int32 words, <name>.s the scales, and an "int8" entry
-tells the kernel to run its INT8 path.
+tells the kernel to run its INT8 path. INT8 networks of d_model 512, 8 heads and d_ff 768 run their own fused kernel
+(cpp/net/encoder_fused512.cu, a "fused512" entry; entries_for_fused512); other sizes beyond the fused kernel's run the
+FP16 wide path (cpp/net/encoder_wide.cu, a "wide" entry).
 
 Layout: b"CHESSNET", u32 version, u32 entry count, then per entry a 32-byte name, u32
 dtype (0 f16, 1 f32, 2 u16, 3 i32), u32 zero, u64 offset, u64 bytes; each entry's data
@@ -122,8 +124,14 @@ def entries_for(
     cfg = model.cfg
     d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
     if any(cfg[k] != v for k, v in KERNEL_DIMS.items()):
+        if int8 and all(cfg[k] == v for k, v in FUSED512_DIMS.items()):
+            if fp16:
+                raise ValueError(f"the d_model-512 INT8 kernel keeps no projection in FP16 ({fp16} asked)")
+            return entries_for_fused512(model, search_heads, q_weight)
         if int8:
-            raise ValueError(f"INT8 networks run the fused kernel's sizes {KERNEL_DIMS} only; this one has {cfg}")
+            raise ValueError(
+                f"INT8 networks run the fused kernel's sizes {KERNEL_DIMS} or {FUSED512_DIMS} only; this one has {cfg}"
+            )
         return entries_for_wide(model, search_heads, q_weight)
     if not 1 <= layers <= MAX_LAYERS:
         raise ValueError(f"the fused kernel runs 1 to {MAX_LAYERS} layers; this network has {cfg}")
@@ -189,6 +197,82 @@ def entries_for(
         out.append(("stm_colour", np.array([1], np.int32)))
     if int8:
         out.append(("int8", np.array([1], np.int32)))
+    return out
+
+
+# The sizes of cpp/net/encoder_fused512.cu (INT8 only, any depth up to MAX_LAYERS).
+FUSED512_DIMS = {"d_model": 512, "heads": 8, "d_ff": 768}
+
+
+def up_interleave(d_ff: int) -> np.ndarray:
+    """The up projection's row order for encoder_fused512.cu: per 8 SwiGLU columns, their 8 gate rows then their 8 up
+    rows, so one warp's two n-tiles hold matching gate and up columns."""
+    return np.concatenate([np.r_[8 * j : 8 * j + 8, d_ff + 8 * j : d_ff + 8 * j + 8] for j in range(d_ff // 8)])
+
+
+def entries_for_fused512(model, search_heads: str, q_weight: float = 0.5) -> list[tuple[str, np.ndarray]]:
+    """The .cnet entries of an INT8 network for cpp/net/encoder_fused512.cu: INT8 projections as entries_for's (pack_b8
+    fragments, per-row scales <name>.s), the up rows interleaved (up_interleave), the QK-norm weights as one folded
+    vector per layer (kfold = qnorm · knorm · log2(e) / sqrt(head_dim): the kernel scales the scores by both rows'
+    1/RMS), the pair bias in score-fragment order times log2(e), the value MLPs' first layers FP16 [mlp][in][out]; the
+    "fused512" entry selects that kernel."""
+    cfg = model.cfg
+    d, layers, heads, d_ff = cfg["d_model"], cfg["layers"], cfg["heads"], cfg["d_ff"]
+    if not 1 <= layers <= MAX_LAYERS:
+        raise ValueError(f"the d_model-512 INT8 kernel runs 1 to {MAX_LAYERS} layers; this network has {cfg}")
+    hd = d // heads
+    sd = {k: v.detach().float().cpu().numpy() for k, v in model.state_dict().items()}
+    wdl_mlps, mlhq_from_q = HEADS[search_heads]
+    wdl_w = [1.0 - q_weight, q_weight] if search_heads == "blend" else [1.0]
+    mlps = [*wdl_mlps, "mlh"] + (["mlh_q"] if mlhq_from_q else [])
+    planes = sd["embed.weight"].shape[1]
+    embed = np.zeros((d, 128), np.float32)
+    embed[:, :planes] = sd["embed.weight"]
+    pol_scale = 1.0 / math.sqrt(d)
+    perm = up_interleave(d_ff)
+
+    def mat(name: str, w: np.ndarray, rows: np.ndarray | None = None) -> list[tuple[str, np.ndarray]]:
+        q, scale = quantize_rows(w)
+        if rows is not None:
+            q, scale = q[rows], scale[rows]
+        return [(name, pack_b8(np.ascontiguousarray(q))), (name + ".s", np.ascontiguousarray(scale))]
+
+    out: list[tuple[str, np.ndarray]] = [
+        ("config", np.array([d, layers, heads, d_ff, planes, len(wdl_mlps), int(mlhq_from_q)], np.int32)),
+        ("fused512", np.array([1], np.int32)),
+        ("int8", np.array([1], np.int32)),
+        *mat("embed.w", embed),
+        ("embed.b", sd["embed.bias"]),
+        ("pos", sd["pos"]),
+        ("pair_bias", pack_pair_bias(sd["pair_bias"] * LOG2E)),
+    ]
+    for i in range(layers):
+        b = f"blocks.{i}."
+        kfold = sd[b + "q_norm.weight"] * sd[b + "k_norm.weight"] * (LOG2E / math.sqrt(hd))
+        out += [
+            (f"l{i}.norm1", sd[b + "norm1.weight"]),
+            *mat(f"l{i}.qkv", sd[b + "qkv.weight"]),
+            (f"l{i}.kfold", kfold.astype(np.float32)),
+            *mat(f"l{i}.out", sd[b + "out.weight"]),
+            (f"l{i}.norm2", sd[b + "norm2.weight"]),
+            *mat(f"l{i}.up", sd[b + "up.weight"], rows=perm),
+            *mat(f"l{i}.down", sd[b + "down.weight"]),
+            (f"l{i}.gain", sd[b + "x0_gain"].reshape(1)),
+        ]
+    out += [
+        ("norm", sd["norm.weight"]),
+        *mat("pol.w", np.concatenate([sd["pol_q.weight"] * pol_scale, sd["pol_k.weight"]])),
+        ("pol.b", np.concatenate([sd["pol_q.bias"] * pol_scale, sd["pol_k.bias"]])),
+        ("promo", (sd["promo"] * pol_scale).astype(np.float16)),
+        ("vocab", vocab_codes()),
+        ("wdl_w", np.array(wdl_w, np.float32)),
+        ("mlp1.w", np.stack([sd[f"{m}.0.weight"].T for m in mlps]).astype(np.float16)),
+        ("mlp1.b", np.concatenate([sd[f"{m}.0.bias"] for m in mlps])),
+        ("mlp2.w", np.concatenate([sd[f"{m}.2.weight"] for m in mlps])),
+        ("mlp2.b", np.concatenate([sd[f"{m}.2.bias"] for m in mlps])),
+    ]
+    if cfg.get("stm_plane", "constant") == "colour":
+        out.append(("stm_colour", np.array([1], np.int32)))
     return out
 
 

@@ -84,10 +84,22 @@ EncoderNet::EncoderNet(std::string path)
     std::int32_t cfg[7];
     std::memcpy(cfg, data.data() + get("config", kI32, 7).offset, sizeof(cfg));
     const int d = cfg[0], layers = cfg[1], heads = cfg[2], d_ff = cfg[3], planes = cfg[4];
-    // Networks the fused kernel cannot hold (to_cnet entries_for_wide) carry a "wide" entry: row-major FP16 matrices
-    // for encoder_wide.cu.
-    wide_ = entries.count("wide") != 0;
-    if (wide_)
+    // INT8 networks of d_model 512 (to_cnet entries_for_fused512) carry a "fused512" entry; other networks the fused
+    // kernel cannot hold (entries_for_wide) a "wide" entry: row-major FP16 matrices for encoder_wide.cu.
+    fused512_ = entries.count("fused512") != 0;
+    wide_ = !fused512_ && entries.count("wide") != 0;
+    if (fused512_)
+    {
+        if (d != kF512D || heads != kF512Heads || d_ff != kF512Ff || planes != kPackPlanes || layers < 1
+            || layers > kMaxLayers || cfg[5] < 1 || cfg[5] > 2 || cfg[6] < 0 || cfg[6] > 1)
+        {
+            throw std::runtime_error("EncoderNet: " + path_ + ": the d_model-512 kernel runs d_model 512, 8 heads, d_ff "
+                                     "768 and up to 16 layers; it has d_model " + std::to_string(d) + ", "
+                                     + std::to_string(heads) + " heads, d_ff " + std::to_string(d_ff) + ", "
+                                     + std::to_string(layers) + " layers");
+        }
+    }
+    else if (wide_)
     {
         const int hd = heads > 0 ? d / heads : 0;
         if (d % 64 != 0 || d > kWideMaxD || d_ff % 64 != 0 || hd * heads != d || (hd != 16 && hd != 32 && hd != 64)
@@ -146,6 +158,48 @@ EncoderNet::EncoderNet(std::string path)
         const auto f32 = [&](const std::string& name, std::uint64_t n) {
             return static_cast<const float*>(dev(name, kF32, n));
         };
+        if (fused512_)
+        {
+            F512Params& F = f512_;
+            constexpr std::uint64_t dd = kF512D, ff = kF512Ff, hd = kF512D / kF512Heads;
+            F.layers = layers;
+            F.n_wdl = params_.n_wdl;
+            F.wdl_weight[0] = params_.wdl_weight[0];
+            F.wdl_weight[1] = params_.wdl_weight[1];
+            F.mlhq_from_q = params_.mlhq_from_q;
+            F.stm_colour = params_.stm_colour;
+            const auto i8 = [&](const std::string& name, std::uint64_t n_out, std::uint64_t k, const float** scale) {
+                *scale = f32(name + ".s", n_out);
+                return dev(name, kI32, n_out * k / 4);
+            };
+            F.embed_w = i8("embed.w", dd, 128, &F.embed_s);
+            F.embed_b = f32("embed.b", dd);
+            F.pos = f32("pos", 64 * dd);
+            F.pair_bias = dev("pair_bias", kF16, static_cast<std::uint64_t>(kF512Heads) * 64 * 64);
+            for (int l = 0; l < layers; ++l)
+            {
+                const std::string p = "l" + std::to_string(l) + ".";
+                F512Layer& L = F.layer[l];
+                L.norm1 = f32(p + "norm1", dd);
+                L.qkv = i8(p + "qkv", 3 * dd, dd, &L.qkv_s);
+                L.kfold = f32(p + "kfold", hd);
+                L.out = i8(p + "out", dd, dd, &L.out_s);
+                L.norm2 = f32(p + "norm2", dd);
+                L.up = i8(p + "up", 2 * ff, dd, &L.up_s);
+                L.down = i8(p + "down", dd, ff, &L.down_s);
+                L.gain = host_f32(p + "gain");
+            }
+            F.norm = f32("norm", dd);
+            F.pol_w = i8("pol.w", 2 * dd, dd, &F.pol_s);
+            F.pol_b = f32("pol.b", 2 * dd);
+            F.promo = dev("promo", kF16, 4 * dd);
+            F.vocab = static_cast<const std::uint16_t*>(dev("vocab", kU16, kPolicySize));
+            F.mlp1_w = dev("mlp1.w", kF16, n_mlp * dd * dd);
+            F.mlp1_b = f32("mlp1.b", n_mlp * dd);
+            F.mlp2_w = f32("mlp2.w", n_out * dd);
+            F.mlp2_b = f32("mlp2.b", n_out);
+            return;
+        }
         if (wide_)
         {
             WideParams& W = wide_params_;
@@ -294,11 +348,11 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
         }
         return cudaSuccess;
     }
-    EncoderParams p = params_;
+    void* x0 = nullptr;
     {
         std::lock_guard<std::mutex> lock(scratch_mu_);
         auto& [ptr, bytes] = scratch_[stream];
-        const std::size_t need = static_cast<std::size_t>(batch) * kX0ScratchBytes;
+        const std::size_t need = static_cast<std::size_t>(batch) * (fused512_ ? kF512X0Bytes : kX0ScratchBytes);
         if (bytes < need)
         {
             // cudaFree waits for the device, so the stream's earlier launches are done with the old buffer.
@@ -310,8 +364,16 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
             if (err != cudaSuccess) return err;
             bytes = grown;
         }
-        p.x0_scratch = ptr;
+        x0 = ptr;
     }
+    if (fused512_)
+    {
+        F512Params p = f512_;
+        p.x0_scratch = x0;
+        return launch_fused512_forward(p, d_packed, d_dense, batch, d_out, stream);
+    }
+    EncoderParams p = params_;
+    p.x0_scratch = x0;
     return launch_encoder_forward(p, d_packed, d_dense, batch, d_out, stream);
 }
 
