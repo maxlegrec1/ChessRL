@@ -1,5 +1,7 @@
 #include "net/encoder_net.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -248,6 +250,15 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
     if (batch <= 0) return cudaSuccess;
     if (wide_)
     {
+        // Batches run in chunks of CHESSRL_WIDE_CHUNK positions (64) through one scratch buffer: its activations stay
+        // in L2 (72 MB on an RTX 4090), where whole batches of 512 spill to memory (53k positions/s at 64 x 3 streams
+        // against 35k).
+        static const int chunk = [] {
+            const char* env = std::getenv("CHESSRL_WIDE_CHUNK");
+            const int v = env ? std::atoi(env) : 64;
+            return v > 0 ? v : 64;
+        }();
+        const int rows = std::min(batch, chunk);
         void* handle = nullptr;
         void* scratch = nullptr;
         {
@@ -260,7 +271,7 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
             }
             handle = h;
             auto& [ptr, bytes] = scratch_[stream];
-            const std::size_t need = wide_scratch_bytes(wide_params_, batch);
+            const std::size_t need = wide_scratch_bytes(wide_params_, rows);
             if (bytes < need)
             {
                 if (ptr) cudaFree(ptr);  // waits for the device: the stream's earlier launches are done with it
@@ -272,7 +283,16 @@ cudaError_t EncoderNet::forward(const mcts::single::SmallPackedPosition* d_packe
             }
             scratch = ptr;
         }
-        return launch_wide_forward(wide_params_, handle, scratch, d_packed, d_dense, batch, d_out, stream);
+        for (int start = 0; start < batch; start += chunk)
+        {
+            const int n = std::min(chunk, batch - start);
+            const cudaError_t err = launch_wide_forward(
+                wide_params_, handle, scratch, d_packed ? d_packed + start : nullptr,
+                d_dense ? d_dense + static_cast<std::size_t>(start) * kPackElems : nullptr, n,
+                static_cast<unsigned char*>(d_out) + static_cast<std::size_t>(start) * kRecordBytes, stream);
+            if (err != cudaSuccess) return err;
+        }
+        return cudaSuccess;
     }
     EncoderParams p = params_;
     {

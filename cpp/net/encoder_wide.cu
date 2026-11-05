@@ -3,11 +3,13 @@
 // shared memory, but the projections are large enough for cuBLAS: every projection is one FP16 multiply over all the
 // batch's tokens (64 per position), with FP16 sums as the trainer's multiplies (fp16_accumulation; CHESSRL_FP16_ACC=0:
 // FP32 sums). The residual stream is FP16, as in training (fp16_residual): the out and down projections add into it
-// as the multiply's beta = 1. Attention is cuBLAS too, per head over the batch's positions: QK-norm in place, scores
-// Q K^T in FP32, the pair bias and an exp2 softmax that writes P in FP16 over its own score rows, then P V. The rest
-// are small kernels: the input planes (net/planes.cuh, as the fused kernel), the norms (one warp per token, in FP32),
-// SwiGLU, the policy logits and the value heads (from the final norm's FP32 output). Output records as the fused
-// kernel's (encoder_params.hpp).
+// as the multiply's beta = 1. Attention for heads of 64 columns is one tensor-core kernel per (head, position)
+// (attention64: QK-norm, scores, softmax and P V without leaving the block); other head sizes go through cuBLAS per
+// head (QK-norm in place, FP32 scores, an exp2 softmax writing P over its own score rows, then P V). The rest are small
+// kernels: the input planes (net/planes.cuh, as the fused kernel), the norms (one warp per token, in FP32), SwiGLU,
+// the policy logits and the value heads (from the final norm's FP32 output). EncoderNet runs batches in chunks of
+// CHESSRL_WIDE_CHUNK positions (64) so the activations stay in L2. Output records as the fused kernel's
+// (encoder_params.hpp).
 
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -226,6 +228,165 @@ __global__ void softmax_rows(float* s, const __half* bias, int heads, std::size_
     p[lane + 32] = __float2half(e1 * inv);
 }
 
+// ---- Fused attention for heads of 64 columns, on tensor cores. One block of 4 warps per (head, position); warp w
+// takes queries 16w..16w+15. Q, K and V of the head go to shared memory (rows padded to 72 halves so ldmatrix's 8 rows
+// land on distinct banks) and are QK-normed there (a warp per row); then scores = Q K^T (mma m16n8k16, FP32 sums) in
+// registers plus the pair bias, an exp2 softmax over each row (its 4 lanes), P as the A operand of P V straight from
+// the scores' registers in FP16, and the output divided by the row sums into out [tokens][d]. No score buffer, one
+// launch per layer (the cuBLAS route below: a QK-norm pass, FP32 scores and P in memory, 2 x heads multiplies).
+constexpr int kAttHd = 64;
+constexpr int kAttLd = kAttHd + 8;
+
+__device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], const __half* p)
+{
+    const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(p));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(a));
+}
+
+__device__ __forceinline__ void ldsm_x4_t(uint32_t (&r)[4], const __half* p)
+{
+    const unsigned a = static_cast<unsigned>(__cvta_generic_to_shared(p));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(a));
+}
+
+__device__ __forceinline__ void mma16816(float (&c)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1)
+{
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ uint32_t pack_half2(float lo, float hi)
+{
+    const __half2 h = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const uint32_t*>(&h);
+}
+
+__global__ void __launch_bounds__(128) attention64(const __half* qkv, const float* qnorm, const float* knorm,
+                                                   const __half* bias, __half* out, int d)
+{
+    __shared__ __align__(16) __half sq[kTok * kAttLd];
+    __shared__ __align__(16) __half sk[kTok * kAttLd];
+    __shared__ __align__(16) __half sv[kTok * kAttLd];
+    const int head = blockIdx.x, b = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    const __half* base = qkv + static_cast<std::size_t>(b) * kTok * 3 * d + head * kAttHd;
+    for (int i = tid; i < 3 * kTok * (kAttHd / 8); i += blockDim.x)
+    {
+        const int part = i / (kTok * (kAttHd / 8)), rem = i % (kTok * (kAttHd / 8));
+        const int t = rem / (kAttHd / 8), c8 = rem % (kAttHd / 8);
+        const uint4 v = *reinterpret_cast<const uint4*>(base + static_cast<std::size_t>(t) * 3 * d + part * d + c8 * 8);
+        __half* dst = (part == 0 ? sq : part == 1 ? sk : sv) + t * kAttLd + c8 * 8;
+        *reinterpret_cast<uint4*>(dst) = v;
+    }
+    __syncthreads();
+    for (int r = warp; r < 2 * kTok; r += 4)  // QK-norm: q rows (qnorm carries log2(e) / 8), then k rows
+    {
+        auto* row = reinterpret_cast<__half2*>((r < kTok ? sq : sk) + (r & (kTok - 1)) * kAttLd);
+        const float2 v = __half22float2(row[lane]);
+        float ss = v.x * v.x + v.y * v.y;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, off);
+        const float inv = rsqrtf(ss / static_cast<float>(kAttHd) + kEps);
+        const float2 w = reinterpret_cast<const float2*>(r < kTok ? qnorm : knorm)[lane];
+        row[lane] = __floats2half2_rn(v.x * inv * w.x, v.y * inv * w.y);
+    }
+    __syncthreads();
+
+    const int g = lane >> 2, t = lane & 3, q0 = 16 * warp;
+    float s[8][4];
+#pragma unroll
+    for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) s[n][r] = 0.f;
+#pragma unroll
+    for (int kk = 0; kk < kAttHd / 16; ++kk)
+    {
+        uint32_t a[4];
+        ldsm_x4(a, sq + (q0 + (lane & 15)) * kAttLd + kk * 16 + ((lane >> 4) << 3));
+#pragma unroll
+        for (int n = 0; n < 8; n += 2)  // key tiles n, n + 1
+        {
+            uint32_t bb[4];
+            ldsm_x4(bb, sk + (8 * n + (lane & 7) + ((lane >> 4) << 3)) * kAttLd + kk * 16 + (((lane >> 3) & 1) << 3));
+            mma16816(s[n], a, bb[0], bb[1]);
+            mma16816(s[n + 1], a, bb[2], bb[3]);
+        }
+    }
+    // + pair bias; row max and sum over the quad holding each row (rows g and g + 8 of the warp's 16).
+    const __half* bh = bias + (static_cast<std::size_t>(head) * kTok + q0 + g) * kTok + 2 * t;
+    float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+    for (int n = 0; n < 8; ++n)
+    {
+        const float2 b0 = __half22float2(*reinterpret_cast<const __half2*>(bh + 8 * n));
+        const float2 b1 = __half22float2(*reinterpret_cast<const __half2*>(bh + 8 * kTok + 8 * n));
+        s[n][0] += b0.x;
+        s[n][1] += b0.y;
+        s[n][2] += b1.x;
+        s[n][3] += b1.y;
+        mx0 = fmaxf(mx0, fmaxf(s[n][0], s[n][1]));
+        mx1 = fmaxf(mx1, fmaxf(s[n][2], s[n][3]));
+    }
+#pragma unroll
+    for (int off = 1; off < 4; off <<= 1)
+    {
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, off));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, off));
+    }
+    float sum0 = 0.f, sum1 = 0.f;
+#pragma unroll
+    for (int n = 0; n < 8; ++n)
+    {
+        s[n][0] = exp2f(s[n][0] - mx0);
+        s[n][1] = exp2f(s[n][1] - mx0);
+        s[n][2] = exp2f(s[n][2] - mx1);
+        s[n][3] = exp2f(s[n][3] - mx1);
+        sum0 += s[n][0] + s[n][1];
+        sum1 += s[n][2] + s[n][3];
+    }
+#pragma unroll
+    for (int off = 1; off < 4; off <<= 1)
+    {
+        sum0 += __shfl_xor_sync(0xffffffffu, sum0, off);
+        sum1 += __shfl_xor_sync(0xffffffffu, sum1, off);
+    }
+
+    float o[8][4];
+#pragma unroll
+    for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) o[n][r] = 0.f;
+#pragma unroll
+    for (int j = 0; j < kTok / 16; ++j)  // keys 16j..16j+15: P's A fragment from score tiles 2j, 2j + 1
+    {
+        const uint32_t pa[4] = {pack_half2(s[2 * j][0], s[2 * j][1]), pack_half2(s[2 * j][2], s[2 * j][3]),
+                                pack_half2(s[2 * j + 1][0], s[2 * j + 1][1]),
+                                pack_half2(s[2 * j + 1][2], s[2 * j + 1][3])};
+#pragma unroll
+        for (int m = 0; m < 8; m += 2)  // output column tiles m, m + 1
+        {
+            uint32_t bb[4];
+            ldsm_x4_t(bb, sv + (16 * j + (lane & 7) + (((lane >> 3) & 1) << 3)) * kAttLd + 8 * m + ((lane >> 4) << 3));
+            mma16816(o[m], pa, bb[0], bb[1]);
+            mma16816(o[m + 1], pa, bb[2], bb[3]);
+        }
+    }
+    const float inv0 = 1.f / sum0, inv1 = 1.f / sum1;
+    __half* o0 = out + (static_cast<std::size_t>(b) * kTok + q0 + g) * d + head * kAttHd + 2 * t;
+    __half* o1 = o0 + static_cast<std::size_t>(8) * d;
+#pragma unroll
+    for (int m = 0; m < 8; ++m)
+    {
+        *reinterpret_cast<__half2*>(o0 + 8 * m) = __floats2half2_rn(o[m][0] * inv0, o[m][1] * inv0);
+        *reinterpret_cast<__half2*>(o1 + 8 * m) = __floats2half2_rn(o[m][2] * inv1, o[m][3] * inv1);
+    }
+}
+
 // g = silu(gate) * up, from up [tokens][2 ff] (gate columns first), as half2 pairs: n = tokens * ff / 2.
 __global__ void swiglu(const __half* up, __half* g, int ff, std::size_t n)
 {
@@ -412,29 +573,37 @@ cudaError_t launch_wide_forward(const WideParams& p, void* handle, void* scratch
         const WideLayer& L = p.layer[i];
         launch_rmsnorm<true>(p2, res, x0, L.gain, L.norm1, a, nullptr, n_tok, stream);
         if (!ok(linear16(h, a, L.qkv, big, n, d, 3 * d))) return cudaErrorUnknown;
-        qk_norm<<<blocks(n * heads * 32, kT), kT, 0, stream>>>(big, L.qnorm, L.knorm, d, heads, hd, static_cast<int>(n));
-        for (int head = 0; head < heads; ++head)
+        if (hd == kAttHd)
         {
-            // scores^T [key][query] = K [key][hd] . Q^T [hd][query]: row-major scores [query][key], per position.
-            if (!ok(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, kTok, kTok, hd, &one, big + d + head * hd,
-                                               CUDA_R_16F, 3 * d, tok3, big + head * hd, CUDA_R_16F, 3 * d, tok3, &zero,
-                                               s + static_cast<std::size_t>(head) * kTok * kTok, CUDA_R_32F, kTok,
-                                               static_cast<long long>(heads) * kTok * kTok, batch, CUBLAS_COMPUTE_32F,
-                                               CUBLAS_GEMM_DEFAULT_TENSOR_OP)))
-                return cudaErrorUnknown;
+            attention64<<<dim3(heads, batch), 128, 0, stream>>>(big, L.qnorm, L.knorm,
+                                                               static_cast<const __half*>(p.pair_bias), mid, d);
         }
-        softmax_rows<<<blocks(n * heads * 32, kT), kT, 0, stream>>>(s, static_cast<const __half*>(p.pair_bias), heads,
-                                                                     n * heads);
-        for (int head = 0; head < heads; ++head)
+        else
         {
-            // out^T [hd][query] = V^T [hd][key] . P^T [key][query]; P rows at a stride of 128 halves.
-            if (!ok(cublasGemmStridedBatchedEx(h, CUBLAS_OP_N, CUBLAS_OP_N, hd, kTok, kTok, &one, big + 2 * d + head * hd,
-                                               CUDA_R_16F, 3 * d, tok3,
-                                               reinterpret_cast<const __half*>(s + static_cast<std::size_t>(head) * kTok * kTok),
-                                               CUDA_R_16F, 2 * kTok, static_cast<long long>(heads) * kTok * kTok * 2, &zero,
-                                               mid + head * hd, CUDA_R_16F, d, static_cast<long long>(kTok) * d, batch,
-                                               CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP)))
-                return cudaErrorUnknown;
+            qk_norm<<<blocks(n * heads * 32, kT), kT, 0, stream>>>(big, L.qnorm, L.knorm, d, heads, hd, static_cast<int>(n));
+            for (int head = 0; head < heads; ++head)
+            {
+                // scores^T [key][query] = K [key][hd] . Q^T [hd][query]: row-major scores [query][key], per position.
+                if (!ok(cublasGemmStridedBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, kTok, kTok, hd, &one, big + d + head * hd,
+                                                   CUDA_R_16F, 3 * d, tok3, big + head * hd, CUDA_R_16F, 3 * d, tok3, &zero,
+                                                   s + static_cast<std::size_t>(head) * kTok * kTok, CUDA_R_32F, kTok,
+                                                   static_cast<long long>(heads) * kTok * kTok, batch, CUBLAS_COMPUTE_32F,
+                                                   CUBLAS_GEMM_DEFAULT_TENSOR_OP)))
+                    return cudaErrorUnknown;
+            }
+            softmax_rows<<<blocks(n * heads * 32, kT), kT, 0, stream>>>(s, static_cast<const __half*>(p.pair_bias), heads,
+                                                                         n * heads);
+            for (int head = 0; head < heads; ++head)
+            {
+                // out^T [hd][query] = V^T [hd][key] . P^T [key][query]; P rows at a stride of 128 halves.
+                if (!ok(cublasGemmStridedBatchedEx(h, CUBLAS_OP_N, CUBLAS_OP_N, hd, kTok, kTok, &one, big + 2 * d + head * hd,
+                                                   CUDA_R_16F, 3 * d, tok3,
+                                                   reinterpret_cast<const __half*>(s + static_cast<std::size_t>(head) * kTok * kTok),
+                                                   CUDA_R_16F, 2 * kTok, static_cast<long long>(heads) * kTok * kTok * 2, &zero,
+                                                   mid + head * hd, CUDA_R_16F, d, static_cast<long long>(kTok) * d, batch,
+                                                   CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP)))
+                    return cudaErrorUnknown;
+            }
         }
         if (!ok(linear16(h, mid, L.out, res, n, d, d, 1.f))) return cudaErrorUnknown;
         launch_rmsnorm<false>(p2, res, nullptr, 0.f, L.norm2, a, nullptr, n_tok, stream);
